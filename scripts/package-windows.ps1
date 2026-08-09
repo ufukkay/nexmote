@@ -80,6 +80,7 @@ $agentConfig = [ordered]@{
 $agentConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $agentPublish "appsettings.json") -Encoding UTF8
 
 Copy-Item -LiteralPath (Join-Path $root "installer\agent\install-agent.ps1") -Destination $agentPublish -Force
+Copy-Item -LiteralPath (Join-Path $root "installer\agent\install.bat") -Destination $agentPublish -Force
 Copy-Item -LiteralPath (Join-Path $root "installer\agent\uninstall-agent.ps1") -Destination $agentPublish -Force
 Copy-Item -LiteralPath (Join-Path $root "installer\agent\README.txt") -Destination $agentPublish -Force
 
@@ -94,6 +95,12 @@ Remove-Item -LiteralPath $agentZip, $technicianZip -Force -ErrorAction SilentlyC
 
 Compress-Archive -Path (Join-Path $agentPublish "*") -DestinationPath $agentZip -Force
 Compress-Archive -Path (Join-Path $technicianPublish "*") -DestinationPath $technicianZip -Force
+
+Write-Host "Building Native Windows MSI Installers..."
+$buildMsiScript = Join-Path $PSScriptRoot "build-msi.ps1"
+if (Test-Path $buildMsiScript) {
+    & powershell -ExecutionPolicy Bypass -File $buildMsiScript -ServerUrl $ServerUrl -EnrollmentKey $EnrollmentKey
+}
 
 Write-Host "Created $agentZip"
 Write-Host "Created $technicianZip"

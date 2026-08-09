@@ -42,10 +42,18 @@ if ($existing) {
 Write-Step "Kurulum klasörü hazırlanıyor: $installDir"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
+$programDataDir = Join-Path $env:ProgramData "NexMote\Agent"
+New-Item -ItemType Directory -Force -Path $programDataDir | Out-Null
+
 Write-Step "Dosyalar kopyalanıyor."
 Get-ChildItem -LiteralPath $sourceDir -Force |
     Where-Object { $_.Name -notin @("install-agent.ps1", "uninstall-agent.ps1", "README.txt") } |
     Copy-Item -Destination $installDir -Recurse -Force
+
+$sourceConfigPath = Join-Path $installDir "appsettings.json"
+if (Test-Path $sourceConfigPath) {
+    Copy-Item -LiteralPath $sourceConfigPath -Destination (Join-Path $programDataDir "appsettings.json") -Force
+}
 
 $exePath = Join-Path $installDir "NexMote.Agent.Windows.exe"
 if (-not (Test-Path $exePath)) {
@@ -60,9 +68,19 @@ Start-Service -Name $serviceName
 
 $trayPath = Join-Path $installDir "NexMote.Agent.Tray.exe"
 if (Test-Path $trayPath) {
-    Write-Step "Tray otomatik başlangıç kaydı yazılıyor."
-    New-Item -Path $runKey -Force | Out-Null
-    New-ItemProperty -Path $runKey -Name $runName -Value "`"$trayPath`"" -PropertyType String -Force | Out-Null
+    Write-Step "Tray başlangıç kayıtları yazılıyor."
+    
+    # HKLM & HKCU Run keys
+    New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Force | Out-Null
+    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $runName -Value "`"$trayPath`"" -PropertyType String -Force | Out-Null
+
+    New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $runName -Value "`"$trayPath`"" -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
+
+    # Scheduled Task for Logon
+    try {
+        & schtasks.exe /create /tn "NexMote Agent Tray" /tr "`"$trayPath`"" /sc onlogon /rl highest /f | Out-Null
+    } catch {}
 
     if ($desktopDir) {
         Write-Step "Masaüstü kısayolu oluşturuluyor."
@@ -77,7 +95,11 @@ if (Test-Path $trayPath) {
     }
 
     Write-Step "Tray uygulaması başlatılıyor."
+    try {
+        & schtasks.exe /run /tn "NexMote Agent Tray" | Out-Null
+    } catch {}
     Start-Process -FilePath $trayPath -ErrorAction SilentlyContinue
+    & explorer.exe "`"$trayPath`"" | Out-Null
 }
 
 Write-Step "NexMote Agent kuruldu ve başlatıldı."

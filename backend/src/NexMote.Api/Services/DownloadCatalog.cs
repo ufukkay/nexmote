@@ -5,32 +5,18 @@ public sealed class DownloadCatalog
     private readonly IReadOnlyList<DownloadPackage> _packages =
     [
         new(
-            "agent-tr",
-            "NexMote Agent",
-            "Hedef Windows cihaza kurulur. Turkce kurulum.",
-            "nexmote-agent-win-x64.msi",
-            "Turkce",
+            "agent",
+            "NexMote Agent Setup",
+            "Hedef Windows bilgisayarına kurulur. Kurulum sırasında dil seçeneği sunar.",
+            "NexMote-Agent-Setup.msi",
+            "Çok Dilli (Multi-Language)",
             true),
         new(
-            "technician-tr",
-            "NexMote Technician App",
-            "Teknisyen bilgisayarina kurulur. Turkce kurulum.",
-            "nexmote-technician-win-x64.msi",
-            "Turkce",
-            true),
-        new(
-            "agent-en",
-            "NexMote Agent",
-            "Installs on the target Windows device. English installer.",
-            "nexmote-agent-win-x64-en.msi",
-            "English",
-            true),
-        new(
-            "technician-en",
-            "NexMote Technician App",
-            "Installs on the technician computer. English installer.",
-            "nexmote-technician-win-x64-en.msi",
-            "English",
+            "technician",
+            "NexMote Technician Console",
+            "Teknisyen bilgisayarına kurulur. Kurulum sırasında dil seçeneği sunar.",
+            "NexMote-Technician-Setup.msi",
+            "Çok Dilli (Multi-Language)",
             true)
     ];
 

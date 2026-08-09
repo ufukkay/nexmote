@@ -7,27 +7,28 @@ namespace NexMote.Agent.Windows;
 public sealed class AgentClient
 {
     private readonly HttpClient _httpClient;
-    private readonly AgentOptions _options;
+    private readonly IOptionsMonitor<AgentOptions> _optionsMonitor;
 
-    public AgentClient(HttpClient httpClient, IOptions<AgentOptions> options)
+    public AgentClient(HttpClient httpClient, IOptionsMonitor<AgentOptions> optionsMonitor)
     {
         _httpClient = httpClient;
-        _options = options.Value;
-        _httpClient.BaseAddress = new Uri(_options.ServerUrl);
+        _optionsMonitor = optionsMonitor;
     }
 
     public async Task<DeviceIdentity> EnrollAsync(CancellationToken cancellationToken)
     {
+        var options = _optionsMonitor.CurrentValue;
         var request = new AgentEnrollmentRequest(
-            _options.EnrollmentKey,
+            options.EnrollmentKey,
             Environment.MachineName,
             Environment.UserDomainName,
             Environment.OSVersion.VersionString,
-            _options.AgentVersion,
+            options.AgentVersion,
             null,
-            _options.LocationCode);
+            options.LocationCode);
 
-        var response = await _httpClient.PostAsJsonAsync("/api/agents/enroll", request, cancellationToken);
+        var url = new Uri(new Uri(options.ServerUrl.TrimEnd('/') + "/"), "api/agents/enroll");
+        var response = await _httpClient.PostAsJsonAsync(url, request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         var body = await response.Content.ReadFromJsonAsync<AgentEnrollmentResponse>(cancellationToken);
@@ -41,6 +42,7 @@ public sealed class AgentClient
 
     public async Task SendHeartbeatAsync(DeviceIdentity identity, CancellationToken cancellationToken)
     {
+        var options = _optionsMonitor.CurrentValue;
         var request = new DeviceHeartbeatRequest(
             identity.AgentToken,
             $"{Environment.UserDomainName}\\{Environment.UserName}",
@@ -51,7 +53,8 @@ public sealed class AgentClient
             0,
             Environment.TickCount64 / 1000);
 
-        var response = await _httpClient.PostAsJsonAsync($"/api/agents/{identity.DeviceId}/heartbeat", request, cancellationToken);
+        var url = new Uri(new Uri(options.ServerUrl.TrimEnd('/') + "/"), $"api/agents/{identity.DeviceId}/heartbeat");
+        var response = await _httpClient.PostAsJsonAsync(url, request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 }

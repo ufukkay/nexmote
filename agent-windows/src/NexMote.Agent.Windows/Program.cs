@@ -18,6 +18,11 @@ try
         options.ServiceName = "NexMote Agent";
     });
 
+    var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
+    Directory.CreateDirectory(programDataDir);
+    var programDataConfig = Path.Combine(programDataDir, "appsettings.json");
+    builder.Configuration.AddJsonFile(programDataConfig, optional: true, reloadOnChange: true);
+
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
     builder.Services.AddHttpClient<AgentClient>();
     builder.Services.AddSingleton<DeviceIdentityStore>();

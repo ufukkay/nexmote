@@ -7,6 +7,8 @@ dist/
 *.user
 *.suo
 *.log
+*.err.log
+*.out.log
 appsettings.Development.json
 .dotnet/
 artifacts/
@@ -14,7 +16,18 @@ downloads/*.zip
 downloads/*.msi
 downloads/*.wixpdb
 dotnet-*.txt
+dotnet-*.log
+wix-*.log
+wix4-*.log
+msi-*.log
+package-*.log
+build-*.log
+zip-*.log
+agent-*.log
+api-*.log
+tray-*.log
 dotnet-install.ps1
 .tools/
 .tools-wix4/
 .wix/
+

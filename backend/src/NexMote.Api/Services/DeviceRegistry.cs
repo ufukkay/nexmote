@@ -1,35 +1,62 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using Microsoft.EntityFrameworkCore;
+using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
 
 namespace NexMote.Api.Services;
 
 public sealed class DeviceRegistry
 {
-    private readonly ConcurrentDictionary<Guid, DeviceRecord> _devices = new();
+    private readonly IDbContextFactory<AppDbContext> _dbFactory;
+
+    public DeviceRegistry(IDbContextFactory<AppDbContext> dbFactory)
+    {
+        _dbFactory = dbFactory;
+    }
 
     public AgentEnrollmentResponse Enroll(AgentEnrollmentRequest request)
     {
-        var existing = _devices.Values.FirstOrDefault(device =>
-            string.Equals(device.DeviceName, request.DeviceName, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(device.DomainName, request.DomainName, StringComparison.OrdinalIgnoreCase));
+        using var db = _dbFactory.CreateDbContext();
+
+        var existing = db.Devices.FirstOrDefault(device =>
+            device.DeviceName.ToLower() == request.DeviceName.ToLower() &&
+            device.DomainName.ToLower() == request.DomainName.ToLower());
 
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var record = existing is null
-            ? new DeviceRecord(Guid.NewGuid(), request.DeviceName, request.DomainName)
-            : existing;
+        var now = DateTimeOffset.UtcNow;
 
-        record.OperatingSystem = request.OperatingSystem;
-        record.AgentVersion = request.AgentVersion;
-        record.SerialNumber = request.SerialNumber;
-        record.LocationCode = request.LocationCode;
-        record.AgentToken = token;
-        record.LastSeenAt = DateTimeOffset.UtcNow;
+        if (existing is null)
+        {
+            existing = new DeviceEntity
+            {
+                Id = Guid.NewGuid(),
+                DeviceName = request.DeviceName,
+                DomainName = request.DomainName,
+                OperatingSystem = request.OperatingSystem,
+                AgentVersion = request.AgentVersion,
+                SerialNumber = request.SerialNumber,
+                LocationCode = request.LocationCode,
+                AgentToken = token,
+                LastSeenAt = now,
+                EnrolledAt = now
+            };
+            db.Devices.Add(existing);
+        }
+        else
+        {
+            existing.OperatingSystem = request.OperatingSystem;
+            existing.AgentVersion = request.AgentVersion;
+            existing.SerialNumber = request.SerialNumber;
+            existing.LocationCode = request.LocationCode;
+            existing.AgentToken = token;
+            existing.LastSeenAt = now;
+            db.Devices.Update(existing);
+        }
 
-        _devices[record.Id] = record;
+        db.SaveChanges();
 
         return new AgentEnrollmentResponse(
-            record.Id,
+            existing.Id,
             token,
             new Uri("/hubs/signaling", UriKind.Relative),
             TimeSpan.FromSeconds(20));
@@ -37,7 +64,10 @@ public sealed class DeviceRegistry
 
     public bool Heartbeat(Guid deviceId, DeviceHeartbeatRequest request)
     {
-        if (!_devices.TryGetValue(deviceId, out var device) || device.AgentToken != request.AgentToken)
+        using var db = _dbFactory.CreateDbContext();
+        var device = db.Devices.FirstOrDefault(d => d.Id == deviceId);
+
+        if (device is null || device.AgentToken != request.AgentToken)
         {
             return false;
         }
@@ -50,36 +80,44 @@ public sealed class DeviceRegistry
         device.DiskFreeMb = request.DiskFreeMb;
         device.UptimeSeconds = request.UptimeSeconds;
         device.LastSeenAt = DateTimeOffset.UtcNow;
+
+        db.SaveChanges();
         return true;
     }
 
     public IReadOnlyCollection<DeviceSummary> List()
     {
-        return _devices.Values
+        using var db = _dbFactory.CreateDbContext();
+        return db.Devices
+            .AsNoTracking()
+            .ToList()
             .OrderByDescending(device => device.LastSeenAt)
-            .Select(ToSummary)
+            .Select(device => ToSummary(device))
             .ToArray();
     }
 
     public DeviceSummary? Get(Guid deviceId)
     {
-        return _devices.TryGetValue(deviceId, out var device) ? ToSummary(device) : null;
+        using var db = _dbFactory.CreateDbContext();
+        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
+        return device is null ? null : ToSummary(device);
     }
 
     public bool ValidateAgent(Guid deviceId, string agentToken)
     {
-        return _devices.TryGetValue(deviceId, out var device) &&
-            string.Equals(device.AgentToken, agentToken, StringComparison.Ordinal);
+        using var db = _dbFactory.CreateDbContext();
+        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
+        return device is not null && string.Equals(device.AgentToken, agentToken, StringComparison.Ordinal);
     }
 
-    private static DeviceSummary ToSummary(DeviceRecord device)
+    private static DeviceSummary ToSummary(DeviceEntity device)
     {
         return new DeviceSummary(
             device.Id,
             device.DeviceName,
             device.DomainName,
-            device.OperatingSystem,
-            device.AgentVersion,
+            device.OperatingSystem ?? "Windows",
+            device.AgentVersion ?? "1.0.0",
             device.ActiveUser,
             device.IpAddress,
             device.LocationCode,

@@ -30,7 +30,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _signalingTimer;
     private readonly SynchronizationContext? _uiContext;
     private readonly RemoteScreenStreamer _streamer;
-    private readonly string _serverUrl;
+    private string _serverUrl;
 
     public TrayApplicationContext()
     {
@@ -48,6 +48,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_screenItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Paneli Ac", null, (_, _) => OpenWebPanel());
+        menu.Items.Add("Sunucu Ayarları...", null, (_, _) => ShowServerSettingsDialog());
         menu.Items.Add("Durumu Yenile", null, (_, _) => RefreshStatus(showBalloon: true));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Tray'i Kapat", null, (_, _) => ExitThread());
@@ -158,6 +159,54 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void ShowServerSettingsDialog()
+    {
+        var currentKey = AgentSettings.LoadEnrollmentKey();
+
+        using var form = new Form
+        {
+            Width = 460,
+            Height = 280,
+            Text = "NexMote Agent - Sunucu Ayarları",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            MinimizeBox = false
+        };
+
+        var lblUrl = new Label { Left = 20, Top = 15, Width = 400, Text = "Sunucu Adresi (Server URL):" };
+        var txtUrl = new TextBox { Left = 20, Top = 38, Width = 400, Text = _serverUrl };
+
+        var lblKey = new Label { Left = 20, Top = 80, Width = 400, Text = "Kayıt Anahtarı (Enrollment Key):" };
+        var txtKey = new TextBox { Left = 20, Top = 103, Width = 400, Text = currentKey };
+
+        var btnSave = new Button { Left = 210, Top = 165, Width = 100, Height = 35, Text = "Kaydet", DialogResult = DialogResult.OK };
+        var btnCancel = new Button { Left = 320, Top = 165, Width = 100, Height = 35, Text = "İptal", DialogResult = DialogResult.Cancel };
+
+        form.Controls.AddRange(new Control[] { lblUrl, txtUrl, lblKey, txtKey, btnSave, btnCancel });
+        form.AcceptButton = btnSave;
+        form.CancelButton = btnCancel;
+
+        if (form.ShowDialog() == DialogResult.OK)
+        {
+            var newUrl = txtUrl.Text.Trim().TrimEnd('/');
+            var newKey = txtKey.Text.Trim();
+
+            if (Uri.TryCreate(newUrl, UriKind.Absolute, out var parsedUri))
+            {
+                _serverUrl = newUrl;
+                AgentSettings.SaveSettings(newUrl, newKey);
+                _serverItem.Text = $"Sunucu: {newUrl}";
+                _streamer.UpdateServerUrl(newUrl);
+                MessageBox.Show($"Sunucu ayarları güncellendi:\nURL: {newUrl}\n\nYeni sunucuya bağlanılıyor...", "NexMote Agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show("Geçersiz sunucu adresi URL formatı.", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+
     protected override void ExitThreadCore()
     {
         _timer.Stop();
@@ -173,7 +222,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
 internal sealed class RemoteScreenStreamer : IAsyncDisposable
 {
-    private readonly string _serverUrl;
+    private string _serverUrl;
     private readonly Action<string> _setStatus;
     private HubConnection? _connection;
     private DeviceIdentity? _identity;
@@ -182,11 +231,25 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _starting;
     private bool _disposed;
     private bool _joinedDeviceGroup;
+    private int _activeDisplayIndex = 0;
+    private int _jpegQuality = 55;
 
     public RemoteScreenStreamer(string serverUrl, Action<string> setStatus)
     {
         _serverUrl = serverUrl;
         _setStatus = setStatus;
+    }
+
+    public void UpdateServerUrl(string newUrl)
+    {
+        _serverUrl = newUrl;
+        _joinedDeviceGroup = false;
+        if (_connection is not null)
+        {
+            _ = _connection.DisposeAsync();
+            _connection = null;
+        }
+        _ = EnsureStartedAsync();
     }
 
     public async Task EnsureStartedAsync()
@@ -242,6 +305,45 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             if (string.Equals(type, "remote-input", StringComparison.OrdinalIgnoreCase))
             {
                 HandleRemoteInput(payload);
+            }
+            else if (string.Equals(type, "select-display", StringComparison.OrdinalIgnoreCase))
+            {
+                if (int.TryParse(payload, out var idx))
+                {
+                    _activeDisplayIndex = idx;
+                    ScreenCapture.ResetHash();
+                    if (_activeSessionId.HasValue)
+                    {
+                        _ = SendScreenInfoAsync(_activeSessionId.Value);
+                    }
+                }
+            }
+            else if (string.Equals(type, "set-quality", StringComparison.OrdinalIgnoreCase))
+            {
+                if (int.TryParse(payload, out var q))
+                {
+                    _jpegQuality = Math.Clamp(q, 20, 95);
+                }
+            }
+            else if (string.Equals(type, "ping", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_activeSessionId.HasValue && _connection?.State == HubConnectionState.Connected)
+                {
+                    _ = _connection.InvokeAsync("SendSignal", _activeSessionId.Value, "pong", payload);
+                }
+            }
+            else if (string.Equals(type, "clipboard-text", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(payload))
+                    {
+                        Thread thread = new(() => Clipboard.SetText(payload));
+                        thread.SetApartmentState(ApartmentState.STA);
+                        thread.Start();
+                    }
+                }
+                catch { }
             }
         });
 
@@ -330,7 +432,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         try
         {
-            var info = JsonSerializer.Serialize(ScreenCapture.GetInfo());
+            var info = JsonSerializer.Serialize(ScreenCapture.GetInfo(_activeDisplayIndex));
             await _connection.InvokeAsync("SendSignal", sessionId, "screen-info", info);
         }
         catch (Exception ex)
@@ -374,14 +476,24 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private async Task StreamLoopAsync(Guid sessionId, CancellationToken cancellationToken)
     {
         _setStatus("goruntu gonderiliyor");
+        var forceIntervalTicks = Stopwatch.Frequency * 5; // force send frame every 5s even if unchanged
+        var lastSendTicks = 0L;
 
         while (!cancellationToken.IsCancellationRequested && _connection?.State == HubConnectionState.Connected)
         {
             try
             {
-                var frame = ScreenCapture.CaptureJpegBase64();
-                await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame", frame, cancellationToken);
-                await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
+                var now = Stopwatch.GetTimestamp();
+                var forceSend = (now - lastSendTicks) >= forceIntervalTicks;
+                var frame = ScreenCapture.CaptureJpegBase64(_activeDisplayIndex, _jpegQuality, forceSend);
+
+                if (frame is not null)
+                {
+                    await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame", frame, cancellationToken);
+                    lastSendTicks = now;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(40), cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -437,15 +549,52 @@ internal sealed record DeviceIdentity(Guid DeviceId, string AgentToken);
 
 internal static class ScreenCapture
 {
-    public static RemoteScreenInfo GetInfo()
+    private static ulong _lastFrameHash;
+
+    public static void ResetHash()
     {
-        var bounds = SystemInformation.VirtualScreen;
-        return new RemoteScreenInfo(bounds.Left, bounds.Top, bounds.Width, bounds.Height);
+        _lastFrameHash = 0;
     }
 
-    public static string CaptureJpegBase64()
+    public static RemoteScreenInfo GetInfo(int activeDisplayIndex = 0)
     {
-        var bounds = SystemInformation.VirtualScreen;
+        var virtualBounds = SystemInformation.VirtualScreen;
+        var screens = Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToArray();
+        var displays = new List<DisplayItem>
+        {
+            new DisplayItem(0, "Tüm Ekranlar", virtualBounds.Width, virtualBounds.Height)
+        };
+
+        for (int i = 0; i < screens.Length; i++)
+        {
+            var b = screens[i].Bounds;
+            displays.Add(new DisplayItem(i + 1, $"Ekran {i + 1}", b.Width, b.Height));
+        }
+
+        var bounds = GetDisplayBounds(activeDisplayIndex);
+        return new RemoteScreenInfo(bounds.Left, bounds.Top, bounds.Width, bounds.Height, activeDisplayIndex, displays.ToArray());
+    }
+
+    private static Rectangle GetDisplayBounds(int activeDisplayIndex)
+    {
+        if (activeDisplayIndex == 0)
+        {
+            return SystemInformation.VirtualScreen;
+        }
+
+        var screens = Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToArray();
+        var idx = activeDisplayIndex - 1;
+        if (idx >= 0 && idx < screens.Length)
+        {
+            return screens[idx].Bounds;
+        }
+
+        return SystemInformation.VirtualScreen;
+    }
+
+    public static string? CaptureJpegBase64(int activeDisplayIndex = 0, int quality = 55, bool forceSend = false)
+    {
+        var bounds = GetDisplayBounds(activeDisplayIndex);
         if (bounds.Width <= 0 || bounds.Height <= 0)
         {
             throw new InvalidOperationException("Aktif ekran bulunamadi.");
@@ -457,10 +606,32 @@ internal static class ScreenCapture
             graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
         }
 
-        using var resized = ResizeIfNeeded(capture, 1280);
+        using var resized = ResizeIfNeeded(capture, 1600);
         using var stream = new MemoryStream();
-        SaveJpeg(resized, stream, 45L);
-        return Convert.ToBase64String(stream.ToArray());
+        SaveJpeg(resized, stream, (long)quality);
+
+        var bytes = stream.ToArray();
+        var currentHash = ComputeFastHash(bytes);
+
+        if (!forceSend && currentHash == _lastFrameHash)
+        {
+            return null;
+        }
+
+        _lastFrameHash = currentHash;
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static ulong ComputeFastHash(byte[] bytes)
+    {
+        ulong hash = 14695981039346656037UL;
+        var step = Math.Max(1, bytes.Length / 512); // Sample up to 512 points for super fast hash
+        for (int i = 0; i < bytes.Length; i += step)
+        {
+            hash ^= bytes[i];
+            hash *= 1099511628211UL;
+        }
+        return hash;
     }
 
     private static Bitmap ResizeIfNeeded(Bitmap source, int maxWidth)
@@ -631,23 +802,93 @@ internal static class AgentSettings
 {
     public static string LoadServerUrl()
     {
-        var configPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (!File.Exists(configPath))
-        {
-            return "http://127.0.0.1:5080";
-        }
+        return LoadSetting("ServerUrl", "http://127.0.0.1:5080");
+    }
 
+    public static string LoadEnrollmentKey()
+    {
+        return LoadSetting("EnrollmentKey", "dev-enrollment-key");
+    }
+
+    private static string LoadSetting(string propertyName, string defaultValue)
+    {
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var serviceConfigPath = Path.Combine(programData, "NexMote", "Agent", "appsettings.json");
+        var baseConfigPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+
+        string? result = ReadPropertyFromFile(serviceConfigPath, propertyName);
+        if (!string.IsNullOrEmpty(result)) return result;
+
+        result = ReadPropertyFromFile(baseConfigPath, propertyName);
+        return string.IsNullOrEmpty(result) ? defaultValue : result;
+    }
+
+    private static string? ReadPropertyFromFile(string path, string propertyName)
+    {
+        if (!File.Exists(path)) return null;
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
-            return document.RootElement
-                .GetProperty("Agent")
-                .GetProperty("ServerUrl")
-                .GetString() ?? "http://127.0.0.1:5080";
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.TryGetProperty("Agent", out var agent) &&
+                agent.TryGetProperty(propertyName, out var prop))
+            {
+                return prop.GetString();
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    public static void SaveSettings(string newUrl, string newKey)
+    {
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var agentDir = Path.Combine(programData, "NexMote", "Agent");
+        Directory.CreateDirectory(agentDir);
+
+        var serviceConfigPath = Path.Combine(agentDir, "appsettings.json");
+        SaveConfigToPath(serviceConfigPath, newUrl, newKey);
+
+        var baseConfigPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+        SaveConfigToPath(baseConfigPath, newUrl, newKey);
+    }
+
+    private static void SaveConfigToPath(string path, string newUrl, string newKey)
+    {
+        try
+        {
+            var json = File.Exists(path) ? File.ReadAllText(path) : "{}";
+            var rootObj = string.IsNullOrWhiteSpace(json) || !json.Trim().StartsWith("{") ? new Dictionary<string, object>() : JsonSerializer.Deserialize<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
+
+            var agentDict = new Dictionary<string, object>
+            {
+                ["ServerUrl"] = newUrl,
+                ["EnrollmentKey"] = newKey,
+                ["AgentVersion"] = "0.1.0",
+                ["LocationCode"] = "OFFICE",
+                ["HeartbeatSeconds"] = 20
+            };
+
+            rootObj["Agent"] = agentDict;
+
+            if (!rootObj.ContainsKey("Logging"))
+            {
+                rootObj["Logging"] = new Dictionary<string, object>
+                {
+                    ["LogLevel"] = new Dictionary<string, string>
+                    {
+                        ["Default"] = "Information",
+                        ["Microsoft.Hosting.Lifetime"] = "Information"
+                    }
+                };
+            }
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            var updatedJson = JsonSerializer.Serialize(rootObj, options);
+            File.WriteAllText(path, updatedJson);
         }
         catch
         {
-            return "http://127.0.0.1:5080";
+            // Ignore write errors if permissions restricted
         }
     }
 }

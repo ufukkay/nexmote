@@ -30,12 +30,18 @@ export type DownloadPackage = {
   sizeBytes: number;
 };
 
+export type ServerSettings = {
+  serverUrl: string;
+  enrollmentKey: string;
+  heartbeatSeconds: number;
+  defaultLocationCode: string;
+};
+
 export async function listDevices(): Promise<DeviceSummary[]> {
   const response = await fetch("/api/devices");
   if (!response.ok) {
-    throw new Error("Cihaz listesi alinamadi.");
+    throw new Error("Cihaz listesi alınamadı.");
   }
-
   return response.json();
 }
 
@@ -50,7 +56,7 @@ export async function createRemoteSession(deviceId: string): Promise<RemoteSessi
 
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
-    throw new Error(detail?.message ?? "Baglanti oturumu olusturulamadi.");
+    throw new Error(detail?.message ?? "Bağlantı oturumu oluşturulamadı.");
   }
 
   return response.json();
@@ -59,7 +65,47 @@ export async function createRemoteSession(deviceId: string): Promise<RemoteSessi
 export async function listDownloads(): Promise<DownloadPackage[]> {
   const response = await fetch("/api/downloads");
   if (!response.ok) {
-    throw new Error("Indirme katalogu alinamadi.");
+    throw new Error("İndirme kataloğu alınamadı.");
+  }
+  return response.json();
+}
+
+export async function getServerSettings(): Promise<ServerSettings> {
+  const response = await fetch("/api/settings");
+  if (!response.ok) {
+    throw new Error("Sunucu ayarları alınamadı.");
+  }
+  return response.json();
+}
+
+export async function updateServerSettings(settings: ServerSettings): Promise<ServerSettings> {
+  const response = await fetch("/api/settings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(settings)
+  });
+
+  if (!response.ok) {
+    throw new Error("Ayarlar kaydedilemedi.");
+  }
+
+  return response.json();
+}
+
+export async function generatePackages(settings: ServerSettings): Promise<{ message: string; serverUrl: string }> {
+  const response = await fetch("/api/downloads/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(settings)
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Agent paketleri oluşturulamadı.");
   }
 
   return response.json();

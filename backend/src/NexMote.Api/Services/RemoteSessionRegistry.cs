@@ -1,20 +1,39 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using Microsoft.EntityFrameworkCore;
+using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
 
 namespace NexMote.Api.Services;
 
 public sealed class RemoteSessionRegistry
 {
-    private readonly ConcurrentDictionary<Guid, RemoteSessionRecord> _sessions = new();
+    private readonly IDbContextFactory<AppDbContext> _dbFactory;
+
+    public RemoteSessionRegistry(IDbContextFactory<AppDbContext> dbFactory)
+    {
+        _dbFactory = dbFactory;
+    }
 
     public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl)
     {
+        using var db = _dbFactory.CreateDbContext();
+
         var id = Guid.NewGuid();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
-        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+        var now = DateTimeOffset.UtcNow;
+        var expiresAt = now.AddMinutes(5);
 
-        _sessions[id] = new RemoteSessionRecord(id, deviceId, token, expiresAt);
+        var entity = new RemoteSessionEntity
+        {
+            Id = id,
+            DeviceId = deviceId,
+            Token = token,
+            CreatedAt = now,
+            ExpiresAt = expiresAt
+        };
+
+        db.RemoteSessions.Add(entity);
+        db.SaveChanges();
 
         var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}";
         return new CreateRemoteSessionResponse(id, deviceId, launchUri, expiresAt);
@@ -22,8 +41,14 @@ public sealed class RemoteSessionRegistry
 
     public RemoteSessionRecord? Get(Guid sessionId)
     {
-        return _sessions.TryGetValue(sessionId, out var session) && session.ExpiresAt > DateTimeOffset.UtcNow
-            ? session
-            : null;
+        using var db = _dbFactory.CreateDbContext();
+
+        var session = db.RemoteSessions.AsNoTracking().FirstOrDefault(s => s.Id == sessionId);
+        if (session is null || session.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            return null;
+        }
+
+        return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
     }
 }

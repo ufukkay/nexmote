@@ -32,16 +32,21 @@ if (-not (Test-Path $exePath)) {
 }
 
 Write-Step "nexmote:// protokol kaydı yazılıyor."
-$protocolRoot = "HKCU:\Software\Classes\nexmote"
-New-Item -Path $protocolRoot -Force | Out-Null
-Set-Item -Path $protocolRoot -Value "URL:NexMote Protocol"
-New-ItemProperty -Path $protocolRoot -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
+$targets = @("HKCU:\Software\Classes\nexmote", "HKLM:\SOFTWARE\Classes\nexmote")
 
-New-Item -Path "$protocolRoot\DefaultIcon" -Force | Out-Null
-Set-Item -Path "$protocolRoot\DefaultIcon" -Value "$exePath,1"
+foreach ($protocolRoot in $targets) {
+    try {
+        New-Item -Path $protocolRoot -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-Item -Path $protocolRoot -Value "URL:NexMote Protocol" -ErrorAction SilentlyContinue
+        New-ItemProperty -Path $protocolRoot -Name "URL Protocol" -Value "" -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
 
-New-Item -Path "$protocolRoot\shell\open\command" -Force | Out-Null
-Set-Item -Path "$protocolRoot\shell\open\command" -Value "`"$exePath`" `"%1`""
+        New-Item -Path "$protocolRoot\DefaultIcon" -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-Item -Path "$protocolRoot\DefaultIcon" -Value "$exePath,1" -ErrorAction SilentlyContinue
+
+        New-Item -Path "$protocolRoot\shell\open\command" -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-Item -Path "$protocolRoot\shell\open\command" -Value "`"$exePath`" `"%1`"" -ErrorAction SilentlyContinue
+    } catch {}
+}
 
 if ($desktopDir) {
     Write-Step "Masaüstü kısayolu oluşturuluyor."
