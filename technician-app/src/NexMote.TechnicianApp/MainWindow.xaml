@@ -72,6 +72,8 @@
             <DockPanel LastChildFill="True">
                 <!-- Right Action Buttons -->
                 <StackPanel x:Name="RemoteControlsPanel" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+                    <Button x:Name="SendFileBtn" Style="{StaticResource ToolBtn}" Content="📁 Dosya Gönder" Click="SendFileBtn_Click" ToolTip="Yerel bir dosyayı uzak cihaza gönderir" />
+                    <Button x:Name="CommandPanelToggleBtn" Style="{StaticResource ToolBtn}" Content="⌨️ Komut" Click="CommandPanelToggleBtn_Click" ToolTip="Uzak cihazda CMD/PowerShell komutu çalıştırır" />
                     <Button x:Name="ClipboardBtn" Style="{StaticResource ToolBtn}" Content="📋 Pano Gönder" Click="ClipboardBtn_Click" ToolTip="Yerel panodaki metni uzak cihaza aktarır" />
                     <Button x:Name="QualityToggleBtn" Style="{StaticResource ToolBtn}" Content="⚡ Kalite: Dengeli" Click="QualityToggleBtn_Click" />
                     <Button x:Name="StretchToggleBtn" Style="{StaticResource ToolBtn}" Content="📐 Ölçek: Sığdır" Click="StretchToggleBtn_Click" />
@@ -226,6 +228,58 @@
                         </StackPanel>
                     </Grid>
                 </ScrollViewer>
+
+                <Border x:Name="CommandPanel"
+                        Visibility="Collapsed"
+                        VerticalAlignment="Bottom"
+                        Background="#0B132B"
+                        BorderBrush="#1E293B"
+                        BorderThickness="0,1,0,0"
+                        Padding="16,12"
+                        Height="230">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,8">
+                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolBtn}" Content="✖ Kapat" Click="CommandPanelToggleBtn_Click" Padding="10,4" />
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Uzak Komut Çalıştır" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0" />
+                                <Button x:Name="ShellCmdBtn" Style="{StaticResource DisplayBtn}" Content="CMD" Background="#2563EB" Foreground="White" Click="ShellCmdBtn_Click" />
+                                <Button x:Name="ShellPsBtn" Style="{StaticResource DisplayBtn}" Content="PowerShell" Click="ShellPsBtn_Click" />
+                            </StackPanel>
+                        </DockPanel>
+
+                        <TextBox x:Name="CommandOutputBox"
+                                 Grid.Row="1"
+                                 IsReadOnly="True"
+                                 Background="#020617"
+                                 Foreground="#94A3B8"
+                                 BorderBrush="#1E293B"
+                                 BorderThickness="1"
+                                 FontFamily="Consolas"
+                                 FontSize="12"
+                                 TextWrapping="NoWrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 HorizontalScrollBarVisibility="Auto"
+                                 Margin="0,0,0,8" />
+
+                        <DockPanel Grid.Row="2" LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolBtn}" Background="#2563EB" Content="▶ Çalıştır" Click="RunCommandBtn_Click" Padding="14,6" />
+                            <TextBox x:Name="CommandInputBox"
+                                     Background="#0F172A"
+                                     Foreground="White"
+                                     BorderBrush="#334155"
+                                     BorderThickness="1"
+                                     Padding="8,6"
+                                     VerticalContentAlignment="Center"
+                                     KeyDown="CommandInputBox_KeyDown" />
+                        </DockPanel>
+                    </Grid>
+                </Border>
             </Grid>
 
         </Grid>

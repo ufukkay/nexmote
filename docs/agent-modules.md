@@ -19,6 +19,14 @@
 - Komut, cikti, exit code ve calistiran teknisyen audit log'a yazilir.
 - Serbest komut yetkisi sadece ileri rollerde acilir.
 
+**Durum (2026-08-09):** Temel calistirma ve audit kismi implemente edildi —
+`NexMote.Agent.Tray` `remote-command` sinyalini alip `CommandRunner` ile
+CMD/PowerShell calistiriyor, sonucu `command-result` sinyaliyle geri donduruyor
+ve `POST /api/audit/commands` ile backend'e (SQLite `CommandAudits` tablosu)
+yaziyor. Rol bazli yetkilendirme henuz yok (bkz. `security-model.md` "Su anki
+durum") — anahtari bilen her teknisyen serbest komut calistirabilir; bu, rol
+modeli implemente edilene kadar bilinen bir sinirlamadir.
+
 ## Device Control
 
 - Ilk fazda USB storage policy ac/kapat.

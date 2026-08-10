@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using NexMote.Api.Data;
 using NexMote.Api.Hubs;
@@ -38,22 +40,72 @@ using (var scope = app.Services.CreateScope())
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
     using var db = dbFactory.CreateDbContext();
     db.Database.EnsureCreated();
+
+    if (!db.ServerSettings.Any())
+    {
+        var bootstrapUrl = builder.Configuration["PublicUrl"] ?? "http://127.0.0.1:5080";
+        var bootstrapSetting = new ServerSettingEntity
+        {
+            ServerUrl = bootstrapUrl,
+            EnrollmentKey = builder.Configuration["Enrollment:Key"] ?? "dev-enrollment-key",
+            HeartbeatSeconds = 20,
+            DefaultLocationCode = "OFFICE",
+            TechnicianKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        db.ServerSettings.Add(bootstrapSetting);
+        db.SaveChanges();
+
+        var bootstrapPath = Path.Combine(AppContext.BaseDirectory, "nexmote-first-run-credentials.txt");
+        File.WriteAllText(bootstrapPath,
+            "NexMote ilk kurulum kimlik bilgileri" + Environment.NewLine +
+            "Bu dosya yalnizca bir kez, ilk baslatmada olusturulur. Guvenli bir yerde saklayin." + Environment.NewLine +
+            Environment.NewLine +
+            $"Teknisyen Erisim Anahtari (X-Technician-Key): {bootstrapSetting.TechnicianKey}" + Environment.NewLine +
+            $"Enrollment Anahtari: {bootstrapSetting.EnrollmentKey}" + Environment.NewLine);
+
+        app.Logger.LogWarning(
+            "Ilk kurulum tespit edildi. Teknisyen Erisim Anahtari uretildi ve {Path} dosyasina yazildi. " +
+            "Web panele/Technician App'e giris icin bu anahtar gereklidir.",
+            bootstrapPath);
+    }
 }
 
 app.UseCors("web");
+
+static bool IsTechnicianAuthorized(HttpContext http, AppDbContext db)
+{
+    var setting = db.ServerSettings.AsNoTracking().FirstOrDefault();
+    if (setting is null || string.IsNullOrEmpty(setting.TechnicianKey))
+    {
+        // Bootstrap window: no settings row yet means the app just started and
+        // hasn't finished provisioning. Startup always creates one before serving
+        // requests, so this only trips if something bypassed that step.
+        return true;
+    }
+
+    var provided = http.Request.Headers["X-Technician-Key"].FirstOrDefault();
+    if (string.IsNullOrEmpty(provided))
+    {
+        return false;
+    }
+
+    var providedBytes = Encoding.UTF8.GetBytes(provided);
+    var expectedBytes = Encoding.UTF8.GetBytes(setting.TechnicianKey);
+    return providedBytes.Length == expectedBytes.Length &&
+           CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
+}
 
 app.MapGet("/health", () => Results.Ok(new { product = "NexMote", status = "ok", at = DateTimeOffset.UtcNow }));
 
 app.MapPost("/api/agents/enroll", (AgentEnrollmentRequest request, DeviceRegistry devices, IDbContextFactory<AppDbContext> dbFactory, IConfiguration config) =>
 {
     using var db = dbFactory.CreateDbContext();
-    var setting = db.ServerSettings.FirstOrDefault();
+    var setting = db.ServerSettings.AsNoTracking().FirstOrDefault();
     var expectedKey = setting?.EnrollmentKey ?? config["Enrollment:Key"] ?? "dev-enrollment-key";
 
-    var isAuthorized = string.Equals(request.EnrollmentKey, expectedKey, StringComparison.Ordinal) ||
-                       string.Equals(request.EnrollmentKey, config["Enrollment:Key"], StringComparison.Ordinal) ||
-                       string.Equals(request.EnrollmentKey, "dev-enrollment-key", StringComparison.Ordinal) ||
-                       string.Equals(expectedKey, "dev-enrollment-key", StringComparison.Ordinal);
+    var isAuthorized = !string.IsNullOrEmpty(request.EnrollmentKey) &&
+                       string.Equals(request.EnrollmentKey, expectedKey, StringComparison.Ordinal);
 
     if (!isAuthorized)
     {
@@ -71,59 +123,64 @@ app.MapPost("/api/agents/{deviceId:guid}/heartbeat", (Guid deviceId, DeviceHeart
         : Results.NotFound(new { message = "Device not found or token invalid." });
 });
 
-app.MapGet("/api/devices", (DeviceRegistry devices) => Results.Ok(devices.List()));
+app.MapGet("/api/devices", (HttpContext http, DeviceRegistry devices, IDbContextFactory<AppDbContext> dbFactory) =>
+{
+    using var db = dbFactory.CreateDbContext();
+    if (!IsTechnicianAuthorized(http, db))
+    {
+        return Results.Unauthorized();
+    }
+
+    return Results.Ok(devices.List());
+});
 
 app.MapGet("/api/downloads", (DownloadCatalog downloads) => Results.Ok(downloads.List()));
 
-app.MapGet("/api/settings", (IDbContextFactory<AppDbContext> dbFactory, IConfiguration config, HttpContext http) =>
+app.MapGet("/api/settings", (HttpContext http, IDbContextFactory<AppDbContext> dbFactory) =>
 {
     using var db = dbFactory.CreateDbContext();
-    var setting = db.ServerSettings.FirstOrDefault();
-    if (setting is null)
+    if (!IsTechnicianAuthorized(http, db))
     {
-        var defaultUrl = config["PublicUrl"];
-        if (string.IsNullOrWhiteSpace(defaultUrl))
-        {
-            defaultUrl = $"{http.Request.Scheme}://{http.Request.Host}";
-        }
-
-        setting = new ServerSettingEntity
-        {
-            ServerUrl = defaultUrl,
-            EnrollmentKey = config["Enrollment:Key"] ?? "dev-enrollment-key",
-            HeartbeatSeconds = 20,
-            DefaultLocationCode = "OFFICE",
-            UpdatedAt = DateTimeOffset.UtcNow
-        };
-        db.ServerSettings.Add(setting);
-        db.SaveChanges();
+        return Results.Unauthorized();
     }
 
-    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode));
+    var setting = db.ServerSettings.AsNoTracking().First();
+    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode, setting.TechnicianKey));
 });
 
-app.MapPost("/api/settings", (ServerSettingsContract request, IDbContextFactory<AppDbContext> dbFactory) =>
+app.MapPost("/api/settings", (HttpContext http, ServerSettingsContract request, IDbContextFactory<AppDbContext> dbFactory) =>
 {
     using var db = dbFactory.CreateDbContext();
-    var setting = db.ServerSettings.FirstOrDefault();
-    if (setting is null)
+    if (!IsTechnicianAuthorized(http, db))
     {
-        setting = new ServerSettingEntity();
-        db.ServerSettings.Add(setting);
+        return Results.Unauthorized();
     }
 
+    var setting = db.ServerSettings.First();
     setting.ServerUrl = request.ServerUrl.TrimEnd('/');
     setting.EnrollmentKey = request.EnrollmentKey;
     setting.HeartbeatSeconds = Math.Max(5, request.HeartbeatSeconds);
     setting.DefaultLocationCode = request.DefaultLocationCode;
+    if (!string.IsNullOrWhiteSpace(request.TechnicianKey))
+    {
+        setting.TechnicianKey = request.TechnicianKey;
+    }
     setting.UpdatedAt = DateTimeOffset.UtcNow;
 
     db.SaveChanges();
-    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode));
+    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode, setting.TechnicianKey));
 });
 
-app.MapPost("/api/downloads/generate", (ServerSettingsContract request, IHostEnvironment env) =>
+app.MapPost("/api/downloads/generate", (HttpContext http, ServerSettingsContract request, IHostEnvironment env, IDbContextFactory<AppDbContext> dbFactory) =>
 {
+    using (var authDb = dbFactory.CreateDbContext())
+    {
+        if (!IsTechnicianAuthorized(http, authDb))
+        {
+            return Results.Unauthorized();
+        }
+    }
+
     try
     {
         var scriptPath = Path.GetFullPath(Path.Combine(env.ContentRootPath, "..", "..", "..", "scripts", "package-windows.ps1"));
@@ -159,14 +216,26 @@ app.MapGet("/downloads/{fileName}", (string fileName, DownloadCatalog downloads)
         : Results.File(file.Path, file.ContentType, file.FileName);
 });
 
-app.MapGet("/api/devices/{deviceId:guid}", (Guid deviceId, DeviceRegistry devices) =>
+app.MapGet("/api/devices/{deviceId:guid}", (Guid deviceId, HttpContext http, DeviceRegistry devices, IDbContextFactory<AppDbContext> dbFactory) =>
 {
+    using var db = dbFactory.CreateDbContext();
+    if (!IsTechnicianAuthorized(http, db))
+    {
+        return Results.Unauthorized();
+    }
+
     var device = devices.Get(deviceId);
     return device is null ? Results.NotFound() : Results.Ok(device);
 });
 
-app.MapPost("/api/remote-sessions", (CreateRemoteSessionRequest request, DeviceRegistry devices, RemoteSessionRegistry sessions, IConfiguration config, HttpContext http) =>
+app.MapPost("/api/remote-sessions", (CreateRemoteSessionRequest request, HttpContext http, DeviceRegistry devices, RemoteSessionRegistry sessions, IConfiguration config, IDbContextFactory<AppDbContext> dbFactory) =>
 {
+    using var db = dbFactory.CreateDbContext();
+    if (!IsTechnicianAuthorized(http, db))
+    {
+        return Results.Unauthorized();
+    }
+
     var device = devices.Get(request.DeviceId);
     if (device is null)
     {
@@ -184,7 +253,34 @@ app.MapPost("/api/remote-sessions", (CreateRemoteSessionRequest request, DeviceR
         serverUrl = $"{http.Request.Scheme}://{http.Request.Host}";
     }
 
-    return Results.Ok(sessions.Create(request.DeviceId, serverUrl));
+    var technicianKey = http.Request.Headers["X-Technician-Key"].FirstOrDefault() ?? string.Empty;
+    return Results.Ok(sessions.Create(request.DeviceId, serverUrl, technicianKey));
+});
+
+app.MapPost("/api/audit/commands", (CommandAuditEntry entry, DeviceRegistry devices, IDbContextFactory<AppDbContext> dbFactory) =>
+{
+    if (!devices.ValidateAgent(entry.DeviceId, entry.AgentToken))
+    {
+        return Results.Unauthorized();
+    }
+
+    using var db = dbFactory.CreateDbContext();
+    db.CommandAudits.Add(new CommandAuditEntity
+    {
+        Id = Guid.NewGuid(),
+        DeviceId = entry.DeviceId,
+        SessionId = entry.SessionId,
+        Shell = entry.Shell,
+        Command = entry.Command.Length > 4000 ? entry.Command[..4000] : entry.Command,
+        ExitCode = entry.ExitCode,
+        StdOutPreview = entry.StdOutPreview.Length > 2000 ? entry.StdOutPreview[..2000] : entry.StdOutPreview,
+        StdErrPreview = entry.StdErrPreview.Length > 2000 ? entry.StdErrPreview[..2000] : entry.StdErrPreview,
+        DurationMs = entry.DurationMs,
+        ExecutedAt = entry.ExecutedAt
+    });
+    db.SaveChanges();
+
+    return Results.NoContent();
 });
 
 app.MapHub<SignalingHub>("/hubs/signaling");

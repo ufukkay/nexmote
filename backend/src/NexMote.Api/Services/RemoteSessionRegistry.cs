@@ -14,7 +14,7 @@ public sealed class RemoteSessionRegistry
         _dbFactory = dbFactory;
     }
 
-    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl)
+    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl, string technicianKey)
     {
         using var db = _dbFactory.CreateDbContext();
 
@@ -35,7 +35,7 @@ public sealed class RemoteSessionRegistry
         db.RemoteSessions.Add(entity);
         db.SaveChanges();
 
-        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}";
+        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}&technicianKey={Uri.EscapeDataString(technicianKey)}";
         return new CreateRemoteSessionResponse(id, deviceId, launchUri, expiresAt);
     }
 

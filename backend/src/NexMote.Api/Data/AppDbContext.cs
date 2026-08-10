@@ -12,6 +12,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<DeviceEntity> Devices => Set<DeviceEntity>();
     public DbSet<RemoteSessionEntity> RemoteSessions => Set<RemoteSessionEntity>();
     public DbSet<ServerSettingEntity> ServerSettings => Set<ServerSettingEntity>();
+    public DbSet<CommandAuditEntity> CommandAudits => Set<CommandAuditEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +33,13 @@ public sealed class AppDbContext : DbContext
         modelBuilder.Entity<ServerSettingEntity>(entity =>
         {
             entity.HasKey(s => s.Id);
+        });
+
+        modelBuilder.Entity<CommandAuditEntity>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => c.DeviceId);
+            entity.HasIndex(c => c.ExecutedAt);
         });
     }
 }
@@ -113,6 +121,38 @@ public sealed class ServerSettingEntity
     [MaxLength(64)]
     public string DefaultLocationCode { get; set; } = "OFFICE";
 
+    [Required]
+    [MaxLength(128)]
+    public string TechnicianKey { get; set; } = string.Empty;
+
     public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class CommandAuditEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    public Guid DeviceId { get; set; }
+    public Guid SessionId { get; set; }
+
+    [Required]
+    [MaxLength(32)]
+    public string Shell { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(4000)]
+    public string Command { get; set; } = string.Empty;
+
+    public int ExitCode { get; set; }
+
+    [MaxLength(2000)]
+    public string StdOutPreview { get; set; } = string.Empty;
+
+    [MaxLength(2000)]
+    public string StdErrPreview { get; set; } = string.Empty;
+
+    public long DurationMs { get; set; }
+    public DateTimeOffset ExecutedAt { get; set; }
 }
 

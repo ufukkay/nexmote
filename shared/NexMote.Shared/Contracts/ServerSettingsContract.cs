@@ -4,4 +4,5 @@ public sealed record ServerSettingsContract(
     string ServerUrl,
     string EnrollmentKey,
     int HeartbeatSeconds,
-    string DefaultLocationCode);
+    string DefaultLocationCode,
+    string TechnicianKey = "");

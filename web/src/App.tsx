@@ -19,14 +19,18 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  clearStoredTechnicianKey,
   createRemoteSession,
   DeviceSummary,
   DownloadPackage,
   generatePackages,
   getServerSettings,
+  getStoredTechnicianKey,
   listDevices,
   listDownloads,
   ServerSettings,
+  setStoredTechnicianKey,
+  UnauthorizedError,
   updateServerSettings
 } from "./api";
 
@@ -40,7 +44,8 @@ export function App() {
     serverUrl: "http://127.0.0.1:5080",
     enrollmentKey: "dev-enrollment-key",
     heartbeatSeconds: 20,
-    defaultLocationCode: "OFFICE"
+    defaultLocationCode: "OFFICE",
+    technicianKey: ""
   });
 
   const [view, setView] = useState<View>("devices");
@@ -52,6 +57,37 @@ export function App() {
   const [generatingPackages, setGeneratingPackages] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
 
+  const [hasKey, setHasKey] = useState(() => Boolean(getStoredTechnicianKey()));
+  const [keyInput, setKeyInput] = useState("");
+  const [keyError, setKeyError] = useState("");
+  const [checkingKey, setCheckingKey] = useState(false);
+
+  function handleUnauthorized() {
+    clearStoredTechnicianKey();
+    setHasKey(false);
+    setKeyError("Anahtar geçersiz görünüyor. Sunucudaki nexmote-first-run-credentials.txt dosyasından veya Ayarlar'dan tekrar kontrol edin.");
+  }
+
+  async function submitKey(e: React.FormEvent) {
+    e.preventDefault();
+    setCheckingKey(true);
+    setKeyError("");
+    setStoredTechnicianKey(keyInput.trim());
+    try {
+      await listDevices();
+      setHasKey(true);
+    } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        clearStoredTechnicianKey();
+        setKeyError("Anahtar reddedildi. Sunucudaki nexmote-first-run-credentials.txt dosyasını kontrol edin.");
+      } else {
+        setKeyError(error instanceof Error ? error.message : "Sunucuya ulaşılamadı.");
+      }
+    } finally {
+      setCheckingKey(false);
+    }
+  }
+
   async function refresh() {
     setLoading(true);
     setStatus("Cihazlar güncelleniyor...");
@@ -59,6 +95,10 @@ export function App() {
       setDevices(await listDevices());
       setStatus("Cihaz listesi güncel");
     } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        handleUnauthorized();
+        return;
+      }
       setStatus(error instanceof Error ? error.message : "Beklenmeyen hata");
     } finally {
       setLoading(false);
@@ -78,6 +118,10 @@ export function App() {
       const data = await getServerSettings();
       setSettings(data);
     } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        handleUnauthorized();
+        return;
+      }
       console.error("Ayarlar yüklenemedi", error);
     }
   }
@@ -89,8 +133,15 @@ export function App() {
     try {
       const updated = await updateServerSettings(settings);
       setSettings(updated);
+      if (updated.technicianKey) {
+        setStoredTechnicianKey(updated.technicianKey);
+      }
       setStatus("Sunucu ayarları başarıyla kaydedildi.");
     } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        handleUnauthorized();
+        return;
+      }
       setStatus(error instanceof Error ? error.message : "Ayarlar kaydedilemedi.");
     } finally {
       setSavingSettings(false);
@@ -129,6 +180,10 @@ export function App() {
       window.location.href = session.launchUri;
       setStatus("NexMote Technician App başlatılıyor...");
     } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        handleUnauthorized();
+        return;
+      }
       setStatus(error instanceof Error ? error.message : "Bağlantı başlatılamadı");
     } finally {
       setConnectingId(null);
@@ -136,12 +191,15 @@ export function App() {
   }
 
   useEffect(() => {
+    if (!hasKey) {
+      return;
+    }
     refresh();
     refreshDownloads();
     loadSettings();
     const timer = window.setInterval(refresh, 10000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [hasKey]);
 
   const onlineCount = useMemo(() => devices.filter((d) => d.isOnline).length, [devices]);
   const offlineCount = useMemo(() => devices.filter((d) => !d.isOnline).length, [devices]);
@@ -173,6 +231,57 @@ export function App() {
         .some((value) => value!.toLowerCase().includes(term))
     );
   }, [devices, query, statusFilter]);
+
+  if (!hasKey) {
+    return (
+      <main className="shell" style={{ alignItems: "center", justifyContent: "center", display: "flex" }}>
+        <form
+          onSubmit={submitKey}
+          className="settings-card"
+          style={{ maxWidth: 420, width: "100%" }}
+        >
+          <div className="brand" style={{ marginBottom: 20 }}>
+            <div className="brand-icon">
+              <ShieldCheck size={24} />
+            </div>
+            <div className="brand-text">
+              <strong>NexMote</strong>
+              <span>Teknisyen Konsolu Girişi</span>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>
+              <Key size={18} />
+              <span>Teknisyen Erişim Anahtarı</span>
+            </label>
+            <input
+              type="password"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="Sunucudaki nexmote-first-run-credentials.txt dosyasından alın"
+              autoFocus
+              required
+            />
+            <small>
+              Sunucuyu ilk kez ayağa kaldırdığınızda bu anahtar otomatik üretilip sunucu makinesinde
+              <code> nexmote-first-run-credentials.txt</code> dosyasına yazılır. Daha sonra Sunucu Ayarları
+              sayfasından değiştirebilirsiniz.
+            </small>
+          </div>
+
+          <div className="form-actions">
+            <button type="submit" className="connectButton" disabled={checkingKey}>
+              <ShieldCheck size={16} />
+              {checkingKey ? "Doğrulanıyor..." : "Giriş Yap"}
+            </button>
+          </div>
+
+          {keyError && <div className="status-banner">{keyError}</div>}
+        </form>
+      </main>
+    );
+  }
 
   return (
     <main className="shell">
@@ -499,6 +608,24 @@ export function App() {
                     required
                   />
                   <small>Agent ilk kez kayıt olurken doğrulama için kullanılan gizli anahtar.</small>
+                </div>
+
+                <div className="form-group">
+                  <label>
+                    <ShieldCheck size={18} />
+                    <span>Teknisyen Erişim Anahtarı</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={settings.technicianKey}
+                    onChange={(e) => setSettings({ ...settings, technicianKey: e.target.value })}
+                    placeholder="Otomatik üretildi"
+                    required
+                  />
+                  <small>
+                    Bu paneli ve Technician App'i kullanan herkesin bilmesi gereken paylaşılan anahtar. Değiştirirseniz
+                    diğer teknisyenlerin de yeni anahtarı girmesi gerekir.
+                  </small>
                 </div>
 
                 <div className="form-actions">

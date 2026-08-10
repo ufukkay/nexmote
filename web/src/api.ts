@@ -35,10 +35,46 @@ export type ServerSettings = {
   enrollmentKey: string;
   heartbeatSeconds: number;
   defaultLocationCode: string;
+  technicianKey: string;
 };
 
+const TECHNICIAN_KEY_STORAGE = "nexmote_technician_key";
+
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Teknisyen erişim anahtarı geçersiz veya eksik.");
+    this.name = "UnauthorizedError";
+  }
+}
+
+export function getStoredTechnicianKey(): string {
+  return window.localStorage.getItem(TECHNICIAN_KEY_STORAGE) ?? "";
+}
+
+export function setStoredTechnicianKey(key: string) {
+  window.localStorage.setItem(TECHNICIAN_KEY_STORAGE, key);
+}
+
+export function clearStoredTechnicianKey() {
+  window.localStorage.removeItem(TECHNICIAN_KEY_STORAGE);
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    "X-Technician-Key": getStoredTechnicianKey(),
+    ...extra
+  };
+}
+
+async function throwIfUnauthorized(response: Response) {
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+}
+
 export async function listDevices(): Promise<DeviceSummary[]> {
-  const response = await fetch("/api/devices");
+  const response = await fetch("/api/devices", { headers: authHeaders() });
+  await throwIfUnauthorized(response);
   if (!response.ok) {
     throw new Error("Cihaz listesi alınamadı.");
   }
@@ -48,12 +84,11 @@ export async function listDevices(): Promise<DeviceSummary[]> {
 export async function createRemoteSession(deviceId: string): Promise<RemoteSession> {
   const response = await fetch("/api/remote-sessions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ deviceId })
   });
 
+  await throwIfUnauthorized(response);
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
     throw new Error(detail?.message ?? "Bağlantı oturumu oluşturulamadı.");
@@ -71,7 +106,8 @@ export async function listDownloads(): Promise<DownloadPackage[]> {
 }
 
 export async function getServerSettings(): Promise<ServerSettings> {
-  const response = await fetch("/api/settings");
+  const response = await fetch("/api/settings", { headers: authHeaders() });
+  await throwIfUnauthorized(response);
   if (!response.ok) {
     throw new Error("Sunucu ayarları alınamadı.");
   }
@@ -81,12 +117,11 @@ export async function getServerSettings(): Promise<ServerSettings> {
 export async function updateServerSettings(settings: ServerSettings): Promise<ServerSettings> {
   const response = await fetch("/api/settings", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(settings)
   });
 
+  await throwIfUnauthorized(response);
   if (!response.ok) {
     throw new Error("Ayarlar kaydedilemedi.");
   }
@@ -97,12 +132,11 @@ export async function updateServerSettings(settings: ServerSettings): Promise<Se
 export async function generatePackages(settings: ServerSettings): Promise<{ message: string; serverUrl: string }> {
   const response = await fetch("/api/downloads/generate", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(settings)
   });
 
+  await throwIfUnauthorized(response);
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
     throw new Error(detail?.detail ?? "Agent paketleri oluşturulamadı.");

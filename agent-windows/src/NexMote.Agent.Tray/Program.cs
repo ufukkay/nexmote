@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Net.Http.Json;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.ServiceProcess;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -233,6 +235,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _joinedDeviceGroup;
     private int _activeDisplayIndex = 0;
     private int _jpegQuality = 55;
+    private readonly Dictionary<Guid, (MemoryStream Stream, string FileName)> _activeTransfers = new();
 
     public RemoteScreenStreamer(string serverUrl, Action<string> setStatus)
     {
@@ -344,6 +347,14 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                     }
                 }
                 catch { }
+            }
+            else if (string.Equals(type, "file-chunk", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleFileChunk(payload);
+            }
+            else if (string.Equals(type, "remote-command", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = HandleRemoteCommandAsync(payload);
             }
         });
 
@@ -472,6 +483,140 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             _setStatus($"input uygulanamadi ({ex.Message})");
         }
     }
+
+    private void HandleFileChunk(string payload)
+    {
+        try
+        {
+            var chunk = JsonSerializer.Deserialize<FileTransferChunk>(payload);
+            if (chunk is null || _activeSessionId != chunk.SessionId)
+            {
+                return;
+            }
+
+            if (!_activeTransfers.TryGetValue(chunk.TransferId, out var state))
+            {
+                state = (new MemoryStream(), chunk.FileName);
+                _activeTransfers[chunk.TransferId] = state;
+            }
+
+            var bytes = Convert.FromBase64String(chunk.Base64Data);
+            state.Stream.Write(bytes, 0, bytes.Length);
+            _setStatus($"dosya aliniyor: {state.FileName} ({chunk.ChunkIndex + 1}/{chunk.TotalChunks})");
+
+            if (chunk.IsLast)
+            {
+                _activeTransfers.Remove(chunk.TransferId);
+                SaveIncomingFile(state.FileName, state.Stream.ToArray());
+                state.Stream.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _setStatus($"dosya alinamadi ({ex.Message})");
+        }
+    }
+
+    private void SaveIncomingFile(string fileName, byte[] data)
+    {
+        try
+        {
+            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var incomingDir = Path.Combine(programData, "NexMote", "Agent", "Incoming");
+            Directory.CreateDirectory(incomingDir);
+
+            var safeName = string.Join("_", fileName.Split(Path.GetInvalidFileNameChars()));
+            if (string.IsNullOrWhiteSpace(safeName))
+            {
+                safeName = "dosya.bin";
+            }
+
+            var targetPath = Path.Combine(incomingDir, safeName);
+            if (File.Exists(targetPath))
+            {
+                var ext = Path.GetExtension(safeName);
+                var baseName = Path.GetFileNameWithoutExtension(safeName);
+                targetPath = Path.Combine(incomingDir, $"{baseName}_{DateTime.Now:HHmmss}{ext}");
+            }
+
+            File.WriteAllBytes(targetPath, data);
+            _setStatus($"dosya alindi: {Path.GetFileName(targetPath)}");
+        }
+        catch (Exception ex)
+        {
+            _setStatus($"dosya kaydedilemedi ({ex.Message})");
+        }
+    }
+
+    private async Task HandleRemoteCommandAsync(string payload)
+    {
+        RemoteCommandRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<RemoteCommandRequest>(payload);
+        }
+        catch
+        {
+            return;
+        }
+
+        if (request is null || _activeSessionId != request.SessionId || _connection is null)
+        {
+            return;
+        }
+
+        var result = await CommandRunner.RunAsync(request.Shell, request.Command, 30000);
+
+        try
+        {
+            var response = new RemoteCommandResult(
+                request.SessionId,
+                request.RequestId,
+                result.ExitCode,
+                result.StdOut,
+                result.StdErr,
+                result.DurationMs,
+                result.TimedOut);
+
+            await _connection.InvokeAsync("SendSignal", request.SessionId, "command-result", JsonSerializer.Serialize(response));
+        }
+        catch
+        {
+            // Best-effort: the technician's UI will simply show no result for this request.
+        }
+
+        if (_identity is not null)
+        {
+            _ = PostCommandAuditAsync(request, result);
+        }
+    }
+
+    private async Task PostCommandAuditAsync(RemoteCommandRequest request, CommandRunResult result)
+    {
+        try
+        {
+            var entry = new CommandAuditEntry(
+                _identity!.DeviceId,
+                _identity.AgentToken,
+                request.SessionId,
+                request.Shell,
+                request.Command,
+                result.ExitCode,
+                Truncate(result.StdOut, 2000),
+                Truncate(result.StdErr, 2000),
+                result.DurationMs,
+                DateTimeOffset.UtcNow);
+
+            using var http = new HttpClient();
+            await http.PostAsJsonAsync($"{_serverUrl.TrimEnd('/')}/api/audit/commands", entry);
+        }
+        catch
+        {
+            // Audit delivery is best-effort; the command already ran and its result was returned to the technician.
+        }
+    }
+
+    private static string Truncate(string value, int max) => value.Length > max ? value[..max] : value;
 
     private async Task StreamLoopAsync(Guid sessionId, CancellationToken cancellationToken)
     {
@@ -795,6 +940,65 @@ internal static class InputInjector
         public uint Flags;
         public uint Time;
         public nint ExtraInfo;
+    }
+}
+
+internal sealed record CommandRunResult(int ExitCode, string StdOut, string StdErr, long DurationMs, bool TimedOut);
+
+internal static class CommandRunner
+{
+    public static async Task<CommandRunResult> RunAsync(string shell, string command, int timeoutMs)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var isPowerShell = string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase);
+        var fileName = isPowerShell ? "powershell.exe" : "cmd.exe";
+        var arguments = isPowerShell
+            ? $"-NoProfile -NonInteractive -Command \"{command.Replace("\"", "\\\"")}\""
+            : $"/c {command}";
+
+        var psi = new ProcessStartInfo(fileName, arguments)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        var stdOut = new StringBuilder();
+        var stdErr = new StringBuilder();
+        process.OutputDataReceived += (_, e) => { if (e.Data is not null) stdOut.AppendLine(e.Data); };
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) stdErr.AppendLine(e.Data); };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        var timedOut = false;
+        using var cts = new CancellationTokenSource(timeoutMs);
+        try
+        {
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            timedOut = true;
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+            }
+        }
+
+        stopwatch.Stop();
+        return new CommandRunResult(
+            timedOut ? -1 : process.ExitCode,
+            stdOut.ToString(),
+            stdErr.ToString(),
+            stopwatch.ElapsedMilliseconds,
+            timedOut);
     }
 }
 

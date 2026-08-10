@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.Win32;
 using NexMote.Shared.Contracts;
 
 namespace NexMote.TechnicianApp;
@@ -17,6 +18,9 @@ public partial class MainWindow : Window
 {
     private readonly HttpClient _http = new();
     private string _serverUrl = "http://192.168.0.104:5080";
+    private string _technicianKey = string.Empty;
+    private string _selectedShell = "cmd";
+    private string? _pendingCommandRequestId;
     private HubConnection? _connection;
     private Guid? _sessionId;
     private RemoteScreenInfo? _screenInfo;
@@ -43,14 +47,55 @@ public partial class MainWindow : Window
     private System.Windows.Threading.DispatcherTimer? _pingTimer;
     private long _pingSentTimestamp;
 
+    public bool CredentialsReady { get; private set; } = true;
+
     public MainWindow()
     {
         InitializeComponent();
         var launchedSession = ParseLaunchArguments();
         if (!launchedSession)
         {
+            if (!EnsureServerCredentials())
+            {
+                CredentialsReady = false;
+                return;
+            }
+
             SwitchToDeviceList();
             _ = LoadDevicesAsync();
+        }
+    }
+
+    private bool EnsureServerCredentials()
+    {
+        var stored = TechnicianAppSettings.Load();
+        if (stored is not null)
+        {
+            _serverUrl = stored.Value.ServerUrl;
+            _technicianKey = stored.Value.TechnicianKey;
+            ApplyTechnicianKeyHeader();
+            return true;
+        }
+
+        var prompt = new ServerLoginWindow(_serverUrl);
+        if (prompt.ShowDialog() != true)
+        {
+            return false;
+        }
+
+        _serverUrl = prompt.ServerUrl;
+        _technicianKey = prompt.TechnicianKey;
+        ApplyTechnicianKeyHeader();
+        TechnicianAppSettings.Save(_serverUrl, _technicianKey);
+        return true;
+    }
+
+    private void ApplyTechnicianKeyHeader()
+    {
+        _http.DefaultRequestHeaders.Remove("X-Technician-Key");
+        if (!string.IsNullOrEmpty(_technicianKey))
+        {
+            _http.DefaultRequestHeaders.Add("X-Technician-Key", _technicianKey);
         }
     }
 
@@ -88,10 +133,18 @@ public partial class MainWindow : Window
             query.TryGetValue("sessionId", out var sessionId);
             query.TryGetValue("token", out var token);
             query.TryGetValue("serverUrl", out var serverUrl);
+            query.TryGetValue("technicianKey", out var technicianKey);
 
             if (!string.IsNullOrWhiteSpace(serverUrl))
             {
                 _serverUrl = serverUrl;
+            }
+
+            if (!string.IsNullOrWhiteSpace(technicianKey))
+            {
+                _technicianKey = technicianKey;
+                ApplyTechnicianKeyHeader();
+                TechnicianAppSettings.Save(_serverUrl, _technicianKey);
             }
 
             SessionText.Text = $"Oturum: {sessionId}";
@@ -124,6 +177,15 @@ public partial class MainWindow : Window
                 DevicesDataGrid.ItemsSource = devices;
                 var onlineCount = devices.Count(d => d.IsOnline);
                 StatusText.Text = $"Toplam {devices.Count} cihaz bulundu ({onlineCount} online).";
+            }
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            StatusText.Text = "Teknisyen erişim anahtarı geçersiz. Lütfen tekrar girin.";
+            TechnicianAppSettings.Clear();
+            if (EnsureServerCredentials())
+            {
+                await LoadDevicesAsync();
             }
         }
         catch (Exception ex)
@@ -225,6 +287,12 @@ public partial class MainWindow : Window
                 if (string.Equals(type, "screen-frame", StringComparison.OrdinalIgnoreCase))
                 {
                     Dispatcher.Invoke(() => ShowFrame(payload));
+                    return;
+                }
+
+                if (string.Equals(type, "command-result", StringComparison.OrdinalIgnoreCase))
+                {
+                    Dispatcher.Invoke(() => ShowCommandResult(payload));
                 }
             });
 
@@ -740,6 +808,159 @@ public partial class MainWindow : Window
         base.OnClosed(e);
     }
 
+    private async void SendFileBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_sessionId is null || _connection?.State != HubConnectionState.Connected)
+        {
+            StatusText.Text = "Dosya göndermek için aktif bir oturum gerekir.";
+            return;
+        }
+
+        var dialog = new OpenFileDialog { Title = "Uzak cihaza gönderilecek dosyayı seçin" };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await SendFileAsync(dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Dosya gönderilemedi: {ex.Message}";
+        }
+    }
+
+    private async Task SendFileAsync(string filePath)
+    {
+        const int ChunkSize = 200 * 1024;
+        var fileInfo = new FileInfo(filePath);
+        var totalChunks = Math.Max(1, (int)Math.Ceiling(fileInfo.Length / (double)ChunkSize));
+        var transferId = Guid.NewGuid();
+        var sessionId = _sessionId!.Value;
+
+        await using var stream = File.OpenRead(filePath);
+        var buffer = new byte[ChunkSize];
+
+        for (var index = 0; index < totalChunks; index++)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(0, ChunkSize));
+            var chunk = new FileTransferChunk(
+                sessionId,
+                transferId,
+                fileInfo.Name,
+                fileInfo.Length,
+                index,
+                totalChunks,
+                Convert.ToBase64String(buffer, 0, read),
+                index == totalChunks - 1);
+
+            await _connection!.InvokeAsync("SendSignal", sessionId, "file-chunk", JsonSerializer.Serialize(chunk));
+            StatusText.Text = $"Dosya gönderiliyor: {fileInfo.Name} ({index + 1}/{totalChunks})";
+        }
+
+        StatusText.Text = $"Dosya gönderildi: {fileInfo.Name}";
+    }
+
+    private void CommandPanelToggleBtn_Click(object sender, RoutedEventArgs e)
+    {
+        CommandPanel.Visibility = CommandPanel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        if (CommandPanel.Visibility == Visibility.Visible)
+        {
+            SetSelectedShell(_selectedShell);
+            CommandInputBox.Focus();
+        }
+    }
+
+    private void ShellCmdBtn_Click(object sender, RoutedEventArgs e) => SetSelectedShell("cmd");
+
+    private void ShellPsBtn_Click(object sender, RoutedEventArgs e) => SetSelectedShell("powershell");
+
+    private void SetSelectedShell(string shell)
+    {
+        _selectedShell = shell;
+        var activeBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2563EB"));
+        var inactiveBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#0F172A"));
+        var inactiveForeground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#94A3B8"));
+
+        ShellCmdBtn.Background = shell == "cmd" ? activeBrush : inactiveBrush;
+        ShellCmdBtn.Foreground = shell == "cmd" ? Brushes.White : inactiveForeground;
+        ShellPsBtn.Background = shell == "powershell" ? activeBrush : inactiveBrush;
+        ShellPsBtn.Foreground = shell == "powershell" ? Brushes.White : inactiveForeground;
+    }
+
+    private void CommandInputBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            RunCommandBtn_Click(sender, e);
+        }
+    }
+
+    private async void RunCommandBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_sessionId is null || _connection?.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        var command = CommandInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(command))
+        {
+            return;
+        }
+
+        _pendingCommandRequestId = Guid.NewGuid().ToString("N");
+        CommandOutputBox.Text += $"> {command}{Environment.NewLine}";
+        CommandOutputBox.ScrollToEnd();
+        CommandInputBox.Clear();
+
+        var request = new RemoteCommandRequest(_sessionId.Value, _pendingCommandRequestId, _selectedShell, command);
+        try
+        {
+            await _connection.InvokeAsync("SendSignal", _sessionId.Value, "remote-command", JsonSerializer.Serialize(request));
+        }
+        catch (Exception ex)
+        {
+            CommandOutputBox.Text += $"[Gönderim hatası: {ex.Message}]{Environment.NewLine}";
+            CommandOutputBox.ScrollToEnd();
+        }
+    }
+
+    private void ShowCommandResult(string payload)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<RemoteCommandResult>(payload);
+            if (result is null || result.RequestId != _pendingCommandRequestId)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(result.StdOut))
+            {
+                CommandOutputBox.Text += result.StdOut + Environment.NewLine;
+            }
+
+            if (!string.IsNullOrEmpty(result.StdErr))
+            {
+                CommandOutputBox.Text += result.StdErr + Environment.NewLine;
+            }
+
+            CommandOutputBox.Text += result.TimedOut
+                ? $"[Zaman aşımı]{Environment.NewLine}{Environment.NewLine}"
+                : $"[Çıkış kodu: {result.ExitCode}] ({result.DurationMs} ms){Environment.NewLine}{Environment.NewLine}";
+
+            CommandOutputBox.ScrollToEnd();
+        }
+        catch (Exception ex)
+        {
+            CommandOutputBox.Text += $"[Sonuç okunamadı: {ex.Message}]{Environment.NewLine}";
+            CommandOutputBox.ScrollToEnd();
+        }
+    }
+
     private static Dictionary<string, string> ParseQuery(string query)
     {
         return query.TrimStart('?')
@@ -764,4 +985,67 @@ public sealed class DeviceModel
     public bool IsOnline { get; set; }
 
     public string StatusText => IsOnline ? "🟢 Online" : "🔴 Offline";
+}
+
+internal static class TechnicianAppSettings
+{
+    private static string SettingsPath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NexMote", "TechnicianApp", "settings.json");
+
+    public static (string ServerUrl, string TechnicianKey)? Load()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath))
+            {
+                return null;
+            }
+
+            var data = JsonSerializer.Deserialize<StoredSettings>(File.ReadAllText(SettingsPath));
+            if (data is null || string.IsNullOrWhiteSpace(data.ServerUrl) || string.IsNullOrWhiteSpace(data.TechnicianKey))
+            {
+                return null;
+            }
+
+            return (data.ServerUrl, data.TechnicianKey);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static void Save(string serverUrl, string technicianKey)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(SettingsPath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new StoredSettings(serverUrl, technicianKey)));
+        }
+        catch
+        {
+            // Best-effort persistence; the in-memory value is still usable for this run.
+        }
+    }
+
+    public static void Clear()
+    {
+        try
+        {
+            if (File.Exists(SettingsPath))
+            {
+                File.Delete(SettingsPath);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed record StoredSettings(string ServerUrl, string TechnicianKey);
 }
