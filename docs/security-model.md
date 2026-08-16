@@ -1,15 +1,17 @@
 # NexMote Guvenlik Modeli
 
-## Su anki durum (2026-08-09 itibariyla)
+## Su anki durum (2026-08-11 itibariyla)
 
-Asagidaki "Rol Modeli" bolumu hedef mimariyi anlatir; bugun kodda gercekten var olan
-tek katman, backend'in ilk baslatmada urettigi paylasilan **Teknisyen Erisim
-Anahtari**dir (`X-Technician-Key` HTTP basligi, bkz. ana `README.md`). Bu anahtar
-tum teknisyenler icin ortaktir ve rol ayrimi yapmaz — "Technician / Senior
-Technician / Admin / Auditor" rolleri, AD/Entra ID SSO ve MFA henuz
-implemente edilmedi (Faz 4). Kisa vadede kapatilan gercek bir acik: enrollment
-anahtari kontrolu daha once her kosulda `dev-enrollment-key`'i de kabul
-ediyordu, bu bypass kaldirildi.
+Asagidaki "Rol Modeli" bolumu hedef mimariyi anlatir; bugun kodda teknisyen
+uclarini (`/api/devices`, `/api/remote-sessions`, `/api/settings`,
+`/api/downloads/generate`) koruyan ayri bir kimlik dogrulama katmani yoktur —
+sunucuya agdan erisebilen herkes bu uclari kullanabilir. Bu bilincli bir
+tercih: NexMote su an kapali/guvenilir bir LAN'da, tek teknisyen/ekip
+tarafindan calistirilmak uzere tasarlaniyor. "Technician / Senior Technician /
+Admin / Auditor" rolleri, AD/Entra ID SSO ve MFA henuz implemente edilmedi
+(Faz 4). Agent tarafinda enrollment anahtari ve heartbeat/agent token kontrolu
+degismeden devam ediyor. NexMote genel internete acilacaksa bu uclarin onune
+bir kimlik dogrulama katmani (VPN, reverse-proxy auth veya SSO) eklenmelidir.
 
 ## Ilkeler
 

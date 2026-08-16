@@ -39,16 +39,13 @@ docs/                 Mimari, guvenlik ve yol haritasi
 
 Backend ASP.NET Core uygulamasi olarak IIS arkasinda calisacak sekilde tasarlanir. IIS uzerinde ASP.NET Core Hosting Bundle gerekir.
 
-## Teknisyen Erisim Anahtari
+## Erisim Kontrolu
 
-Backend ilk kez calistiginda otomatik olarak bir "Teknisyen Erisim Anahtari" uretir ve
-`nexmote-first-run-credentials.txt` dosyasina (backend'in calisma dizinine) yazar. Web
-panele ve Technician App'e giris icin bu anahtar gerekir; `X-Technician-Key` HTTP basligi
-olarak gonderilir. Anahtar daha sonra web panelin Sunucu Ayarlari sayfasindan
-degistirilebilir. Bu, `/api/devices`, `/api/remote-sessions`, `/api/settings` ve
-`/api/downloads/generate` uclarini korur; agent enrollment/heartbeat uclari kendi
-enrollment anahtari / agent token mekanizmasini kullanmaya devam eder. Detay icin
-`docs/security-model.md`.
+Web panel ve Technician App uclarinda (`/api/devices`, `/api/remote-sessions`,
+`/api/settings`, `/api/downloads/generate`) su an ayri bir teknisyen girisi yoktur;
+bu uclar sunucuya erisebilen herkese acik kabul edilir. Agent enrollment/heartbeat
+uclari kendi enrollment anahtari / agent token mekanizmasini kullanmaya devam eder.
+Detay icin `docs/security-model.md`.
 
 ## Kurulum Loglari
 

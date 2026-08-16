@@ -1,0 +1,10 @@
+﻿{
+    "agent":  {
+                  "version":  "0.5.4",
+                  "releaseNotes":  "Ajan ve Teknisyen iÃ§in etkileÅŸimli gÃ¼ncelleme onay diyaloglarÄ± ve modern arayÃ¼z eklendi."
+              },
+    "technician":  {
+                       "version":  "0.5.4",
+                       "releaseNotes":  "Teknisyen Konsolu Maximized pencere, KPI kartlarÄ±, dinamik arama ve SaaS veri tablosu tasarÄ±mÄ± uygulandÄ±."
+                   }
+}

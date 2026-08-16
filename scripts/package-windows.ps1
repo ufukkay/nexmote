@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$ServerUrl = "http://127.0.0.1:5080",
-    [string]$EnrollmentKey = "dev-enrollment-key",
+    [string]$ServerUrl = "https://nexmote.com",
+    [string]$EnrollmentKey = "4ed67db20bb0167a310129162ba8a831aae0d1d014032086fa67ebe416bb2ec7",
+    [string]$Version = "0.5.4",
+    [string]$AgentReleaseNotes = "Ajan ve Teknisyen için etkileşimli güncelleme onay diyalogları ve modern arayüz eklendi.",
+    [string]$TechnicianReleaseNotes = "Teknisyen Konsolu Maximized pencere, KPI kartları, dinamik arama ve SaaS veri tablosu tasarımı uygulandı.",
     [switch]$FrameworkDependent
 )
 
@@ -18,9 +21,10 @@ $downloads = Join-Path $root "downloads"
 $artifacts = Join-Path $root "artifacts\package"
 $agentPublish = Join-Path $artifacts "agent"
 $technicianPublish = Join-Path $artifacts "technician"
-$agentProject = Join-Path $root "agent-windows\src\NexMote.Agent.Windows\NexMote.Agent.Windows.csproj"
-$trayProject = Join-Path $root "agent-windows\src\NexMote.Agent.Tray\NexMote.Agent.Tray.csproj"
-$technicianProject = Join-Path $root "technician-app\src\NexMote.TechnicianApp\NexMote.TechnicianApp.csproj"
+$agentProject = Join-Path $root "src\NexMote.Agent.Windows\NexMote.Agent.Windows.csproj"
+$trayProject = Join-Path $root "src\NexMote.Agent.Tray\NexMote.Agent.Tray.csproj"
+$technicianProject = Join-Path $root "src\NexMote.TechnicianApp\NexMote.TechnicianApp.csproj"
+$installerAssets = Join-Path $root "scripts\installer-assets"
 
 function Assert-UnderRoot {
     param([string]$Path)
@@ -65,7 +69,6 @@ $agentConfig = [ordered]@{
     Agent = [ordered]@{
         ServerUrl = $ServerUrl
         EnrollmentKey = $EnrollmentKey
-        AgentVersion = "0.1.0"
         LocationCode = "LAB"
         HeartbeatSeconds = 20
     }
@@ -79,14 +82,18 @@ $agentConfig = [ordered]@{
 
 $agentConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $agentPublish "appsettings.json") -Encoding UTF8
 
-Copy-Item -LiteralPath (Join-Path $root "installer\agent\install-agent.ps1") -Destination $agentPublish -Force
-Copy-Item -LiteralPath (Join-Path $root "installer\agent\install.bat") -Destination $agentPublish -Force
-Copy-Item -LiteralPath (Join-Path $root "installer\agent\uninstall-agent.ps1") -Destination $agentPublish -Force
-Copy-Item -LiteralPath (Join-Path $root "installer\agent\README.txt") -Destination $agentPublish -Force
+if (Test-Path (Join-Path $installerAssets "agent")) {
+    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\install-agent.ps1") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\install.bat") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\uninstall-agent.ps1") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\README.txt") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
+}
 
-Copy-Item -LiteralPath (Join-Path $root "installer\technician\install-technician.ps1") -Destination $technicianPublish -Force
-Copy-Item -LiteralPath (Join-Path $root "installer\technician\uninstall-technician.ps1") -Destination $technicianPublish -Force
-Copy-Item -LiteralPath (Join-Path $root "installer\technician\README.txt") -Destination $technicianPublish -Force
+if (Test-Path (Join-Path $installerAssets "technician")) {
+    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\install-technician.ps1") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\uninstall-technician.ps1") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\README.txt") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
+}
 
 $agentZip = Join-Path $downloads "nexmote-agent-win-x64.zip"
 $technicianZip = Join-Path $downloads "nexmote-technician-win-x64.zip"
@@ -99,9 +106,22 @@ Compress-Archive -Path (Join-Path $technicianPublish "*") -DestinationPath $tech
 Write-Host "Building Native Windows MSI Installers..."
 $buildMsiScript = Join-Path $PSScriptRoot "build-msi.ps1"
 if (Test-Path $buildMsiScript) {
-    & powershell -ExecutionPolicy Bypass -File $buildMsiScript -ServerUrl $ServerUrl -EnrollmentKey $EnrollmentKey
+    & powershell -ExecutionPolicy Bypass -File $buildMsiScript -ServerUrl $ServerUrl -EnrollmentKey $EnrollmentKey -Version $Version
 }
+
+$versionsManifest = [ordered]@{
+    agent = [ordered]@{
+        version = $Version
+        releaseNotes = $AgentReleaseNotes
+    }
+    technician = [ordered]@{
+        version = $Version
+        releaseNotes = $TechnicianReleaseNotes
+    }
+}
+$versionsManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $downloads "versions.json") -Encoding UTF8
 
 Write-Host "Created $agentZip"
 Write-Host "Created $technicianZip"
+Write-Host "Wrote $(Join-Path $downloads 'versions.json') (version $Version)"
 Write-Host "Agent ServerUrl: $ServerUrl"

@@ -30,4 +30,6 @@ dotnet-install.ps1
 .tools/
 .tools-wix4/
 .wix/
-
+publish-linux/
+publish-linux.zip
+docs/server-credentials.md
