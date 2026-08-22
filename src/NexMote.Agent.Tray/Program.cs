@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -11,6 +12,9 @@ using System.Text.Json;
 using System.ServiceProcess;
 using Microsoft.AspNetCore.SignalR.Client;
 using NexMote.Shared.Contracts;
+using NexMote.Shared.Identity;
+using NexMote.Shared.Network;
+using NexMote.Shared.Telemetry;
 
 namespace NexMote.Agent.Tray;
 
@@ -22,6 +26,16 @@ internal static class Program
 {
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    public const int SW_RESTORE = 9;
 
     private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (IntPtr)(-4);
 
@@ -41,6 +55,8 @@ internal static class Program
     private static void Main(string[] args)
     {
         EnableDpiAwareness();
+        ApplicationConfiguration.Initialize();
+        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
         // SYSTEM yetkisinde çalışan Girdi Yardımcısı modu kontrolü (UAC tıklamaları için)
         if (args.Length > 0 && string.Equals(args[0], "--input-helper", StringComparison.OrdinalIgnoreCase))
@@ -49,18 +65,111 @@ internal static class Program
             return;
         }
 
+        // Giriş/Kilit Ekranı (Winlogon) için SYSTEM yetkili Canlı Oturum Yayıncısı modu
+        if (args.Length > 0 && string.Equals(args[0], "--system-session", StringComparison.OrdinalIgnoreCase))
+        {
+            RunSystemSessionStreamer();
+            return;
+        }
+
+        var explicitShow = args.Any(a => string.Equals(a, "--show", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "--dashboard", StringComparison.OrdinalIgnoreCase));
+        // AGENTS.md Madde 2: Ajan asla kendiliğinden Durum Panelini açmamalı; yalnızca kullanıcı bilerek
+        // --show/--dashboard ile başlattığında (kısayol, "Durum Panelini Aç" menüsü) açılır. Argümansız
+        // (veya --tray ile) her başlatma sessiz tepsi modunda kalmalı — bazı kurulum yollarının (örn.
+        // install.bat) hiç argüman geçmeden başlatabildiği göz önüne alınırsa, "bilinmeyen/eksik argüman ⇒
+        // panel aç" varsayımı bu kuralı ihlal eder.
+        var openDashboard = explicitShow;
+
         // Tekil Oturum Mutex Kontrolü (Her kullanıcı oturumunda en fazla 1 adet Agent Tray çalışabilir)
         var sessionId = Process.GetCurrentProcess().SessionId;
-        var mutexName = $@"Global\NexMote_Agent_Tray_SingleInstance_Session_{sessionId}";
-        using var mutex = new Mutex(true, mutexName, out var createdNew);
+        var mutexName = $@"Global\NexMote_Agent_Tray_Session_{sessionId}";
+        var eventName = $@"Global\NexMote_Agent_Tray_ShowDashboard_Session_{sessionId}";
+
+        Mutex? mutex = null;
+        bool createdNew;
+        try
+        {
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var mutexSecurity = new MutexSecurity();
+            mutexSecurity.AddAccessRule(new MutexAccessRule(worldSid, MutexRights.FullControl, AccessControlType.Allow));
+            mutex = MutexAcl.Create(true, mutexName, out createdNew, mutexSecurity);
+        }
+        catch
+        {
+            mutex = new Mutex(true, mutexName, out createdNew);
+        }
+
         if (!createdNew)
         {
-            // Bu oturumda zaten çalışan bir Agent Tray mevcut, ikinci kopya açılmadan sessizce sonlandırılır.
+            // Bu oturumda zaten çalışan bir Agent Tray mevcut.
+            // Kullanıcı masaüstü kısayoluna tıkladıysa çalışan kopyaya Durum Panelini açması için sinyal gönder.
+            if (openDashboard)
+            {
+                try
+                {
+                    if (EventWaitHandle.TryOpenExisting(eventName, out var showEvent))
+                    {
+                        showEvent.Set();
+                    }
+                }
+                catch { }
+            }
+            mutex?.Dispose();
+            return;
+        }
+
+        Application.Run(new TrayApplicationContext(openDashboardOnStart: openDashboard, eventName: eventName));
+        mutex?.Dispose();
+    }
+
+    private static void RunSystemSessionStreamer()
+    {
+        var sessionId = Process.GetCurrentProcess().SessionId;
+        var mutexName = $@"Global\NexMote_System_Session_Streamer_{sessionId}";
+
+        Mutex? mutex = null;
+        bool createdNew;
+        try
+        {
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var mutexSecurity = new MutexSecurity();
+            mutexSecurity.AddAccessRule(new MutexAccessRule(worldSid, MutexRights.FullControl, AccessControlType.Allow));
+            mutex = MutexAcl.Create(true, mutexName, out createdNew, mutexSecurity);
+        }
+        catch
+        {
+            // ACL API başarısız olursa (kısıtlı ortam vb.) düz Mutex'e düş — Main() ve InputHelperServer.Run()
+            // ile aynı fallback deseni. Bu olmadan --system-session süreci yakalanmamış bir istisnayla
+            // çöküyor, Worker'ın watchdog'u da her saniye yeniden başlatmayı deneyip sessiz bir crash-loop'a giriyordu.
+            mutex = new Mutex(true, mutexName, out createdNew);
+        }
+
+        if (!createdNew)
+        {
+            mutex?.Dispose();
             return;
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new TrayApplicationContext());
+        var serverUrl = AgentSettings.LoadServerUrl();
+        var streamer = new RemoteScreenStreamer(serverUrl, _ => { });
+
+        var timer = new System.Windows.Forms.Timer { Interval = 1000 };
+        timer.Tick += async (_, _) =>
+        {
+            DesktopHelper.AttachToActiveDesktop();
+            await streamer.EnsureStartedAsync();
+        };
+        timer.Start();
+
+        _ = streamer.EnsureStartedAsync();
+
+        // Girdi dinleyicisini de arka planda hazır tut
+        var helperThread = new Thread(InputHelperServer.Run) { IsBackground = true };
+        helperThread.Start();
+
+        Application.Run();
+        mutex?.Dispose();
     }
 }
 
@@ -145,32 +254,34 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon? _notifyIcon;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _serverItem;
-    private readonly ToolStripMenuItem _screenItem;
+    private string _screenStatus = "hazirlaniyor";
     private readonly System.Windows.Forms.Timer _timer;
     private readonly System.Windows.Forms.Timer _signalingTimer;
+    private readonly System.Windows.Forms.Timer _heartbeatTimer;
+    private readonly CpuUsageSampler _cpuSampler = new();
     private readonly SynchronizationContext? _uiContext;
     private readonly RemoteScreenStreamer _streamer;
+    private readonly EventWaitHandle? _showDashboardEvent;
+    private readonly CancellationTokenSource _cts = new();
     private DashboardForm? _dashboardForm;
     private string _serverUrl;
 
-    public TrayApplicationContext()
+    public TrayApplicationContext(bool openDashboardOnStart = false, string? eventName = null)
     {
+        var versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
         _uiContext = SynchronizationContext.Current;
         _serverUrl = AgentSettings.LoadServerUrl();
         _statusItem = new ToolStripMenuItem("Servis durumu: kontrol ediliyor") { Enabled = false };
         _serverItem = new ToolStripMenuItem($"Sunucu: {_serverUrl}") { Enabled = false };
-        _screenItem = new ToolStripMenuItem("Goruntu akisi: hazirlaniyor") { Enabled = false };
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("NexMote Agent").Enabled = false;
+        menu.Items.Add($"NexMote Agent v{versionStr}").Enabled = false;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_statusItem);
         menu.Items.Add(_serverItem);
-        menu.Items.Add(_screenItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("🛡️ Durum Panelini Aç", null, (_, _) => ShowDashboard());
         menu.Items.Add("🚀 Güncelleme Kontrol Et", null, async (_, _) => await CheckForAgentUpdatesAsync(isManual: true));
-        menu.Items.Add("Paneli Ac", null, (_, _) => OpenWebPanel());
         menu.Items.Add("Sunucu Ayarları...", null, (_, _) => ShowServerSettingsDialog());
         menu.Items.Add("Durumu Yenile", null, (_, _) => RefreshStatus(showBalloon: true));
         menu.Items.Add(new ToolStripSeparator());
@@ -181,7 +292,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _notifyIcon = new NotifyIcon
             {
                 Icon = IconHelper.GetAppIcon(),
-                Text = "NexMote Agent",
+                Text = $"NexMote Agent v{versionStr}",
                 ContextMenuStrip = menu,
                 Visible = true
             };
@@ -190,6 +301,40 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch
         {
             // Running in session without interactive tray (e.g. Lock screen / Winlogon)
+        }
+
+        if (!string.IsNullOrEmpty(eventName))
+        {
+            try
+            {
+                var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+                var eventSecurity = new EventWaitHandleSecurity();
+                eventSecurity.AddAccessRule(new EventWaitHandleAccessRule(worldSid, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+                _showDashboardEvent = EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, eventName, out _, eventSecurity);
+            }
+            catch
+            {
+                try { _showDashboardEvent = new EventWaitHandle(false, EventResetMode.AutoReset, eventName); } catch { }
+            }
+
+            if (_showDashboardEvent != null)
+            {
+                var token = _cts.Token;
+                Task.Run(() =>
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            if (_showDashboardEvent.WaitOne(500))
+                            {
+                                _uiContext?.Post(_ => ShowDashboard(), null);
+                            }
+                        }
+                        catch { break; }
+                    }
+                }, token);
+            }
         }
 
         _timer = new System.Windows.Forms.Timer
@@ -215,8 +360,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _signalingTimer.Start();
 
+        // 15 saniyelik periyodik canlılık (heartbeat) ve telemetri zamanlayıcısı
+        _heartbeatTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 500 // Açılışta derhal ilk heartbeat'i ilet
+        };
+        _heartbeatTimer.Tick += async (_, _) =>
+        {
+            await SendHeartbeatAsync();
+            _heartbeatTimer.Interval = 15000;
+        };
+        _heartbeatTimer.Start();
+
         RefreshStatus(showBalloon: false);
         _ = _streamer.EnsureStartedAsync();
+        _ = SendHeartbeatAsync();
+
+        if (openDashboardOnStart)
+        {
+            ShowDashboard();
+        }
 
         // Açılıştan 4 saniye sonra sessizce arka planda sunucu sürüm kontrolü yap
         _ = Task.Run(async () =>
@@ -226,12 +389,55 @@ internal sealed class TrayApplicationContext : ApplicationContext
         });
     }
 
+    private async Task SendHeartbeatAsync()
+    {
+        var identity = DeviceIdentityFile.Load();
+        if (identity is null)
+        {
+            var enrollKey = AgentSettings.LoadEnrollmentKey();
+            identity = await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
+            if (identity is null) return;
+        }
+
+        try
+        {
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(6));
+            var heartbeatUrl = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/heartbeat";
+            var mem = SystemTelemetry.GetMemoryMetrics();
+            var diskFree = SystemTelemetry.GetDiskFreeMb();
+            var ip = SystemTelemetry.GetPrimaryIPv4Address();
+            var cpu = _cpuSampler.GetAveragePercent();
+            var uptime = (long)TimeSpan.FromMilliseconds(Environment.TickCount64).TotalSeconds;
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
+
+            var req = new DeviceHeartbeatRequest(
+                identity.AgentToken,
+                ActiveUser: SessionUserResolver.GetActiveSessionUserName(),
+                IpAddress: ip,
+                CpuUsagePercent: cpu,
+                MemoryTotalMb: mem.TotalMb,
+                MemoryUsedMb: mem.UsedMb,
+                DiskFreeMb: diskFree,
+                UptimeSeconds: uptime,
+                AgentVersion: version);
+
+            var res = await http.PostAsJsonAsync(heartbeatUrl, req);
+            if (res.StatusCode == System.Net.HttpStatusCode.Unauthorized || res.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                DeviceIdentityFile.Delete();
+                var enrollKey = AgentSettings.LoadEnrollmentKey();
+                await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
+            }
+        }
+        catch { }
+    }
+
     private async Task CheckForAgentUpdatesAsync(bool isManual)
     {
         try
         {
             var checkUrl = $"{_serverUrl.TrimEnd('/')}/api/updates/check";
-            using var http = new HttpClient();
+            using var http = NexMoteHttp.CreateClient();
             var json = await http.GetStringAsync(checkUrl);
             using var doc = JsonDocument.Parse(json);
 
@@ -243,7 +449,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 var downloadUrl = urlProp.GetString();
                 var releaseNotes = agent.TryGetProperty("releaseNotes", out var notesProp) ? notesProp.GetString() : "Performans ve kararlılık iyileştirmesi.";
 
-                var runningVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.5.4";
+                var runningVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
                 var isNewer = Version.TryParse(latestVersion, out var latest) &&
                               Version.TryParse(runningVer, out var current) &&
                               latest > current;
@@ -273,29 +479,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
                 if (prompt == DialogResult.Yes && !string.IsNullOrEmpty(downloadUrl))
                 {
-                    if (_notifyIcon != null)
-                    {
-                        _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
-                        _notifyIcon.BalloonTipText = "Güncelleme paketi indiriliyor...";
-                        _notifyIcon.ShowBalloonTip(2000);
-                    }
-
-                    await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl);
-
-                    if (_notifyIcon != null)
-                    {
-                        _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
-                        _notifyIcon.BalloonTipText = "Güncelleme indirildi. Servis tarafından arka planda sessizce kurulacak.";
-                        _notifyIcon.ShowBalloonTip(3000);
-                    }
-
                     if (isManual)
                     {
-                        MessageBox.Show(
-                            "Güncelleme paketi başarıyla indirildi.\n\nNexMote Servisi birkaç saniye içinde güncellemeyi arka planda tamamlayacaktır.",
-                            "Güncelleme İndirildi",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Information);
+                        using var progressForm = new UpdateProgressForm(downloadUrl, latestVersion ?? "0.6.2");
+                        progressForm.ShowDialog();
+                    }
+                    else
+                    {
+                        if (_notifyIcon != null)
+                        {
+                            _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
+                            _notifyIcon.BalloonTipText = "Güncelleme paketi indiriliyor...";
+                            _notifyIcon.ShowBalloonTip(2000);
+                        }
+
+                        await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl);
+
+                        if (_notifyIcon != null)
+                        {
+                            _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
+                            _notifyIcon.BalloonTipText = "Güncelleme indirildi. Servis tarafından arka planda sessizce kurulacak.";
+                            _notifyIcon.ShowBalloonTip(3000);
+                        }
                     }
                 }
             }
@@ -315,16 +520,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshStatus(bool showBalloon)
     {
+        var versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
         var status = GetServiceStatus();
         _statusItem.Text = $"Servis durumu: {status}";
         if (_notifyIcon != null)
         {
             try
             {
-                _notifyIcon.Text = $"NexMote Agent - {status}";
+                _notifyIcon.Text = $"NexMote Agent v{versionStr} ({status})";
                 if (showBalloon)
                 {
-                    _notifyIcon.BalloonTipTitle = "NexMote Agent";
+                    _notifyIcon.BalloonTipTitle = $"NexMote Agent v{versionStr}";
                     _notifyIcon.BalloonTipText = $"Servis durumu: {status}";
                     _notifyIcon.ShowBalloonTip(2500);
                 }
@@ -362,22 +568,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         if (_dashboardForm is { IsDisposed: false })
         {
+            if (_dashboardForm.WindowState == FormWindowState.Minimized)
+            {
+                _dashboardForm.WindowState = FormWindowState.Normal;
+            }
             _dashboardForm.RefreshState();
             _dashboardForm.Show();
             _dashboardForm.BringToFront();
             _dashboardForm.Activate();
+            if (_dashboardForm.Handle != IntPtr.Zero)
+            {
+                Program.ShowWindow(_dashboardForm.Handle, Program.SW_RESTORE);
+                Program.SetForegroundWindow(_dashboardForm.Handle);
+            }
             return;
         }
 
         _dashboardForm = new DashboardForm(
             getServiceStatus: GetServiceStatus,
             getServerUrl: () => _serverUrl,
-            getScreenStatus: () => (_screenItem.Text ?? string.Empty).Replace("Goruntu akisi: ", string.Empty),
+            getScreenStatus: () => _screenStatus,
             getIsConnected: () => _streamer.IsConnected,
             openPanel: OpenWebPanel,
             openSettings: ShowServerSettingsDialog,
             refresh: () => RefreshStatus(showBalloon: false),
             checkUpdates: () => _ = CheckForAgentUpdatesAsync(isManual: true),
+            runNetworkTest: () => _streamer.RunServerNetworkTestAsync(),
             saveSettings: (newUrl, newKey) =>
             {
                 _serverUrl = newUrl;
@@ -386,22 +602,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _streamer.UpdateServerUrl(newUrl);
             });
         _dashboardForm.Show();
+        _dashboardForm.WindowState = FormWindowState.Normal;
+        _dashboardForm.BringToFront();
+        _dashboardForm.Activate();
+        if (_dashboardForm.Handle != IntPtr.Zero)
+        {
+            Program.ShowWindow(_dashboardForm.Handle, Program.SW_RESTORE);
+            Program.SetForegroundWindow(_dashboardForm.Handle);
+        }
     }
 
     private void UpdateScreenStatus(string status)
     {
-        void Apply()
-        {
-            _screenItem.Text = $"Goruntu akisi: {status}";
-        }
-
-        if (_uiContext is null)
-        {
-            Apply();
-            return;
-        }
-
-        _uiContext.Post(_ => Apply(), null);
+        _screenStatus = status;
     }
 
     private void OpenWebPanel()
@@ -409,12 +622,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         try
         {
             var uri = new Uri(_serverUrl);
-            var panelUri = $"{uri.Scheme}://{uri.Host}:5173/";
+            var isLocal = string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase);
+            var panelUri = isLocal
+                ? $"{uri.Scheme}://{uri.Host}:5173/"
+                : _serverUrl.TrimEnd('/');
             Process.Start(new ProcessStartInfo(panelUri) { UseShellExecute = true });
         }
         catch
         {
-            MessageBox.Show("Panel adresi acilamadi.", "NexMote Agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show("Panel adresi açılamadı.", "NexMote Agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -435,10 +652,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Font = new Font("Segoe UI", 9F)
         };
 
-        var lblUrl = new Label { Left = 20, Top = 15, Width = 400, Text = "Sunucu Adresi (Server URL):", ForeColor = Color.FromArgb(0x64, 0x74, 0x8B) };
+        var lblUrl = new Label { Left = 20, Top = 15, Width = 400, Text = "Sunucu adresi:", ForeColor = Color.FromArgb(0x64, 0x74, 0x8B) };
         var txtUrl = new TextBox { Left = 20, Top = 38, Width = 400, Text = _serverUrl, BorderStyle = BorderStyle.FixedSingle };
 
-        var lblKey = new Label { Left = 20, Top = 80, Width = 400, Text = "Kayıt Anahtarı (Enrollment Key):", ForeColor = Color.FromArgb(0x64, 0x74, 0x8B) };
+        var lblKey = new Label { Left = 20, Top = 80, Width = 400, Text = "Kayıt anahtarı:", ForeColor = Color.FromArgb(0x64, 0x74, 0x8B) };
         var txtKey = new TextBox { Left = 20, Top = 103, Width = 400, Text = currentKey, BorderStyle = BorderStyle.FixedSingle };
 
         var btnSave = new Button { Left = 210, Top = 165, Width = 100, Height = 35, Text = "Kaydet", DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(0x25, 0x63, 0xEB), ForeColor = Color.White };
@@ -452,26 +669,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         if (form.ShowDialog() == DialogResult.OK)
         {
-            var newUrl = txtUrl.Text.Trim().TrimEnd('/');
+            var newUrl = NexMoteHttp.NormalizeUrl(txtUrl.Text);
             var newKey = txtKey.Text.Trim();
 
-            if (Uri.TryCreate(newUrl, UriKind.Absolute, out var parsedUri))
-            {
-                _serverUrl = newUrl;
-                AgentSettings.SaveSettings(newUrl, newKey);
-                _serverItem.Text = $"Sunucu: {newUrl}";
-                _streamer.UpdateServerUrl(newUrl);
-                MessageBox.Show($"Sunucu ayarları güncellendi:\nURL: {newUrl}\n\nYeni sunucuya bağlanılıyor...", "NexMote Agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
-            {
-                MessageBox.Show("Geçersiz sunucu adresi URL formatı.", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            _serverUrl = newUrl;
+            AgentSettings.SaveSettings(newUrl, newKey);
+            _serverItem.Text = $"Sunucu: {newUrl}";
+            _streamer.UpdateServerUrl(newUrl);
+            MessageBox.Show($"Sunucu ayarları güncellendi:\nURL: {newUrl}\n\nYeni sunucuya bağlanılıyor...", "NexMote Agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 
     protected override void ExitThreadCore()
     {
+        _cts.Cancel();
+        _cts.Dispose();
+        _showDashboardEvent?.Dispose();
         _timer.Stop();
         _signalingTimer.Stop();
         _timer.Dispose();
@@ -515,14 +728,10 @@ internal sealed class DashboardForm : Form
     private readonly Action _openSettings;
     private readonly Action _refresh;
     private readonly Action _checkUpdates;
+    private readonly Func<Task<NetworkSpeedResult>> _runNetworkTest;
     private readonly Action<string, string> _saveSettings;
 
     // UI Controls
-    private Panel _alertBanner = null!;
-    private Label _alertTitle = null!;
-    private Label _alertSubtitle = null!;
-    private Button _alertActionBtn = null!;
-
     private Panel _heroCard = null!;
     private Label _heroIcon = null!;
     private Label _heroTitle = null!;
@@ -545,6 +754,7 @@ internal sealed class DashboardForm : Form
         Action openSettings,
         Action refresh,
         Action checkUpdates,
+        Func<Task<NetworkSpeedResult>> runNetworkTest,
         Action<string, string> saveSettings)
     {
         _getServiceStatus = getServiceStatus;
@@ -555,15 +765,16 @@ internal sealed class DashboardForm : Form
         _openSettings = openSettings;
         _refresh = refresh;
         _checkUpdates = checkUpdates;
+        _runNetworkTest = runNetworkTest;
         _saveSettings = saveSettings;
 
-        Text = "NexMote";
-        ClientSize = new Size(880, 620);
+        Text = "NexMote Agent Durum Paneli";
+        ClientSize = new Size(880, 560);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = false;
         MinimizeBox = true;
-        BackColor = Color.White;
+        BackColor = SurfaceColor;
         Font = new Font("Segoe UI", 9F);
         Icon = IconHelper.GetAppIcon();
 
@@ -575,10 +786,15 @@ internal sealed class DashboardForm : Form
     {
         Controls.Clear();
 
-        var versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.5.4";
+        var versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
 
         // 1. TOP HEADER BAR
         var headerPanel = new Panel { Left = 0, Top = 0, Width = 880, Height = 56, BackColor = Color.White };
+        headerPanel.Paint += (_, e) =>
+        {
+            using var pen = new Pen(BorderColor);
+            e.Graphics.DrawLine(pen, 0, 55, 880, 55);
+        };
         
         var logoIcon = new Label
         {
@@ -587,7 +803,7 @@ internal sealed class DashboardForm : Form
             ForeColor = Color.White,
             BackColor = AccentBlue,
             Left = 24,
-            Top = 13,
+            Top = 12,
             Width = 32,
             Height = 32,
             TextAlign = ContentAlignment.MiddleCenter
@@ -613,79 +829,33 @@ internal sealed class DashboardForm : Form
 
         var brandTitle = new Label
         {
-            Text = "NexMote",
-            Font = new Font("Segoe UI", 15F, FontStyle.Bold),
+            Text = "NexMote Agent",
+            Font = new Font("Segoe UI", 14F, FontStyle.Bold),
             ForeColor = TextDark,
-            Left = 64,
-            Top = 14,
+            Left = 66,
+            Top = 13,
             AutoSize = true
         };
 
         var versionLabel = new Label
         {
-            Text = $"v{versionStr} • Ajan v{versionStr}",
-            Font = new Font("Segoe UI", 8.5F),
+            Text = $"v{versionStr}",
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = TextMuted,
-            Left = 470,
-            Top = 20,
+            Left = 230,
+            Top = 18,
             AutoSize = true
-        };
-
-        var langTr = new Label
-        {
-            Text = "TR",
-            Font = new Font("Segoe UI", 8F, FontStyle.Bold),
-            ForeColor = Color.White,
-            BackColor = Color.FromArgb(0x02, 0x84, 0xC7),
-            Left = 640,
-            Top = 16,
-            Width = 32,
-            Height = 24,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Cursor = Cursors.Hand
-        };
-
-        var langEn = new Label
-        {
-            Text = "EN",
-            Font = new Font("Segoe UI", 8F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(0x47, 0x55, 0x69),
-            BackColor = Color.White,
-            Left = 676,
-            Top = 16,
-            Width = 32,
-            Height = 24,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Cursor = Cursors.Hand
-        };
-        langEn.Paint += (_, e) =>
-        {
-            using var pen = new Pen(BorderColor);
-            e.Graphics.DrawRectangle(pen, 0, 0, langEn.Width - 1, langEn.Height - 1);
-        };
-
-        var darkToggle = new Label
-        {
-            Text = "🌙",
-            Font = new Font("Segoe UI", 10F),
-            ForeColor = TextMuted,
-            Left = 716,
-            Top = 16,
-            Width = 24,
-            Height = 24,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Cursor = Cursors.Hand
         };
 
         _agentStatusPill = new Label
         {
-            Text = "🖧 Ajan: 🗹 • Çalışıyor",
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Text = "• Ajan Aktif",
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(0x16, 0xA3, 0x4A),
             BackColor = Color.FromArgb(0xF0, 0xFD, 0xF4),
-            Left = 746,
+            Left = 704,
             Top = 14,
-            Width = 122,
+            Width = 150,
             Height = 28,
             TextAlign = ContentAlignment.MiddleCenter
         };
@@ -695,154 +865,66 @@ internal sealed class DashboardForm : Form
             e.Graphics.DrawRectangle(pen, 0, 0, _agentStatusPill.Width - 1, _agentStatusPill.Height - 1);
         };
 
-        headerPanel.Controls.AddRange(new Control[] { logoIcon, brandTitle, versionLabel, langTr, langEn, darkToggle, _agentStatusPill });
+        headerPanel.Controls.AddRange(new Control[] { logoIcon, brandTitle, versionLabel, _agentStatusPill });
 
-        // 2. ALERT BANNER (ORANGE WARNING / GREEN READY)
-        _alertBanner = new Panel { Left = 24, Top = 60, Width = 832, Height = 50, BackColor = WarnBg };
-        _alertBanner.Paint += (_, e) =>
-        {
-            var isConn = _getIsConnected();
-            var bColor = isConn ? Color.FromArgb(0xBB, 0xF7, 0xD0) : Color.FromArgb(0xFE, 0xD7, 0xAA);
-            var barColor = isConn ? Color.FromArgb(0x16, 0xA3, 0x4A) : WarnOrange;
-            using var pen = new Pen(bColor);
-            e.Graphics.DrawRectangle(pen, 0, 0, _alertBanner.Width - 1, _alertBanner.Height - 1);
-
-            using var brush = new SolidBrush(barColor);
-            e.Graphics.FillRectangle(brush, 0, 0, 4, _alertBanner.Height);
-        };
-
-        var alertIcon = new Label
-        {
-            Text = "📶",
-            Font = new Font("Segoe UI", 13F),
-            ForeColor = WarnOrange,
-            Left = 14,
-            Top = 12,
-            Width = 28,
-            Height = 26,
-            TextAlign = ContentAlignment.MiddleCenter
-        };
-
-        _alertTitle = new Label
-        {
-            Text = "SignalR Bağlantısı Kesildi",
-            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
-            ForeColor = WarnOrange,
-            Left = 46,
-            Top = 6,
-            Width = 620,
-            Height = 18
-        };
-
-        _alertSubtitle = new Label
-        {
-            Text = "Sunucuyla gerçek zamanlı iletişim kurulamıyor. Envanter ve metrik verileri gönderilemez.",
-            Font = new Font("Segoe UI", 8.5F),
-            ForeColor = Color.FromArgb(0xC2, 0x41, 0x0C),
-            Left = 46,
-            Top = 26,
-            Width = 620,
-            Height = 18
-        };
-
-        _alertActionBtn = new Button
-        {
-            Text = "Bağlan",
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
-            ForeColor = Color.White,
-            BackColor = WarnOrange,
-            FlatStyle = FlatStyle.Flat,
-            Left = 736,
-            Top = 9,
-            Width = 84,
-            Height = 32,
-            Cursor = Cursors.Hand
-        };
-        _alertActionBtn.FlatAppearance.BorderSize = 0;
-        _alertActionBtn.Click += (_, _) => RefreshState();
-
-        _alertBanner.Controls.AddRange(new Control[] { alertIcon, _alertTitle, _alertSubtitle, _alertActionBtn });
-
-        // 3. TAB NAVIGATION ROW
-        var tabRow = new Panel { Left = 24, Top = 118, Width = 832, Height = 34, BackColor = Color.White };
-        
-        var tabActive = new Label
-        {
-            Text = "Bağlantı",
-            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
-            ForeColor = AccentBlue,
-            Left = 0,
-            Top = 4,
-            Width = 72,
-            Height = 26,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Cursor = Cursors.Hand
-        };
-        
-        var activeLine = new Panel { Left = 0, Top = 29, Width = 72, Height = 3, BackColor = AccentBlue };
-
-        var tab2 = CreateTabLabel("Talepler", 85);
-        var tab3 = CreateTabLabel("Envanter", 165);
-        var tab4 = CreateTabLabel("Hız Testi", 245);
-        var tab5 = CreateTabLabel("Yapılandırma", 325);
-
-        tabRow.Controls.AddRange(new Control[] { tabActive, activeLine, tab2, tab3, tab4, tab5 });
-
-        // 4. HERO STATUS CARD
-        _heroCard = new Panel { Left = 24, Top = 158, Width = 832, Height = 68, BackColor = DangerBg };
+        // 2. HERO PROTECTION STATUS CARD
+        _heroCard = new Panel { Left = 24, Top = 72, Width = 832, Height = 74, BackColor = SuccessBg };
         _heroCard.Paint += (_, e) =>
         {
             var isConn = _getIsConnected();
-            var bColor = isConn ? Color.FromArgb(0xDC, 0xFC, 0xE7) : Color.FromArgb(0xFF, 0xE4, 0xE6);
+            var bColor = isConn ? Color.FromArgb(0xBB, 0xF7, 0xD0) : Color.FromArgb(0xFE, 0xD7, 0xAA);
+            var barColor = isConn ? SuccessGreen : WarnOrange;
             using var pen = new Pen(bColor);
             e.Graphics.DrawRectangle(pen, 0, 0, _heroCard.Width - 1, _heroCard.Height - 1);
+
+            using var brush = new SolidBrush(barColor);
+            e.Graphics.FillRectangle(brush, 0, 0, 5, _heroCard.Height);
         };
 
         _heroIcon = new Label
         {
-            Text = "✕",
-            Font = new Font("Segoe UI", 14F, FontStyle.Bold),
-            ForeColor = DangerRed,
-            BackColor = Color.FromArgb(0xFF, 0xE4, 0xE6),
+            Text = "🛡️",
+            Font = new Font("Segoe UI", 18F),
+            ForeColor = SuccessGreen,
             Left = 16,
             Top = 14,
-            Width = 40,
-            Height = 40,
+            Width = 44,
+            Height = 44,
             TextAlign = ContentAlignment.MiddleCenter
         };
 
         _heroTitle = new Label
         {
-            Text = "Bağlı Değil",
-            Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+            Text = "Sistem Korunuyor ve Canlı Akışa Hazır",
+            Font = new Font("Segoe UI", 11.5F, FontStyle.Bold),
             ForeColor = TextDark,
-            Left = 68,
-            Top = 13,
+            Left = 70,
+            Top = 14,
             Width = 600,
-            Height = 22
+            Height = 24
         };
 
         _heroSubtitle = new Label
         {
-            Text = "Sunucuya bağlı değil Lütfen sunucu URL'sini ve bağlantı ayarlarını kontrol edin",
-            Font = new Font("Segoe UI", 8.5F),
-            ForeColor = Color.FromArgb(0xE1, 0x1D, 0x48),
-            Left = 68,
-            Top = 36,
+            Text = "Sunucu ve SignalR bağlantısı aktif. Uzaktan destek oturumları kabul edilebilir.",
+            Font = new Font("Segoe UI", 9F),
+            ForeColor = TextMuted,
+            Left = 70,
+            Top = 40,
             Width = 600,
             Height = 20
         };
 
         _heroActionBtn = new Button
         {
-            Text = "⚡ Bağlan",
+            Text = "🔄 Yenile",
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.White,
             BackColor = AccentBlue,
             FlatStyle = FlatStyle.Flat,
-            Left = 728,
-            Top = 16,
-            Width = 92,
+            Left = 716,
+            Top = 18,
+            Width = 100,
             Height = 36,
             Cursor = Cursors.Hand
         };
@@ -851,9 +933,9 @@ internal sealed class DashboardForm : Form
 
         _heroCard.Controls.AddRange(new Control[] { _heroIcon, _heroTitle, _heroSubtitle, _heroActionBtn });
 
-        // 5. TWO SIDE-BY-SIDE MAIN CARDS
-        var cardLeft = CreateCard(24, 236, 406, 360);
-        var cardRight = CreateCard(450, 236, 406, 360);
+        // 3. TWO MAIN CARDS
+        var cardLeft = CreateCard(24, 160, 406, 370);
+        var cardRight = CreateCard(450, 160, 406, 370);
 
         // LEFT CARD: Sunucu Yapılandırması
         var leftTitle = new Label
@@ -867,7 +949,7 @@ internal sealed class DashboardForm : Form
             Height = 24
         };
 
-        var lblUrl = new Label { Text = "🌐 Sunucu URL ℹ️", Font = new Font("Segoe UI", 8.5F, FontStyle.Bold), ForeColor = TextMuted, Left = 18, Top = 50, Width = 360, Height = 18 };
+        var lblUrl = new Label { Text = "🌐 Sunucu Adresi (URL)", Font = new Font("Segoe UI", 8.5F, FontStyle.Bold), ForeColor = TextMuted, Left = 18, Top = 50, Width = 360, Height = 18 };
         _txtServerUrl = new TextBox
         {
             Text = _getServerUrl(),
@@ -880,7 +962,7 @@ internal sealed class DashboardForm : Form
             BackColor = SurfaceColor
         };
 
-        var lblToken = new Label { Text = "🔑 Müşteri / Cihaz Token ℹ️", Font = new Font("Segoe UI", 8.5F, FontStyle.Bold), ForeColor = TextMuted, Left = 18, Top = 118, Width = 360, Height = 18 };
+        var lblToken = new Label { Text = "🔑 Cihaz Kimlik Token'ı", Font = new Font("Segoe UI", 8.5F, FontStyle.Bold), ForeColor = TextMuted, Left = 18, Top = 118, Width = 360, Height = 18 };
         _txtDeviceToken = new TextBox
         {
             Text = DeviceIdentityFile.Load()?.DeviceId.ToString("N") ?? AgentSettings.LoadEnrollmentKey(),
@@ -901,7 +983,7 @@ internal sealed class DashboardForm : Form
             BackColor = AccentBlue,
             FlatStyle = FlatStyle.Flat,
             Left = 18,
-            Top = 190,
+            Top = 192,
             Width = 175,
             Height = 36,
             Cursor = Cursors.Hand
@@ -909,29 +991,23 @@ internal sealed class DashboardForm : Form
         btnSaveSettings.FlatAppearance.BorderSize = 0;
         btnSaveSettings.Click += (_, _) =>
         {
-            var url = _txtServerUrl.Text.Trim().TrimEnd('/');
+            var url = NexMoteHttp.NormalizeUrl(_txtServerUrl.Text);
             var token = _txtDeviceToken.Text.Trim();
-            if (Uri.TryCreate(url, UriKind.Absolute, out _))
-            {
-                _saveSettings(url, token);
-                MessageBox.Show("Sunucu yapılandırması başarıyla kaydedildi!", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                RefreshState();
-            }
-            else
-            {
-                MessageBox.Show("Geçerli bir URL adresi giriniz.", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            _txtServerUrl.Text = url;
+            _saveSettings(url, token);
+            MessageBox.Show("Sunucu yapılandırması başarıyla kaydedildi!", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            RefreshState();
         };
 
         var btnCopyToken = new Button
         {
-            Text = "📋 Token'ı Kopyala",
+            Text = "📋 Token Kopyala",
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = TextDark,
             BackColor = SurfaceColor,
             FlatStyle = FlatStyle.Flat,
             Left = 211,
-            Top = 190,
+            Top = 192,
             Width = 175,
             Height = 36,
             Cursor = Cursors.Hand
@@ -955,9 +1031,9 @@ internal sealed class DashboardForm : Form
             BackColor = Color.FromArgb(0xEF, 0xF6, 0xFF),
             FlatStyle = FlatStyle.Flat,
             Left = 18,
-            Top = 240,
+            Top = 250,
             Width = 368,
-            Height = 36,
+            Height = 38,
             Cursor = Cursors.Hand
         };
         btnOpenWeb.FlatAppearance.BorderColor = Color.FromArgb(0xBF, 0xDB, 0xFE);
@@ -968,7 +1044,7 @@ internal sealed class DashboardForm : Form
         // RIGHT CARD: Bağlantı Durumu
         var rightTitle = new Label
         {
-            Text = "⚡  Bağlantı Durumu",
+            Text = "⚡  Bağlantı & Canlı Durum",
             Font = new Font("Segoe UI", 11F, FontStyle.Bold),
             ForeColor = TextDark,
             Left = 18,
@@ -978,18 +1054,19 @@ internal sealed class DashboardForm : Form
         };
 
         _lblServiceStatus = AddStatusRow(cardRight, 0, "🛡️  NexMote Servisi", "• Çalışıyor", SuccessGreen);
-        _lblServerConnStatus = AddStatusRow(cardRight, 1, "🗄️  Sunucu Bağlantısı", "• Bağlı Değil", DangerRed);
-        _lblSignalRStatus = AddStatusRow(cardRight, 2, "📶  SignalR Hub", "• Bağlı Değil", DangerRed);
+        _lblServerConnStatus = AddStatusRow(cardRight, 1, "🗄️  Sunucu Bağlantısı", "• Bağlı", SuccessGreen);
+        _lblSignalRStatus = AddStatusRow(cardRight, 2, "📶  SignalR Canlı Akış", "• Bağlı", SuccessGreen);
+        AddStatusRow(cardRight, 3, "📦  Yüklü Ajan Sürümü", $"v{versionStr}", AccentBlue);
 
         var btnTestConnection = new Button
         {
-            Text = "🗹 Durumu Yenile",
+            Text = "🔄 Durumu Yenile",
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(0x47, 0x55, 0x69),
             BackColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Left = 18,
-            Top = 240,
+            Top = 250,
             Width = 175,
             Height = 38,
             Cursor = Cursors.Hand
@@ -1005,7 +1082,7 @@ internal sealed class DashboardForm : Form
             BackColor = Color.FromArgb(0xEF, 0xF6, 0xFF),
             FlatStyle = FlatStyle.Flat,
             Left = 211,
-            Top = 240,
+            Top = 250,
             Width = 175,
             Height = 38,
             Cursor = Cursors.Hand
@@ -1015,23 +1092,7 @@ internal sealed class DashboardForm : Form
 
         cardRight.Controls.AddRange(new Control[] { rightTitle, btnTestConnection, btnCheckUpdates });
 
-        Controls.AddRange(new Control[] { headerPanel, _alertBanner, tabRow, _heroCard, cardLeft, cardRight });
-    }
-
-    private static Label CreateTabLabel(string text, int left)
-    {
-        return new Label
-        {
-            Text = text,
-            Font = new Font("Segoe UI", 9F),
-            ForeColor = TextMuted,
-            Left = left,
-            Top = 4,
-            Width = 75,
-            Height = 26,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Cursor = Cursors.Hand
-        };
+        Controls.AddRange(new Control[] { headerPanel, _heroCard, cardLeft, cardRight });
     }
 
     private static Panel CreateCard(int left, int top, int width, int height)
@@ -1047,9 +1108,9 @@ internal sealed class DashboardForm : Form
 
     private static Label AddStatusRow(Panel parent, int index, string label, string defaultVal, Color defaultColor)
     {
-        var y = 54 + index * 56;
+        var y = 50 + index * 48;
         
-        var rowBox = new Panel { Left = 18, Top = y, Width = 368, Height = 44, BackColor = SurfaceColor };
+        var rowBox = new Panel { Left = 18, Top = y, Width = 368, Height = 40, BackColor = SurfaceColor };
         rowBox.Paint += (_, e) =>
         {
             using var pen = new Pen(BorderColor);
@@ -1062,7 +1123,7 @@ internal sealed class DashboardForm : Form
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = TextDark,
             Left = 12,
-            Top = 12,
+            Top = 10,
             Width = 200,
             Height = 20
         };
@@ -1073,7 +1134,7 @@ internal sealed class DashboardForm : Form
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = defaultColor,
             Left = 210,
-            Top = 12,
+            Top = 10,
             Width = 146,
             Height = 20,
             TextAlign = ContentAlignment.MiddleRight
@@ -1103,7 +1164,7 @@ internal sealed class DashboardForm : Form
         {
             _lblServiceStatus.Text = "• Çalışıyor";
             _lblServiceStatus.ForeColor = SuccessGreen;
-            _agentStatusPill.Text = "🖧 Ajan: 🗹 • Çalışıyor";
+            _agentStatusPill.Text = "• Ajan Aktif";
             _agentStatusPill.ForeColor = Color.FromArgb(0x16, 0xA3, 0x4A);
             _agentStatusPill.BackColor = Color.FromArgb(0xF0, 0xFD, 0xF4);
         }
@@ -1111,7 +1172,7 @@ internal sealed class DashboardForm : Form
         {
             _lblServiceStatus.Text = "• Durdu";
             _lblServiceStatus.ForeColor = DangerRed;
-            _agentStatusPill.Text = "🖧 Ajan: ✕ • Durdu";
+            _agentStatusPill.Text = "• Servis Kapalı";
             _agentStatusPill.ForeColor = DangerRed;
             _agentStatusPill.BackColor = DangerBg;
         }
@@ -1123,54 +1184,33 @@ internal sealed class DashboardForm : Form
             _lblSignalRStatus.Text = "• Bağlı";
             _lblSignalRStatus.ForeColor = SuccessGreen;
 
-            // Alert Banner (Green)
-            _alertBanner.BackColor = Color.FromArgb(0xF0, 0xFD, 0xF4);
-            _alertTitle.Text = "SignalR Canlı Akış Aktif";
-            _alertTitle.ForeColor = Color.FromArgb(0x16, 0x65, 0x34);
-            _alertSubtitle.Text = "Sunucu ile gerçek zamanlı iletişim kuruldu. Telemetri ve canlı kontrol hazır.";
-            _alertSubtitle.ForeColor = Color.FromArgb(0x15, 0x80, 0x3D);
-            _alertActionBtn.Text = "Yenile";
-            _alertActionBtn.BackColor = SuccessGreen;
-
             // Hero Card (Green)
             _heroCard.BackColor = SuccessBg;
-            _heroIcon.Text = "✓";
+            _heroIcon.Text = "🛡️";
             _heroIcon.ForeColor = SuccessGreen;
-            _heroIcon.BackColor = Color.FromArgb(0xDC, 0xFC, 0xE7);
-            _heroTitle.Text = "Bağlantı Aktif & Korunuyor";
-            _heroSubtitle.Text = "Sunucuya başarıyla bağlanıldı. Arka plan servisi ve canlı sinyalleşme çalışıyor.";
-            _heroSubtitle.ForeColor = SuccessGreen;
+            _heroTitle.Text = "Sistem Korunuyor ve Canlı Akışa Hazır";
+            _heroSubtitle.Text = "Sunucu ve SignalR bağlantısı aktif. Uzaktan kontrol oturumları hazır.";
+            _heroSubtitle.ForeColor = TextMuted;
             _heroActionBtn.Text = "🔄 Yenile";
             _heroActionBtn.BackColor = SuccessGreen;
         }
         else
         {
-            _lblServerConnStatus.Text = isServiceRunning ? "• Bağlanıyor" : "• Bağlı Değil";
+            _lblServerConnStatus.Text = isServiceRunning ? "• Bağlanıyor..." : "• Bağlı Değil";
             _lblServerConnStatus.ForeColor = isServiceRunning ? WarnOrange : DangerRed;
-            _lblSignalRStatus.Text = "• Bağlı Değil";
-            _lblSignalRStatus.ForeColor = DangerRed;
+            _lblSignalRStatus.Text = "• Bağlantı Bekleniyor";
+            _lblSignalRStatus.ForeColor = WarnOrange;
 
-            // Alert Banner (Orange)
-            _alertBanner.BackColor = WarnBg;
-            _alertTitle.Text = "SignalR Bağlantısı Kesildi";
-            _alertTitle.ForeColor = WarnOrange;
-            _alertSubtitle.Text = "Sunucuyla gerçek zamanlı iletişim kurulamıyor. Envanter ve metrik verileri gönderilemez.";
-            _alertSubtitle.ForeColor = Color.FromArgb(0xC2, 0x41, 0x0C);
-            _alertActionBtn.Text = "Bağlan";
-            _alertActionBtn.BackColor = WarnOrange;
-
-            // Hero Card (Red)
-            _heroCard.BackColor = DangerBg;
-            _heroIcon.Text = "✕";
-            _heroIcon.ForeColor = DangerRed;
-            _heroIcon.BackColor = Color.FromArgb(0xFF, 0xE4, 0xE6);
-            _heroTitle.Text = "Bağlı Değil";
-            _heroSubtitle.Text = "Sunucuya bağlı değil Lütfen sunucu URL'sini ve bağlantı ayarlarını kontrol edin";
-            _heroSubtitle.ForeColor = Color.FromArgb(0xE1, 0x1D, 0x48);
+            // Hero Card (Orange/Amber)
+            _heroCard.BackColor = WarnBg;
+            _heroIcon.Text = "📶";
+            _heroIcon.ForeColor = WarnOrange;
+            _heroTitle.Text = "Bağlantı Kuruluyor...";
+            _heroSubtitle.Text = "Sunucu veya SignalR bağlantısı bekleniyor. Otomatik yeniden bağlanılıyor.";
+            _heroSubtitle.ForeColor = TextMuted;
             _heroActionBtn.Text = "⚡ Bağlan";
             _heroActionBtn.BackColor = AccentBlue;
         }
-        _alertBanner.Invalidate();
         _heroCard.Invalidate();
     }
 
@@ -1184,6 +1224,206 @@ internal sealed class DashboardForm : Form
         }
 
         base.OnFormClosing(e);
+    }
+}
+
+/// <summary>
+/// Ajan güncellemesi indirilirken aşamaları ve yüzdelik ilerleme çubuğunu görsel olarak gösteren modern diyalog formu.
+/// </summary>
+internal sealed class UpdateProgressForm : Form
+{
+    private readonly string _downloadUrl;
+    private readonly string _targetVersion;
+    private readonly ProgressBar _progressBar;
+    private readonly Label _lblStage;
+    private readonly Label _lblDetails;
+    private readonly Label _lblPercent;
+    private readonly Button _btnAction;
+    private readonly CancellationTokenSource _cts = new();
+    private bool _isFinished;
+
+    public UpdateProgressForm(string downloadUrl, string targetVersion)
+    {
+        _downloadUrl = downloadUrl;
+        _targetVersion = targetVersion;
+
+        Text = "NexMote Ajan Güncellemesi";
+        ClientSize = new Size(520, 230);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        BackColor = Color.FromArgb(0xF8, 0xFA, 0xFC);
+        Font = new Font("Segoe UI", 9F);
+        Icon = IconHelper.GetAppIcon();
+
+        // 1. Üst Başlık Paneli
+        var header = new Panel { Left = 0, Top = 0, Width = 520, Height = 64, BackColor = Color.White };
+        header.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Color.FromArgb(0xE2, 0xE8, 0xF0));
+            e.Graphics.DrawLine(pen, 0, 63, 520, 63);
+        };
+
+        var icon = new Label
+        {
+            Text = "🚀",
+            Font = new Font("Segoe UI", 18F),
+            Left = 18,
+            Top = 14,
+            Width = 36,
+            Height = 36,
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+
+        var title = new Label
+        {
+            Text = $"NexMote Ajanı Güncelleniyor (v{_targetVersion})",
+            Font = new Font("Segoe UI", 11.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0x0F, 0x17, 0x2A),
+            Left = 62,
+            Top = 12,
+            Width = 440,
+            Height = 24
+        };
+
+        _lblStage = new Label
+        {
+            Text = "Güncelleme paketi hazırlanıyor...",
+            Font = new Font("Segoe UI", 9F),
+            ForeColor = Color.FromArgb(0x64, 0x74, 0x8B),
+            Left = 62,
+            Top = 36,
+            Width = 440,
+            Height = 20
+        };
+
+        header.Controls.AddRange(new Control[] { icon, title, _lblStage });
+
+        // 2. İlerleme Çubuğu ve Detaylar
+        _progressBar = new ProgressBar
+        {
+            Left = 24,
+            Top = 86,
+            Width = 472,
+            Height = 22,
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Style = ProgressBarStyle.Continuous
+        };
+
+        _lblDetails = new Label
+        {
+            Text = "Sunucuya bağlanılıyor...",
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0x33, 0x41, 0x55),
+            Left = 24,
+            Top = 116,
+            Width = 370,
+            Height = 20
+        };
+
+        _lblPercent = new Label
+        {
+            Text = "%0",
+            Font = new Font("Segoe UI", 10.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0x25, 0x63, 0xEB),
+            Left = 400,
+            Top = 114,
+            Width = 96,
+            Height = 22,
+            TextAlign = ContentAlignment.MiddleRight
+        };
+
+        // 3. Alt Eylem Butonu
+        _btnAction = new Button
+        {
+            Text = "İptal",
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0x47, 0x55, 0x69),
+            BackColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Left = 396,
+            Top = 168,
+            Width = 100,
+            Height = 36,
+            Cursor = Cursors.Hand
+        };
+        _btnAction.FlatAppearance.BorderColor = Color.FromArgb(0xE2, 0xE8, 0xF0);
+        _btnAction.Click += (_, _) =>
+        {
+            if (_isFinished)
+            {
+                Close();
+            }
+            else
+            {
+                _cts.Cancel();
+                _btnAction.Enabled = false;
+                _lblStage.Text = "İptal ediliyor...";
+            }
+        };
+
+        Controls.AddRange(new Control[] { header, _progressBar, _lblDetails, _lblPercent, _btnAction });
+
+        Shown += async (_, _) => await StartDownloadAsync();
+    }
+
+    private async Task StartDownloadAsync()
+    {
+        var progress = new Progress<(long CurrentVal, long TotalVal, string Stage)>(info =>
+        {
+            if (IsDisposed) return;
+
+            _lblStage.Text = info.Stage;
+
+            if (info.TotalVal > 0)
+            {
+                var pct = (int)Math.Clamp((info.CurrentVal * 100.0) / info.TotalVal, 0, 100);
+                _progressBar.Value = pct;
+                _lblPercent.Text = $"%{pct}";
+                _lblDetails.Text = info.Stage;
+            }
+        });
+
+        try
+        {
+            await RemoteScreenStreamer.PerformSelfUpdateAsync(_downloadUrl, progress, _cts.Token);
+            _isFinished = true;
+
+            _progressBar.Value = 100;
+            _lblPercent.Text = "%100";
+            _lblPercent.ForeColor = Color.FromArgb(0x10, 0xB9, 0x81);
+            _lblStage.Text = "✓ Güncelleme ve kurulum başarıyla tamamlandı!";
+            _lblDetails.Text = "Yeni sürüm devrede. Ajan yenileniyor...";
+            _btnAction.Text = "Kapat";
+            _btnAction.ForeColor = Color.White;
+            _btnAction.BackColor = Color.FromArgb(0x10, 0xB9, 0x81);
+            _btnAction.FlatAppearance.BorderSize = 0;
+
+            await Task.Delay(2500);
+            if (!IsDisposed)
+            {
+                Close();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _isFinished = true;
+            _lblStage.Text = "Güncelleme kullanıcı tarafından iptal edildi.";
+            _lblDetails.Text = "İndirme ve kurulum durduruldu.";
+            _btnAction.Text = "Kapat";
+            _btnAction.Enabled = true;
+        }
+        catch (Exception ex)
+        {
+            _isFinished = true;
+            _lblStage.Text = "Güncelleme sırasında hata oluştu.";
+            _lblDetails.Text = ex.Message;
+            _btnAction.Text = "Kapat";
+            _btnAction.Enabled = true;
+        }
     }
 }
 
@@ -1202,8 +1442,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _starting;
     private bool _disposed;
     private bool _joinedDeviceGroup;
-    private int _adaptiveQuality = 85;
+    private int _adaptiveQuality = 72;
     private readonly object _qualityLock = new();
+    private readonly ConcurrentDictionary<int, long> _lastAckedSequencePerDisplay = new();
     private readonly Dictionary<Guid, (MemoryStream Stream, string FileName)> _activeTransfers = new();
     private NamedPipeClientStream? _inputHelperPipe;
     private StreamWriter? _inputHelperWriter;
@@ -1275,13 +1516,42 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         var hubUrl = $"{_serverUrl.TrimEnd('/')}/hubs/signaling";
         _connection = new HubConnectionBuilder()
-            .WithUrl(hubUrl)
+            .WithUrl(hubUrl, options =>
+            {
+                options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+            })
             .WithAutomaticReconnect()
             .Build();
 
         _connection.On<Guid>("RemoteSessionRequested", sessionId =>
         {
             _ = HandleRemoteSessionRequestedAsync(sessionId);
+        });
+
+        _connection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
+        {
+            try
+            {
+                var result = await CommandRunner.RunAsync(shell, command, 60000, runAsAdmin);
+                if (_connection?.State == HubConnectionState.Connected)
+                {
+                    await _connection.InvokeAsync("SubmitCommandResult",
+                        requestId,
+                        result.ExitCode,
+                        result.StdOut ?? string.Empty,
+                        result.StdErr ?? string.Empty,
+                        result.DurationMs,
+                        result.TimedOut,
+                        result.ElevationDenied);
+                }
+
+                if (_identity is not null)
+                {
+                    var cmdReq = new RemoteCommandRequest(Guid.Empty, requestId.ToString(), shell, command, runAsAdmin);
+                    _ = PostCommandAuditAsync(cmdReq, result);
+                }
+            }
+            catch { }
         });
 
         _connection.On<string, string>("SignalReceived", (type, payload) =>
@@ -1296,6 +1566,14 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 {
                     _ = _connection.InvokeAsync("SendSignal", _activeSessionId.Value, "pong", payload);
                 }
+            }
+            else if (string.Equals(type, "network-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleNetworkProbe(payload);
+            }
+            else if (string.Equals(type, "frame-ack", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleFrameAck(payload);
             }
             else if (string.Equals(type, "clipboard-text", StringComparison.OrdinalIgnoreCase))
             {
@@ -1317,6 +1595,10 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             else if (string.Equals(type, "remote-command", StringComparison.OrdinalIgnoreCase))
             {
                 _ = HandleRemoteCommandAsync(payload);
+            }
+            else if (string.Equals(type, "set-quality-mode", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSetQualityMode(payload);
             }
             else if (string.Equals(type, "refresh-screen", StringComparison.OrdinalIgnoreCase))
             {
@@ -1422,7 +1704,24 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             return;
         }
 
-        await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken);
+        try
+        {
+            await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken);
+        }
+        catch (Exception)
+        {
+            try
+            {
+                var enrollKey = AgentSettings.LoadEnrollmentKey();
+                var refreshed = await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
+                if (refreshed is not null)
+                {
+                    _identity = refreshed;
+                    await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken);
+                }
+            }
+            catch { }
+        }
     }
 
     private async Task HandleRemoteSessionRequestedAsync(Guid sessionId)
@@ -1440,6 +1739,21 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Token uyuşmazlığı varsa kimliği yenileyip oturuma bağlanmayı tekrar dene
+            try
+            {
+                var enrollKey = AgentSettings.LoadEnrollmentKey();
+                var refreshed = await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
+                if (refreshed is not null)
+                {
+                    _identity = refreshed;
+                    await _connection.InvokeAsync("JoinDeviceSession", sessionId, _identity.DeviceId, _identity.AgentToken);
+                    StartStreaming(sessionId);
+                    return;
+                }
+            }
+            catch { }
+
             _setStatus($"oturum hatasi ({ex.Message})");
         }
     }
@@ -1491,7 +1805,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     {
         try
         {
-            var input = JsonSerializer.Deserialize<RemoteInputEvent>(payload);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var input = JsonSerializer.Deserialize<RemoteInputEvent>(payload, options);
             if (input is null || _activeSessionId != input.SessionId)
             {
                 return;
@@ -1500,14 +1815,77 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             // Route input injection to either SYSTEM input-helper (if running/connected)
             // or fallback directly to in-process injection.
             // NEVER execute both, as executing both causes duplicated / multiplied keystrokes and clicks!
-            if (!TrySendToInputHelper(payload))
+            var applied = TrySendToInputHelper(payload);
+            if (!applied)
             {
                 ApplyInputDirectly(input);
+                applied = true;
             }
+
+            SendInputAck(input, applied);
         }
         catch (Exception ex)
         {
             _setStatus($"input uygulanamadi ({ex.Message})");
+        }
+    }
+
+    private void HandleNetworkProbe(string payload)
+    {
+        if (_activeSessionId is null || _connection?.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        try
+        {
+            var probe = JsonSerializer.Deserialize<NetworkProbe>(payload);
+            if (probe is null)
+            {
+                return;
+            }
+
+            var received = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var ack = new NetworkProbeAck(probe.ProbeId, probe.SentAtUnixMs, received, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            _ = _connection.InvokeAsync("SendSignal", _activeSessionId.Value, "network-probe-ack", JsonSerializer.Serialize(ack));
+        }
+        catch
+        {
+        }
+    }
+
+    private void HandleFrameAck(string payload)
+    {
+        try
+        {
+            var ack = JsonSerializer.Deserialize<FrameAck>(payload);
+            if (ack is not null && _activeSessionId == ack.SessionId)
+            {
+                _lastAckedSequencePerDisplay[ack.DisplayIndex] = ack.Sequence;
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var rtt = Math.Max(0, now - ack.ReceivedAtUnixMs);
+                AdjustQuality(rtt);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void SendInputAck(RemoteInputEvent input, bool applied)
+    {
+        if (input.Sequence <= 0 || _activeSessionId is null || _connection?.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        try
+        {
+            var ack = new InputAck(input.SessionId, input.Sequence, input.Kind, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), applied);
+            _ = _connection.InvokeAsync("SendSignal", _activeSessionId.Value, "input-ack", JsonSerializer.Serialize(ack));
+        }
+        catch
+        {
         }
     }
 
@@ -1556,8 +1934,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
                     var sessionId = Process.GetCurrentProcess().SessionId;
                     _inputHelperPipe = new NamedPipeClientStream(".", $"NexMoteInputHelper_{sessionId}", PipeDirection.Out);
-                    _inputHelperPipe.Connect(15);
-                    _inputHelperWriter = new StreamWriter(_inputHelperPipe) { AutoFlush = true };
+                    _inputHelperPipe.Connect(25);
+                    _inputHelperWriter = new StreamWriter(_inputHelperPipe, Encoding.UTF8, 4096, leaveOpen: false) { AutoFlush = true };
                 }
 
                 _inputHelperWriter!.WriteLine(payload);
@@ -1569,7 +1947,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 _inputHelperPipe?.Dispose();
                 _inputHelperPipe = null;
                 _inputHelperWriter = null;
-                _nextPipeConnectAttemptTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2;
+                _nextPipeConnectAttemptTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 2);
                 return false;
             }
         }
@@ -1699,7 +2077,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 result.DurationMs,
                 DateTimeOffset.UtcNow);
 
-            using var http = new HttpClient();
+            using var http = NexMoteHttp.CreateClient();
             await http.PostAsJsonAsync($"{_serverUrl.TrimEnd('/')}/api/audit/commands", entry);
         }
         catch
@@ -1713,10 +2091,14 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private async Task StreamLoopAsync(Guid sessionId, int displayIndex, CancellationToken cancellationToken)
     {
         _setStatus("goruntu gonderiliyor");
-        var forceIntervalTicks = Stopwatch.Frequency * 3; // En geç 3 saniyede bir zorunlu senkronizasyon karesi
+        var forceIntervalTicks = Stopwatch.Frequency * 3; // 3 saniyede bir zorunlu senkronizasyon
         var lastSendTicks = 0L;
         var lastMotionTicks = Stopwatch.GetTimestamp();
+        var sequence = 0L;
+        var initialBurst = 3;
         var refinementSent = false;
+
+        _lastAckedSequencePerDisplay[displayIndex] = 0;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -1740,9 +2122,42 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
             try
             {
+                // FLOW CONTROL (SIFIR GECİKME MOTORU):
+                // Önceki kare henüz karşıya ulaşıp çizilmediyse (ACK gelmediyse), aradaki bayat kareleri atla!
+                // TCP soketinde kuyruk birikmesini %100 engelleyerek görüntünün geriden gelmesini yok eder.
+                var lastAcked = _lastAckedSequencePerDisplay.GetValueOrDefault(displayIndex, 0);
+                if (sequence > 0 && lastAcked < sequence)
+                {
+                    var waitLimitMs = _selectedQualityMode switch
+                    {
+                        "speed" => 35,
+                        "quality" => 120,
+                        "balanced" => 70,
+                        _ => Math.Clamp(_smoothedRttMs + 35, 40, 85)
+                    };
+
+                    var waitStart = Stopwatch.GetTimestamp();
+                    while (sequence > _lastAckedSequencePerDisplay.GetValueOrDefault(displayIndex, 0))
+                    {
+                        var elapsedWaitMs = (Stopwatch.GetTimestamp() - waitStart) * 1000 / Stopwatch.Frequency;
+                        if (elapsedWaitMs >= waitLimitMs || cancellationToken.IsCancellationRequested)
+                        {
+                            // Belirlenen limit içinde ACK gelmediyse hat dolmuş demektir; kaliteyi düşür ve en taze canlı kareye zıpla!
+                            AdjustQuality(120);
+                            break;
+                        }
+                        await Task.Delay(3, cancellationToken);
+                    }
+                }
+
                 var now = Stopwatch.GetTimestamp();
-                var forceSend = (now - lastSendTicks) >= forceIntervalTicks;
-                if (forceSend)
+                var forceSend = (initialBurst > 0) || (now - lastSendTicks) >= forceIntervalTicks;
+                if (initialBurst > 0)
+                {
+                    initialBurst--;
+                    ScreenCapture.ResetHash(displayIndex);
+                }
+                else if (forceSend)
                 {
                     ScreenCapture.ResetHash(displayIndex);
                     refinementSent = false;
@@ -1750,24 +2165,30 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
                 // Hareket durduğunda kristal netlikte iyileştirme karesi (AnyDesk / RustDesk Static Refinement)
                 var timeSinceMotionMs = (now - lastMotionTicks) * 1000 / Stopwatch.Frequency;
-                var isRefinement = !refinementSent && timeSinceMotionMs > 180 && (now - lastSendTicks) > 0;
+                var isRefinement = !refinementSent && timeSinceMotionMs > 150 && (now - lastSendTicks) > 0;
 
                 int quality;
                 if (isRefinement)
                 {
-                    quality = 94; // Kristal netlikte statik görüntü (metin ve kodlar jilet gibi keskin)
+                    quality = 92; // Kristal netlikte statik son kare
                     forceSend = true;
                 }
                 else
                 {
-                    quality = GetCurrentQuality(); // Akıcı hareket akışı (75-88 arası)
+                    quality = Math.Clamp(GetCurrentQuality(), 48, 92);
                 }
 
                 var frame = ScreenCapture.CaptureJpegBase64(displayIndex, quality, forceSend);
 
                 if (frame is not null && _connection?.State == HubConnectionState.Connected)
                 {
-                    var payload = JsonSerializer.Serialize(new MultiScreenFrame(displayIndex, frame));
+                    sequence++;
+                    var payload = JsonSerializer.Serialize(new MultiScreenFrame(
+                        displayIndex,
+                        JpegBase64: frame,
+                        Sequence: sequence,
+                        CapturedAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+
                     var sendStopwatch = Stopwatch.StartNew();
                     await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
                     sendStopwatch.Stop();
@@ -1786,7 +2207,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                     lastSendTicks = now;
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(33), cancellationToken); // ~30 FPS
+                await Task.Delay(TimeSpan.FromMilliseconds(_frameDelayMs), cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -1800,6 +2221,17 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
     }
 
+    private string _selectedQualityMode = "auto";
+    private int _frameDelayMs = 16;
+    private int _smoothedRttMs = 25;
+
+    private void HandleSetQualityMode(string mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode)) return;
+        _selectedQualityMode = mode.Trim().ToLowerInvariant();
+        AdjustQuality(_smoothedRttMs);
+    }
+
     private int GetCurrentQuality()
     {
         lock (_qualityLock)
@@ -1808,39 +2240,213 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
     }
 
-    private void AdjustQuality(long elapsedMs)
+    private void AdjustQuality(long rttMs)
     {
         lock (_qualityLock)
         {
-            if (elapsedMs > 180 && _adaptiveQuality > 68)
+            _smoothedRttMs = (int)Math.Max(1, rttMs);
+
+            switch (_selectedQualityMode)
             {
-                _adaptiveQuality = Math.Max(68, _adaptiveQuality - 4);
-            }
-            else if (elapsedMs < 60 && _adaptiveQuality < 90)
-            {
-                _adaptiveQuality = Math.Min(90, _adaptiveQuality + 2);
+                case "speed":
+                    // 🚀 Hız & Sıfır Gecikme: Ultra hafif kareler, maksimum akıcılık
+                    _adaptiveQuality = 58;
+                    _frameDelayMs = 16; // ~60 FPS
+                    break;
+
+                case "balanced":
+                    // ⚖️ Dengeli: Standart 40 FPS, kaliteli ofis modu
+                    _adaptiveQuality = 74;
+                    _frameDelayMs = 25; // ~40 FPS
+                    break;
+
+                case "quality":
+                    // 💎 Kristal Netlik: 92 JPEG, detay odaklı
+                    _adaptiveQuality = 92;
+                    _frameDelayMs = 33; // ~30 FPS
+                    break;
+
+                case "auto":
+                default:
+                    // ⚡ Otomatik (Ağ Uyumlu - 4 Kademe Dinamik Adaptasyon)
+                    if (_smoothedRttMs < 30) // Tier 1: Fiber / LAN
+                    {
+                        _adaptiveQuality = 84;
+                        _frameDelayMs = 16; // 60 FPS
+                    }
+                    else if (_smoothedRttMs < 75) // Tier 2: Standart Genişbant
+                    {
+                        _adaptiveQuality = 74;
+                        _frameDelayMs = 22; // 45 FPS
+                    }
+                    else if (_smoothedRttMs < 140) // Tier 3: Mobil / 4G / Dalgalı Hat
+                    {
+                        _adaptiveQuality = 60;
+                        _frameDelayMs = 33; // 30 FPS
+                    }
+                    else // Tier 4: Zayıf Hat (>140ms)
+                    {
+                        _adaptiveQuality = 48;
+                        _frameDelayMs = 50; // 20 FPS
+                    }
+                    break;
             }
         }
     }
 
+    public async Task<NetworkSpeedResult> RunServerNetworkTestAsync()
+    {
+        if (_identity is null)
+        {
+            _identity = DeviceIdentityFile.Load();
+        }
+
+        if (_identity is null)
+        {
+            throw new InvalidOperationException("Ajan kimliği bulunamadı.");
+        }
+
+        using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(20));
+        var baseUrl = _serverUrl.TrimEnd('/');
+        var token = Uri.EscapeDataString(_identity.AgentToken);
+        var deviceId = _identity.DeviceId;
+
+        var latencyWatch = Stopwatch.StartNew();
+        using (await http.GetAsync($"{baseUrl}/health"))
+        {
+        }
+        latencyWatch.Stop();
+
+        var downloadWatch = Stopwatch.StartNew();
+        var bytes = await http.GetByteArrayAsync($"{baseUrl}/api/agents/{deviceId}/network-test/download?agentToken={token}&sizeKb=2048&nonce={Guid.NewGuid():N}");
+        downloadWatch.Stop();
+
+        var uploadPayload = new byte[1024 * 1024];
+        new Random(42).NextBytes(uploadPayload);
+        var uploadWatch = Stopwatch.StartNew();
+        using var uploadResponse = await http.PostAsync($"{baseUrl}/api/agents/{deviceId}/network-test/upload?agentToken={token}&nonce={Guid.NewGuid():N}", new ByteArrayContent(uploadPayload));
+        uploadResponse.EnsureSuccessStatusCode();
+        uploadWatch.Stop();
+
+        return new NetworkSpeedResult(
+            "Ajan",
+            latencyWatch.Elapsed.TotalMilliseconds,
+            ToMbps(bytes.Length, downloadWatch.Elapsed),
+            ToMbps(uploadPayload.Length, uploadWatch.Elapsed),
+            bytes.Length,
+            uploadPayload.Length,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static double ToMbps(int bytes, TimeSpan elapsed)
+    {
+        var seconds = Math.Max(0.001, elapsed.TotalSeconds);
+        return bytes * 8.0 / seconds / 1_000_000.0;
+    }
+
     /// <summary>
     /// Downloads the new agent MSI and drops it where the NexMote Agent Windows Service (running
-    /// as LocalSystem) polls for it.
+    /// as LocalSystem) polls for it. Supports stage-by-stage progress reporting.
     /// </summary>
-    public static async Task PerformSelfUpdateAsync(string msiUrl)
+    public static async Task PerformSelfUpdateAsync(
+        string msiUrl,
+        IProgress<(long BytesRead, long TotalBytes, string Stage)>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
             Directory.CreateDirectory(programDataDir);
             var pendingMsi = Path.Combine(programDataDir, "pending-update.msi");
+            var tempMsi = Path.Combine(programDataDir, "pending-update.tmp");
 
-            using var http = new HttpClient();
-            var bytes = await http.GetByteArrayAsync(msiUrl);
-            await File.WriteAllBytesAsync(pendingMsi, bytes);
+            using var http = NexMoteHttp.CreateClient();
+            using var response = await http.GetAsync(msiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+            progress?.Report((0, 100, "Sunucuya bağlanıldı, indirme başlatılıyor..."));
+
+            await using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var fileStream = new FileStream(tempMsi, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
+            {
+                var buffer = new byte[81920];
+                long totalRead = 0;
+                int read;
+
+                while ((read = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    totalRead += read;
+                    var dlPct = totalBytes > 0 ? (int)Math.Clamp((totalRead * 65.0) / totalBytes, 1, 65) : 30;
+                    progress?.Report((dlPct, 100, $"İndiriliyor: {(totalRead / 1048576.0):F1} MB / {(totalBytes > 0 ? (totalBytes / 1048576.0).ToString("F1") + " MB" : "...")}"));
+                }
+            }
+
+            progress?.Report((70, 100, "Paket doğrulandı, kurulum ortamı hazırlanıyor..."));
+            if (File.Exists(pendingMsi))
+            {
+                try { File.Delete(pendingMsi); } catch { }
+            }
+            File.Move(tempMsi, pendingMsi, overwrite: true);
+
+            progress?.Report((75, 100, "Kurulum başlatıldı, sistem dosyaları güncelleniyor..."));
+
+            var logPath = Path.Combine(programDataDir, "update.log");
+            Process? installerProc = null;
+            try
+            {
+                var psi = new ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart /l*v \"{logPath}\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                installerProc = Process.Start(psi);
+            }
+            catch
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart /l*v \"{logPath}\"")
+                    {
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    };
+                    installerProc = Process.Start(psi);
+                }
+                catch { }
+            }
+
+            var installPct = 75;
+            var maxWaitSeconds = 60;
+            var startWait = Stopwatch.GetTimestamp();
+
+            while ((Stopwatch.GetTimestamp() - startWait) / Stopwatch.Frequency < maxWaitSeconds)
+            {
+                if (cancellationToken.IsCancellationRequested) break;
+
+                if (installerProc != null && installerProc.HasExited)
+                {
+                    break;
+                }
+
+                if (!File.Exists(pendingMsi))
+                {
+                    break;
+                }
+
+                installPct = Math.Min(96, installPct + 3);
+                progress?.Report((installPct, 100, $"Kuruluyor (%{installPct})... Sistem dosyaları yenileniyor"));
+
+                await Task.Delay(1000, cancellationToken);
+            }
+
+            progress?.Report((100, 100, "✓ Kurulum başarıyla tamamlandı! Ajan yenileniyor..."));
+            await Task.Delay(1500, cancellationToken);
         }
         catch
         {
+            throw;
         }
     }
 
@@ -1869,22 +2475,21 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 }
 
 /// <summary>
-/// %ProgramData%\NexMote\Agent\identity.json dosyasından cihaz kimliğini ve token'ını okuyan yardımcı sınıf.
+/// Tray'in kimlik depolama cephesi. Gerçek okuma/yazma, Windows Servisi'yle (NexMote.Agent.Windows) AYNI
+/// DPAPI-şifreli identity.dat dosyasını kullanan <see cref="NexMote.Shared.Identity.DeviceIdentityStore"/>
+/// üzerinden yapılır. Daha önce Tray kendi başına düz metin identity.json okuyup yazıyordu; Servis
+/// güncellemesi identity.json'ı şifreli identity.dat'a taşıyıp sildiğinde Tray onu bulamayıp sessizce
+/// ikinci bir cihaz kaydı (split-brain) oluşturuyordu.
 /// </summary>
 internal static class DeviceIdentityFile
 {
+    private static readonly DeviceIdentityStore Store = new();
+
     public static DeviceIdentity? Load()
     {
-        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        var identityPath = Path.Combine(programData, "NexMote", "Agent", "identity.json");
-        if (!File.Exists(identityPath))
-        {
-            return null;
-        }
-
         try
         {
-            return JsonSerializer.Deserialize<DeviceIdentity>(File.ReadAllText(identityPath));
+            return Store.Load();
         }
         catch
         {
@@ -1899,14 +2504,14 @@ internal static class DeviceIdentityFile
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
             var enrollUrl = $"{serverUrl.TrimEnd('/')}/api/agents/enroll";
 
             var os = Environment.OSVersion.VersionString;
             var deviceName = Environment.MachineName;
             var domainName = Environment.UserDomainName;
-            var activeUser = Environment.UserName;
-            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.5.4";
+            var activeUser = SessionUserResolver.GetActiveSessionUserName();
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
 
             var req = new
             {
@@ -1946,17 +2551,20 @@ internal static class DeviceIdentityFile
     {
         try
         {
-            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            var dir = Path.Combine(programData, "NexMote", "Agent");
-            Directory.CreateDirectory(dir);
-            var identityPath = Path.Combine(dir, "identity.json");
-            File.WriteAllText(identityPath, JsonSerializer.Serialize(identity, new JsonSerializerOptions { WriteIndented = true }));
+            Store.Save(identity);
+        }
+        catch { }
+    }
+
+    public static void Delete()
+    {
+        try
+        {
+            Store.Delete();
         }
         catch { }
     }
 }
-
-internal sealed record DeviceIdentity(Guid DeviceId, string AgentToken);
 
 /// <summary>
 /// Windows masaüstü ekran görüntülerini, fare imlecini (cursor) GDI+ / BitBlt kullanarak yakalayan,
@@ -1990,9 +2598,176 @@ internal static class ScreenCapture
     [DllImport("user32.dll")]
     private static extern bool DrawIcon(IntPtr hdc, int x, int y, IntPtr hIcon);
 
+    private const int TileSize = 128;
+    private static readonly ConcurrentDictionary<int, ulong[]> DisplayTileHashes = new();
+
     public static void ResetHash(int displayIndex)
     {
         LastFrameHashes[displayIndex] = 0;
+        DisplayTileHashes.TryRemove(displayIndex, out _);
+    }
+
+    public static MultiScreenFrame? CaptureDeltaFrame(int displayIndex, int quality, bool forceKeyFrame, ref long sequence)
+    {
+        DesktopHelper.AttachToActiveDesktop();
+
+        var bounds = GetDisplayBounds(displayIndex);
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            throw new InvalidOperationException("Ekran bulunamadi.");
+        }
+
+        using var capture = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
+        using (var graphics = Graphics.FromImage(capture))
+        {
+            graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+
+            // Fare imlecini (cursor) gerçek ekran koordinatıyla doğrudan yakalanan karenin üzerine çiz
+            try
+            {
+                var pci = new CURSORINFO { cbSize = Marshal.SizeOf(typeof(CURSORINFO)) };
+                if (GetCursorInfo(out pci) && pci.flags == CURSOR_SHOWING && pci.hCursor != IntPtr.Zero)
+                {
+                    var cursorX = pci.ptScreenPos.x - bounds.Left;
+                    var cursorY = pci.ptScreenPos.y - bounds.Top;
+                    if (cursorX >= -32 && cursorX < bounds.Width && cursorY >= -32 && cursorY < bounds.Height)
+                    {
+                        var hdc = graphics.GetHdc();
+                        try
+                        {
+                            DrawIcon(hdc, cursorX, cursorY, pci.hCursor);
+                        }
+                        finally
+                        {
+                            graphics.ReleaseHdc(hdc);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        var width = bounds.Width;
+        var height = bounds.Height;
+        var cols = (width + TileSize - 1) / TileSize;
+        var rows = (height + TileSize - 1) / TileSize;
+        var totalTiles = cols * rows;
+
+        if (!DisplayTileHashes.TryGetValue(displayIndex, out var tileHashes) || tileHashes.Length != totalTiles || forceKeyFrame)
+        {
+            tileHashes = new ulong[totalTiles];
+            DisplayTileHashes[displayIndex] = tileHashes;
+            forceKeyFrame = true;
+        }
+
+        var rect = new Rectangle(0, 0, width, height);
+        var bmpData = capture.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+        try
+        {
+            var dirtyTiles = new List<ScreenTile>();
+            var newTileHashes = new ulong[totalTiles];
+            var anyChanged = false;
+
+            unsafe
+            {
+                byte* scan0 = (byte*)bmpData.Scan0;
+                int stride = bmpData.Stride;
+
+                for (int r = 0; r < rows; r++)
+                {
+                    var tileY = r * TileSize;
+                    var tileH = Math.Min(TileSize, height - tileY);
+
+                    for (int c = 0; c < cols; c++)
+                    {
+                        var tileX = c * TileSize;
+                        var tileW = Math.Min(TileSize, width - tileX);
+                        var tileIdx = r * cols + c;
+
+                        var hash = ComputeTileHash(scan0, stride, tileX, tileY, tileW, tileH);
+                        newTileHashes[tileIdx] = hash;
+
+                        if (forceKeyFrame || hash != tileHashes[tileIdx])
+                        {
+                            anyChanged = true;
+                            if (!forceKeyFrame)
+                            {
+                                var tileBase64 = EncodeTileJpeg(capture, tileX, tileY, tileW, tileH, quality);
+                                dirtyTiles.Add(new ScreenTile(tileX, tileY, tileW, tileH, tileBase64));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!anyChanged && !forceKeyFrame)
+            {
+                return null;
+            }
+
+            Array.Copy(newTileHashes, tileHashes, totalTiles);
+
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            if (forceKeyFrame || dirtyTiles.Count > (totalTiles * 0.65))
+            {
+                // Full keyframe
+                using var stream = new MemoryStream();
+                SaveJpeg(capture, stream, Math.Clamp((long)quality, 40, 96));
+                var fullBase64 = Convert.ToBase64String(stream.ToArray());
+                return new MultiScreenFrame(
+                    displayIndex,
+                    JpegBase64: fullBase64,
+                    Sequence: ++sequence,
+                    CapturedAtUnixMs: now,
+                    IsKeyFrame: true,
+                    ScreenWidth: width,
+                    ScreenHeight: height,
+                    Tiles: null);
+            }
+            else
+            {
+                // Tile delta frame (Sadece değişen bloklar)
+                return new MultiScreenFrame(
+                    displayIndex,
+                    JpegBase64: null,
+                    Sequence: ++sequence,
+                    CapturedAtUnixMs: now,
+                    IsKeyFrame: false,
+                    ScreenWidth: width,
+                    ScreenHeight: height,
+                    Tiles: dirtyTiles.ToArray());
+            }
+        }
+        finally
+        {
+            capture.UnlockBits(bmpData);
+        }
+    }
+
+    private static unsafe ulong ComputeTileHash(byte* scan0, int stride, int x, int y, int w, int h)
+    {
+        ulong hash = 14695981039346656037UL;
+        for (int row = 0; row < h; row += 2)
+        {
+            var rowPtr = scan0 + (y + row) * stride + (x * 3);
+            var endPtr = rowPtr + (w * 3);
+            for (var ptr = rowPtr; ptr < endPtr; ptr += 6)
+            {
+                hash ^= *(uint*)ptr;
+                hash *= 1099511628211UL;
+            }
+        }
+        return hash;
+    }
+
+    private static string EncodeTileJpeg(Bitmap source, int x, int y, int w, int h, int quality)
+    {
+        using var tileBmp = source.Clone(new Rectangle(x, y, w, h), PixelFormat.Format24bppRgb);
+        using var stream = new MemoryStream();
+        SaveJpeg(tileBmp, stream, Math.Clamp((long)quality, 40, 96));
+        return Convert.ToBase64String(stream.ToArray());
     }
 
     public static int GetDisplayCount() => Math.Max(1, Screen.AllScreens.Length);
@@ -2068,6 +2843,8 @@ internal static class ScreenCapture
         return SystemInformation.VirtualScreen;
     }
 
+    private static readonly ImageCodecInfo? CachedJpegEncoder = GetEncoder(ImageFormat.Jpeg);
+
     public static string? CaptureJpegBase64(int displayIndex, int quality, bool forceSend)
     {
         DesktopHelper.AttachToActiveDesktop();
@@ -2118,11 +2895,24 @@ internal static class ScreenCapture
         LastFrameHashes[displayIndex] = rawHash;
 
         // 2. 1:1 Doğal Çözünürlük (1080p/2K/4K ekranları asla küçültmez, 4K üzerini kaliteli bicubic ile ölçekler)
-        using var targetBitmap = ResizeIfNeeded(capture, 3840);
-        using var stream = new MemoryStream();
-        SaveJpeg(targetBitmap, stream, Math.Clamp((long)quality, 40, 96));
+        Bitmap? resized = null;
+        Bitmap sourceToSave = capture;
+        if (capture.Width > 3840)
+        {
+            resized = ResizeBitmap(capture, 3840);
+            sourceToSave = resized;
+        }
 
-        return Convert.ToBase64String(stream.ToArray());
+        try
+        {
+            using var stream = new MemoryStream(128 * 1024);
+            SaveJpeg(sourceToSave, stream, Math.Clamp((long)quality, 40, 96));
+            return Convert.ToBase64String(stream.ToArray());
+        }
+        finally
+        {
+            resized?.Dispose();
+        }
     }
 
     private static unsafe ulong ComputeBitmapHash(Bitmap bmp)
@@ -2148,14 +2938,8 @@ internal static class ScreenCapture
         }
     }
 
-    private static Bitmap ResizeIfNeeded(Bitmap source, int maxWidth = 3840)
+    private static Bitmap ResizeBitmap(Bitmap source, int maxWidth)
     {
-        // 1080p, 2K (1440p) ve 4K (2160p) ekranları ASLA küçültme, 1:1 piksel netliğinde koru
-        if (source.Width <= maxWidth)
-        {
-            return (Bitmap)source.Clone();
-        }
-
         var aspect = (double)source.Height / source.Width;
         var newWidth = maxWidth;
         var newHeight = (int)Math.Max(1, Math.Round(newWidth * aspect));
@@ -2172,7 +2956,7 @@ internal static class ScreenCapture
 
     private static void SaveJpeg(Image image, Stream stream, long quality)
     {
-        var encoder = GetEncoder(ImageFormat.Jpeg);
+        var encoder = CachedJpegEncoder ?? GetEncoder(ImageFormat.Jpeg);
         if (encoder is null)
         {
             image.Save(stream, ImageFormat.Jpeg);
@@ -2208,8 +2992,8 @@ internal static class DesktopHelper
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr OpenWindowStation(string lpszWinSta, bool fInherit, uint dwDesiredAccess);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetProcessWindowStation(IntPtr hWinSta);
+    private const uint MAXIMUM_ALLOWED = 0x02000000;
+    private const uint DESKTOP_ALL = 0x01FF | MAXIMUM_ALLOWED;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseWindowStation(IntPtr hWinSta);
@@ -2217,28 +3001,60 @@ internal static class DesktopHelper
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
 
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenDesktop(string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetThreadDesktop(IntPtr hDesktop);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseDesktop(IntPtr hDesktop);
 
+    /// <summary>
+    /// Aktif masaüstüne (Default / Winlogon secure desktop) çağıran iş parçacığını iliştirir.
+    ///
+    /// Not: Önceki sürüm, açılan HDESK tanıtıcısını [ThreadStatic] bir alanda önbelliğe alıp yalnızca AYNI
+    /// iş parçacığı tekrar çağırdığında kapatıyordu. SetThreadDesktop çağıran iş parçacığına özgü olduğu
+    /// için bu, bu metodu HER ZAMAN aynı .NET Thread üzerinden çağıran yerlerde (ör. UI thread'indeki Timer)
+    /// doğru çalışıyordu; ama ekran yakalama döngüsü çıplak Task.Run + await zinciriyle çalıştığı için
+    /// (ThreadPool'da iterasyon başına farklı bir işletim sistemi thread'inde devam edebilir) her yeni pool
+    /// thread'i sıfırdan bir HDESK açıyor ve önceki thread'de açılan tanıtıcı hiç kapanmadan kalıyordu —
+    /// uzun/çoklu-ekran akış oturumlarında yavaş bir native handle sızıntısına yol açıyordu.
+    ///
+    /// SetThreadDesktop başarılı olduktan sonra kendi HDESK tanıtıcımızı hemen kapatmak güvenlidir:
+    /// iş parçacığı-masaüstü ilişkisini Windows ayrıca (dahili referansla) tutar, bizim tanıtıcımızı
+    /// thread'ler arası önbelleklememize gerek yoktur.
+    /// </summary>
     public static void AttachToActiveDesktop()
     {
         try
         {
-            var hWinSta = OpenWindowStation("winsta0", false, GENERIC_ALL);
-            if (hWinSta != IntPtr.Zero)
+            var hDesktop = OpenInputDesktop(0, false, DESKTOP_ALL);
+            if (hDesktop == IntPtr.Zero)
             {
-                SetProcessWindowStation(hWinSta);
-                CloseWindowStation(hWinSta);
+                hDesktop = OpenInputDesktop(0, false, MAXIMUM_ALLOWED);
             }
 
-            var hDesktop = OpenInputDesktop(0, false, GENERIC_ALL);
+            if (hDesktop == IntPtr.Zero)
+            {
+                hDesktop = OpenDesktop("Winlogon", 0, false, MAXIMUM_ALLOWED);
+            }
+
+            if (hDesktop == IntPtr.Zero)
+            {
+                hDesktop = OpenDesktop("Default", 0, false, MAXIMUM_ALLOWED);
+            }
+
             if (hDesktop != IntPtr.Zero)
             {
-                SetThreadDesktop(hDesktop);
-                CloseDesktop(hDesktop);
+                try
+                {
+                    SetThreadDesktop(hDesktop);
+                }
+                finally
+                {
+                    CloseDesktop(hDesktop);
+                }
             }
         }
         catch
@@ -2257,9 +3073,24 @@ internal static class InputHelperServer
     {
         var sessionId = Process.GetCurrentProcess().SessionId;
         var mutexName = $@"Global\NexMoteInputHelperMutex_{sessionId}";
-        using var mutex = new Mutex(initiallyOwned: true, mutexName, out var createdNew);
+        
+        Mutex? mutex = null;
+        bool createdNew;
+        try
+        {
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var mutexSecurity = new MutexSecurity();
+            mutexSecurity.AddAccessRule(new MutexAccessRule(worldSid, MutexRights.FullControl, AccessControlType.Allow));
+            mutex = MutexAcl.Create(true, mutexName, out createdNew, mutexSecurity);
+        }
+        catch
+        {
+            mutex = new Mutex(true, mutexName, out createdNew);
+        }
+
         if (!createdNew)
         {
+            mutex?.Dispose();
             return;
         }
 
@@ -2273,7 +3104,7 @@ internal static class InputHelperServer
                 using var server = NamedPipeServerStreamAcl.Create(
                     pipeName,
                     PipeDirection.In,
-                    maxNumberOfServerInstances: 1,
+                    maxNumberOfServerInstances: 4,
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous,
                     inBufferSize: 4096,
@@ -2288,7 +3119,7 @@ internal static class InputHelperServer
                     continue;
                 }
 
-                using var reader = new StreamReader(server);
+                using var reader = new StreamReader(server, Encoding.UTF8);
                 string? line;
                 while ((line = reader.ReadLine()) is not null)
                 {
@@ -2306,7 +3137,8 @@ internal static class InputHelperServer
     {
         try
         {
-            var input = JsonSerializer.Deserialize<RemoteInputEvent>(json);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var input = JsonSerializer.Deserialize<RemoteInputEvent>(json, options);
             if (input is null)
             {
                 return;
@@ -2457,7 +3289,14 @@ internal static class InputInjector
                 }
             }
         };
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
+        if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
+        {
+            try
+            {
+                mouse_event(MouseMove | MouseAbsolute | MouseVirtualDesk, normalizedX, normalizedY, 0, UIntPtr.Zero);
+            }
+            catch { }
+        }
     }
 
     public static void MouseButton(string? button, bool isDown)
@@ -2494,6 +3333,12 @@ internal static class InputInjector
     [DllImport("user32.dll")]
     private static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     public static void Keyboard(int keyCode, bool isDown)
     {
         DesktopHelper.AttachToActiveDesktop();
@@ -2523,12 +3368,19 @@ internal static class InputInjector
             }
         };
 
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
+        if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
+        {
+            try
+            {
+                keybd_event((byte)keyCode, (byte)scanCode, flags, UIntPtr.Zero);
+            }
+            catch { }
+        }
     }
 
     private static bool IsExtendedKey(int keyCode)
     {
-        return keyCode is 37 or 38 or 39 or 40 or 33 or 34 or 35 or 36 or 45 or 46 or 91 or 92;
+        return keyCode is 37 or 38 or 39 or 40 or 33 or 34 or 35 or 36 or 44 or 45 or 46 or 91 or 92 or 93 or 111 or 144 or 163 or 165;
     }
 
     private static void SendMouse(uint flags, int mouseData)
@@ -2546,7 +3398,14 @@ internal static class InputInjector
             }
         };
 
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
+        if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
+        {
+            try
+            {
+                mouse_event(flags, 0, 0, mouseData, UIntPtr.Zero);
+            }
+            catch { }
+        }
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -2690,11 +3549,10 @@ internal sealed record CommandRunResult(int ExitCode, string StdOut, string StdE
 /// </summary>
 internal static class CommandRunner
 {
-    public static Task<CommandRunResult> RunAsync(string shell, string command, int timeoutMs, bool runAsAdmin)
+    public static Task<CommandRunResult> RunAsync(string shell, string command, int timeoutMs, bool runAsAdmin = false)
     {
-        return runAsAdmin
-            ? RunElevatedAsync(shell, command, timeoutMs)
-            : RunStandardAsync(shell, command, timeoutMs);
+        // Hedef cihazda UAC veya Domain Admin şifre istemi çıkmaması için komutlar her zaman sessiz arka plan modunda (I/O redirection ile) yürütülür.
+        return RunStandardAsync(shell, command, timeoutMs);
     }
 
     /// <summary>
@@ -2709,10 +3567,26 @@ internal static class CommandRunner
         var isPowerShell = string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase);
         var fileName = isPowerShell ? "powershell.exe" : "cmd.exe";
         var outFile = Path.Combine(Path.GetTempPath(), $"nexmote_elevated_{Guid.NewGuid():N}.txt");
+        string? tempScript = null;
+        string arguments;
 
-        var arguments = isPowerShell
-            ? $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{command.Replace("\"", "\\\"")} *>&1 | Out-File -FilePath '{outFile}' -Encoding utf8\""
-            : $"/c \"{command} > \"{outFile}\" 2>&1\"";
+        if (isPowerShell)
+        {
+            var psScript = $"{command} *>&1 | Out-File -FilePath '{outFile}' -Encoding utf8";
+            var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
+            arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encodedScript}";
+        }
+        else
+        {
+            tempScript = Path.Combine(Path.GetTempPath(), $"nexmote_cmd_{Guid.NewGuid():N}.cmd");
+            // "chcp 65001" ile cmd.exe'nin bu betiği UTF-8 kod sayfasıyla yorumlaması sağlanır.
+            // Encoding.Default, .NET (Core) altında BOM'suz UTF-8'dir; ama cmd.exe .cmd dosyalarını
+            // varsayılan olarak sistem OEM kod sayfasıyla okur — bu uyumsuzluk Türkçe (ç/ğ/ı/ö/ş/ü)
+            // karakterler içeren komutları bozuyordu.
+            var batchContent = $"@echo off\r\nchcp 65001 >nul\r\n{command} > \"{outFile}\" 2>&1\r\n";
+            await File.WriteAllTextAsync(tempScript, batchContent, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            arguments = $"/c \"{tempScript}\"";
+        }
 
         var psi = new ProcessStartInfo(fileName, arguments)
         {
@@ -2748,6 +3622,13 @@ internal static class CommandRunner
         {
             // ERROR_CANCELLED: the user dismissed or denied the UAC prompt.
             elevationDenied = true;
+        }
+        finally
+        {
+            if (tempScript is not null && File.Exists(tempScript))
+            {
+                try { File.Delete(tempScript); } catch { }
+            }
         }
 
         stopwatch.Stop();
@@ -2837,16 +3718,10 @@ internal static class AgentSettings
     public static string LoadServerUrl()
     {
         var raw = LoadSetting("ServerUrl", "https://nexmote.com");
-        if (string.IsNullOrWhiteSpace(raw) || raw.Contains("192.168.0") || raw.Contains("127.0.0.1") || raw.Contains("localhost") || raw.StartsWith("http://"))
-        {
-            raw = "https://nexmote.com";
-            try
-            {
-                SaveSettings(raw, LoadEnrollmentKey());
-            }
-            catch { }
-        }
-        return raw;
+        // NormalizeUrl yerine EnforceProductionUrl: Tray de Windows Servisi (AgentClient) ile aynı şekilde
+        // localhost/özel IP adreslerini üretime zorlamalı, aksi halde aynı makinedeki iki süreç (SYSTEM
+        // servisi ve kullanıcı oturumundaki Tray) sessizce farklı sunucularla konuşabilir.
+        return NexMoteHttp.EnforceProductionUrl(raw);
     }
 
     public static string LoadEnrollmentKey()
@@ -2888,15 +3763,16 @@ internal static class AgentSettings
 
     public static void SaveSettings(string newUrl, string newKey)
     {
+        var normalizedUrl = NexMoteHttp.NormalizeUrl(newUrl);
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         var agentDir = Path.Combine(programData, "NexMote", "Agent");
         Directory.CreateDirectory(agentDir);
 
         var serviceConfigPath = Path.Combine(agentDir, "appsettings.json");
-        SaveConfigToPath(serviceConfigPath, newUrl, newKey);
+        SaveConfigToPath(serviceConfigPath, normalizedUrl, newKey);
 
         var baseConfigPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        SaveConfigToPath(baseConfigPath, newUrl, newKey);
+        SaveConfigToPath(baseConfigPath, normalizedUrl, newKey);
     }
 
     private static void SaveConfigToPath(string path, string newUrl, string newKey)

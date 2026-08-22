@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [string]$ServerUrl = "https://nexmote.com",
-    [string]$EnrollmentKey = "4ed67db20bb0167a310129162ba8a831aae0d1d014032086fa67ebe416bb2ec7",
-    [string]$Version = "0.5.4",
-    [string]$AgentReleaseNotes = "Ajan ve Teknisyen için etkileşimli güncelleme onay diyalogları ve modern arayüz eklendi.",
-    [string]$TechnicianReleaseNotes = "Teknisyen Konsolu Maximized pencere, KPI kartları, dinamik arama ve SaaS veri tablosu tasarımı uygulandı.",
+    [string]$EnrollmentKey = "",
+    [string]$AdminEmail = "admin@nexmote.com",
+    [string]$AdminPassword = "admin123",
+    [string]$Version = "0.6.2",
+    [string]$AgentReleaseNotes = "v0.6.2: Klavye ve fare girdi yonlendirme onarimi, sadelestirilmis sag tik menusu, Denetim Masasi uzerinden kaldirma ve arka plan guncelleme iyilestirmesi.",
+    [string]$TechnicianReleaseNotes = "v0.6.2: UTF-8 karakter duzeltmesi, canli ekran optimizasyonlari ve gelistirilmis uzaktan guncelleme yoneticisi.",
     [switch]$FrameworkDependent
 )
 
@@ -21,10 +23,60 @@ $downloads = Join-Path $root "downloads"
 $artifacts = Join-Path $root "artifacts\package"
 $agentPublish = Join-Path $artifacts "agent"
 $technicianPublish = Join-Path $artifacts "technician"
+$cleanerPublish = Join-Path $artifacts "cleaner"
 $agentProject = Join-Path $root "src\NexMote.Agent.Windows\NexMote.Agent.Windows.csproj"
 $trayProject = Join-Path $root "src\NexMote.Agent.Tray\NexMote.Agent.Tray.csproj"
 $technicianProject = Join-Path $root "src\NexMote.TechnicianApp\NexMote.TechnicianApp.csproj"
+$cleanerProject = Join-Path $root "src\NexMote.Cleaner\NexMote.Cleaner.csproj"
 $installerAssets = Join-Path $root "scripts\installer-assets"
+
+function Resolve-EnrollmentKey {
+    param(
+        [string]$ExplicitKey,
+        [string]$BaseUrl,
+        [string]$Email,
+        [string]$Password
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitKey)) {
+        return $ExplicitKey
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:NEXMOTE_ENROLLMENT_KEY)) {
+        Write-Host "Using EnrollmentKey from NEXMOTE_ENROLLMENT_KEY."
+        return $env:NEXMOTE_ENROLLMENT_KEY
+    }
+
+    $adminToken = $env:NEXMOTE_ADMIN_API_KEY
+    if ([string]::IsNullOrWhiteSpace($adminToken)) {
+        Write-Host "EnrollmentKey not provided. Fetching current key from $BaseUrl/api/settings..."
+        $loginBody = @{
+            email = $Email
+            password = $Password
+        } | ConvertTo-Json
+
+        try {
+            $login = Invoke-RestMethod -Uri "$($BaseUrl.TrimEnd('/'))/api/auth/login" -Method Post -ContentType "application/json" -Body $loginBody
+            $adminToken = $login.token
+        }
+        catch {
+            throw "EnrollmentKey was not provided and admin login failed. Pass -EnrollmentKey, set NEXMOTE_ENROLLMENT_KEY, or set NEXMOTE_ADMIN_API_KEY. Details: $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        $settings = Invoke-RestMethod -Uri "$($BaseUrl.TrimEnd('/'))/api/settings" -Headers @{ Authorization = "Bearer $adminToken" }
+        if ([string]::IsNullOrWhiteSpace($settings.enrollmentKey)) {
+            throw "Server returned an empty enrollmentKey."
+        }
+
+        Write-Host "Using current EnrollmentKey from server settings."
+        return [string]$settings.enrollmentKey
+    }
+    catch {
+        throw "Could not read current EnrollmentKey from server settings. Pass -EnrollmentKey explicitly. Details: $($_.Exception.Message)"
+    }
+}
 
 function Assert-UnderRoot {
     param([string]$Path)
@@ -38,11 +90,13 @@ function Assert-UnderRoot {
 Assert-UnderRoot $downloads
 Assert-UnderRoot $artifacts
 
+$EnrollmentKey = Resolve-EnrollmentKey -ExplicitKey $EnrollmentKey -BaseUrl $ServerUrl -Email $AdminEmail -Password $AdminPassword
+
 if (Test-Path $artifacts) {
     Remove-Item -LiteralPath $artifacts -Recurse -Force
 }
 
-New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $technicianPublish | Out-Null
+New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $technicianPublish, $cleanerPublish | Out-Null
 
 $selfContained = -not $FrameworkDependent.IsPresent
 $publishArgs = @("-c", "Release", "-r", "win-x64", "--self-contained", $selfContained.ToString().ToLowerInvariant())
@@ -64,6 +118,13 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Technician publish failed."
 }
+
+& $dotnet publish $cleanerProject @publishArgs -o $cleanerPublish
+if ($LASTEXITCODE -ne 0) {
+    throw "Cleaner publish failed."
+}
+
+Copy-Item (Join-Path $cleanerPublish "NexMote.Cleaner.exe") -Destination $agentPublish -Force
 
 $agentConfig = [ordered]@{
     Agent = [ordered]@{
@@ -95,15 +156,31 @@ if (Test-Path (Join-Path $installerAssets "technician")) {
     Copy-Item -LiteralPath (Join-Path $installerAssets "technician\README.txt") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
 }
 
-$agentZip = Join-Path $downloads "nexmote-agent-win-x64.zip"
-$technicianZip = Join-Path $downloads "nexmote-technician-win-x64.zip"
+Write-Host "Building Fast Standalone Installers (Inno Setup)..."
+$isccPaths = @(
+    "ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe"
+)
+$isccExe = $null
+foreach ($path in $isccPaths) {
+    if (Get-Command $path -ErrorAction SilentlyContinue) { $isccExe = $path; break }
+    if (Test-Path $path) { $isccExe = $path; break }
+}
 
-Remove-Item -LiteralPath $agentZip, $technicianZip -Force -ErrorAction SilentlyContinue
+if ($isccExe) {
+    Write-Host "Using Inno Setup Compiler: $isccExe"
+    Remove-Item -Path (Join-Path $downloads "NexMote-*.exe") -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+    $agentIss = Join-Path $PSScriptRoot "agent-setup.iss"
+    $techIss = Join-Path $PSScriptRoot "technician-setup.iss"
+    & $isccExe "/DMyAppVersion=$Version" "/Q" $agentIss
+    & $isccExe "/DMyAppVersion=$Version" "/Q" $techIss
+    Write-Host "Created Inno Setup Installers in $downloads"
+}
 
-Compress-Archive -Path (Join-Path $agentPublish "*") -DestinationPath $agentZip -Force
-Compress-Archive -Path (Join-Path $technicianPublish "*") -DestinationPath $technicianZip -Force
-
-Write-Host "Building Native Windows MSI Installers..."
+Write-Host "Compiling WiX MSI Installers..."
 $buildMsiScript = Join-Path $PSScriptRoot "build-msi.ps1"
 if (Test-Path $buildMsiScript) {
     & powershell -ExecutionPolicy Bypass -File $buildMsiScript -ServerUrl $ServerUrl -EnrollmentKey $EnrollmentKey -Version $Version
@@ -119,9 +196,8 @@ $versionsManifest = [ordered]@{
         releaseNotes = $TechnicianReleaseNotes
     }
 }
-$versionsManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $downloads "versions.json") -Encoding UTF8
+[System.IO.File]::WriteAllText((Join-Path $downloads "versions.json"), ($versionsManifest | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
 
-Write-Host "Created $agentZip"
-Write-Host "Created $technicianZip"
+Write-Host "Packaging Complete in Record Time!"
 Write-Host "Wrote $(Join-Path $downloads 'versions.json') (version $Version)"
 Write-Host "Agent ServerUrl: $ServerUrl"

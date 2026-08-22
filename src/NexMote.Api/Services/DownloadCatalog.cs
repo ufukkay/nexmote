@@ -20,6 +20,13 @@ public sealed class DownloadCatalog
             "Teknisyen bilgisayarına kurulur. nexmote:// protokolü ile canlı oturumları ve cihaz listesini açar.",
             "NexMote-Technician-Setup.msi",
             "Çok Dilli (Multi-Language)",
+            true),
+        new(
+            "cleanup",
+            "NexMote Tam Kaldırıcı & Derin Temizleyici (MSI)",
+            "Cihazda bulunan tüm NexMote Ajanı, Teknisyen Konsolu, Windows Servisi, Kayıt Defteri anahtarları ve artık dosyalarını derinlemesine tamamen kaldırır ve temizler.",
+            "NexMote-Cleanup-Setup.msi",
+            "Çok Dilli (Multi-Language)",
             true)
     ];
 

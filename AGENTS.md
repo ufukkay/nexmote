@@ -2,6 +2,43 @@
 
 Bu doküman, **NexMote** projesini geliştiren, inceleyen veya projenin herhangi bir modülüne kod ekleyen tüm Yapay Zeka (AI) ajanları (Antigravity, Cursor, Claude Code, GitHub Copilot, Windsurf vb.) için hazırlanmış **Kapsamlı Master Rehber ve Teknik Mimarı Dokümanıdır**.
 
+## 📜 DEĞİŞTİRİLEMEZ AJAN ANA YASASI (4 TEMEL MADDE)
+
+Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan Servisi, Tray Uygulaması ve Teknisyen Konsolu) **asla taviz verilemeyecek, her zaman çalışması zorunlu olan 4 Temel Ana Yasa Maddesini** tanımlar. Proje üzerinde çalışan her Yapay Zeka (AI) geliştirici ve yazılımcı, herhangi bir kod değişikliği veya derleme yapmadan önce bu maddeleri kontrol etmek ve sistemin bu kurallara %100 uyduğunu garanti etmekle yükümlüdür.
+
+### 📌 Madde 1: Ajan Windows Açılır Açılmaz Otomatik Başlayacaktır
+- **Kural:** Bilgisayar yeniden başlatıldığında, açıldığında veya herhangi bir kullanıcı oturum açtığında NexMote Ajanı hiçbir kullanıcı müdahalesine gerek kalmadan arka planda anında devreye girmelidir.
+- **Teknik Güvenceler (Çift Katmanlı Koruma):**
+  1. **Windows Servisi (`NexMote.Agent.Windows`):** `LocalSystem` yetkisiyle `Start="auto"` olarak çalışır. `RunSessionWatchdogAsync` gözlemcisi 1 saniyede bir aktif kullanıcı oturumunu denetler; oturum açıldığı an `NexMote.Agent.Tray.exe --tray` sürecini doğrudan kullanıcının masaüstüne enjekte eder.
+  2. **Kayıt Defteri (`HKLM\Software\Microsoft\Windows\CurrentVersion\Run`):** `NexMoteAgentTray` anahtarı ile Windows açılışında tüm kullanıcılar için otomatik başlatma tanımlıdır.
+
+### 📌 Madde 2: Ajan Alt Kısımda (Sistem Tepsisinde / Tray) Simge Olarak Gelecektir
+- **Kural:** Ajan başlatıldığında kullanıcının karşısına aniden büyük pencereler, formlar veya dikkat dağıtıcı ekranlar fırlatmayacaktır. Doğrudan sağ alt köşedeki Sistem Tepsisinde (Notification Tray) zarif ve yeşil kalkanlı durum simgesiyle sessizce yerini alacaktır.
+- **Teknik Güvenceler:**
+  1. `NexMote.Agent.Tray.exe` varsayılan olarak `openDashboardOnStart = false` ile açılır.
+  2. Yalnızca kullanıcı tepsi simgesine çift tıkladığında veya Başlat menüsündeki kısayola bilerek bastığında antivirüs tarzı modern Durum Paneli (`DashboardForm`) açılır.
+
+### 📌 Madde 3: Ajan Kurulumu (MSI) Biter Bitmez Otomatik Açılacaktır
+- **Kural:** Teknisyen veya son kullanıcı `NexMote-Agent-Setup.msi` paketini kurduğu anda (ister arayüzlü ister `/qn` sessiz kurulum olsun), bilgisayarı yeniden başlatmaya gerek kalmadan servis ve tepsi ajanı hemen çalışmaya başlayacaktır.
+- **Teknik Güvenceler:**
+  1. WiX MSI paketi `ServiceControl Id="ServiceControl" Start="install"` ile kurulumun son adımında servisi anında ayağa kaldırır.
+  2. Servis başladığı saniye aktif oturumu algılayıp tepsi uygulamasını ekrana getirir.
+  3. MSI ExitDialog penceresi sonlandığında `LaunchTrayAppExecSequence` ile tepsi uygulaması `--tray` argümanıyla derhal tetiklenir.
+
+### 📌 Madde 4: Her Açılışta Ajan ve Teknisyen Uygulaması Güncelleme Durumunu Kontrol Edecektir
+- **Kural:** Hem Ajan (`NexMote.Agent.Tray`) hem de Teknisyen Uygulaması (`NexMote.TechnicianApp`) her açılışında sunucu üzerinden (`/api/updates/check`) en güncel sürümün yayında olup olmadığını kontrol edecektir.
+- **Teknik Güvenceler:**
+  1. **Ajan:** Başlangıçtan 3-4 saniye sonra sessizce `CheckForAgentUpdatesAsync(isManual: false)` çalıştırır. Yeni sürüm varsa arka planda `%ProgramData%\NexMote\Agent\pending-update.msi` konumuna indirilir ve Windows Servisi tarafından LocalSystem yetkisiyle sessizce kurulur.
+  2. **Teknisyen:** Pencere yüklendiği an (`MainWindow_Loaded`) `CheckForUpdatesAsync(isManual: false)` çalıştırır; yeni teknisyen MSI'ı varsa teknisyene tek tıkla güncelleme imkanı sunar.
+
+#### 📋 Doğrulama & Kontrol Listesi
+| Madde | Kontrol Noktası | Beklenen Durum |
+| :---: | :--- | :--- |
+| **1** | Windows Açılışı | Windows yeniden başlatıldığında Ajan otomatik devreye giriyor mu? |
+| **2** | Sessiz Tepsi | Ajan açıldığında ekrana popup fırlatmadan sağ altta simge olarak bekliyor mu? |
+| **3** | Kurulum Sonrası | MSI kurulumu biter bitmez cihaz web panelinde anında "Çevrimiçi" oluyor mu? |
+| **4** | Açılış Güncellemesi | Ajan ve Teknisyen açılırken `/api/updates/check` adresini sorguluyor mu? |
+
 ---
 
 ## 📌 Proje Özeti & Vizyon
@@ -9,10 +46,10 @@ Bu doküman, **NexMote** projesini geliştiren, inceleyen veya projenin herhangi
 **NexMote**, kurumsal düzeyde uzaktan bilgisayar yönetimi, canlı masaüstü izleme/kontrolü, uzak terminal komut çalıştırma ve istemci destek platformudur (AnyDesk, RustDesk ve TeamViewer alternatifi).
 
 - **Canlı Sistem URL:** [https://nexmote.com](https://nexmote.com)
-- **Sunucu IP Adresi:** `72.62.198.100` (Hostinger Ubuntu 24.04 LTS VPS)
+- **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
 - **Sağlık Endpoint:** `https://nexmote.com/health` -> `{"product":"NexMote","status":"ok"}`
 - **Erişim Dokümanı:** [docs/server-credentials.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/docs/server-credentials.md) (git'te takip edilmiyor, sadece yerel)
-- **Güncel Client Sürümü:** `0.5.0` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi))
+- **Güncel Client Sürümü:** `0.6.3` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
 
 ---
 
@@ -20,47 +57,105 @@ Bu doküman, **NexMote** projesini geliştiren, inceleyen veya projenin herhangi
 
 ```
 NexMote/
-├── AGENTS.md                 # Master AI Geliştirici ve Proje Mimarı Dokümanı
+├── AGENTS.md                 # Master AI Geliştirici, Proje Mimarı & Ana Yasa Dokümanı
+├── CHANGELOG.md              # Sürüm Günlüğü, Değişiklik Tarihçesi ve Versiyon Notları
+├── README.md                 # Proje Genel Bakış, Hızlı Başlangıç & Canlı Sistem Rehberi
 ├── NexMote.sln               # Ana Visual Studio Solution Dosyası (Tüm src/ projelerini içerir)
 ├── src/                      # Tüm .NET 8 Kaynak Kodları (Tek Çatı Altında)
 │   ├── NexMote.Api/          # ASP.NET Core 8 Web API & SignalR Sunucusu
 │   │   ├── Auth/             # AdminAuthFilter.cs (Bearer token korumalı endpoint filtresi)
 │   │   ├── Data/             # AppDbContext (Entity Framework Core SQLite)
 │   │   ├── Hubs/             # SignalingHub.cs (/hubs/signaling - WebSocket Canlı Akış)
-│   │   ├── Services/         # DeviceRegistry, RemoteSessionRegistry, DownloadCatalog
+│   │   ├── Services/         # DeviceRegistry, RemoteSessionRegistry, DownloadCatalog, SignalSessionAccess
 │   │   ├── wwwroot/          # Üretilen React Web Ön Yüzü Statik Dosyaları (Vite dist)
 │   │   ├── Program.cs        # Uygulama Başlangıcı, static files, CORS, SignalR, admin auth grubu & Route Haritası
 │   │   ├── appsettings.json  # Dev konfigürasyonu
 │   │   └── appsettings.Production.json # Prod konfigürasyonu
 │   ├── NexMote.Agent.Windows/# Windows Background Service (LocalSystem, 20s Heartbeat, gerçek CPU telemetrisi,
 │   │                         #  self-update kurulumu, input-helper oturum enjeksiyonu, UAC secure-desktop ayarı)
+│   │                         #  AgentConfiguration.cs, SystemTelemetry.cs, Worker.cs, SessionProcessLauncher.cs
 │   ├── NexMote.Agent.Tray/   # Kullanıcı oturumunda çalışan Tray uygulaması: antivirüs tarzı durum paneli,
-│   │                         #  çoklu ekran eş zamanlı yayın, otomatik kalite, uzak komut/UAC yükseltme,
+│   │                         #  çoklu ekran eş zamanlı yayın, sıfır gecikmeli akıllı adaptif motor (4 kademe),
 │   │                         #  --input-helper modu (SYSTEM yetkili girdi enjeksiyonu, UAC'a tıklamak için)
-│   ├── NexMote.TechnicianApp/# Teknisyen Masaüstü Uygulaması (WPF .NET 8, web konsoluyla aynı açık SaaS teması)
-│   └── NexMote.Shared/       # Ortak Veri Tipleri & Kontrat Kütüphanesi (Contracts/*.cs)
+│   ├── NexMote.TechnicianApp/# Teknisyen Masaüstü Uygulaması (WPF .NET 8, web konsoluyla aynı açık SaaS teması,
+│   │                         #  canlı çoklu monitör, kalite profili seçici [Oto/Hız/Dengeli/Kristal], uzak terminal)
+│   └── NexMote.Shared/       # Ortak Veri Tipleri & Konsolide Kontrat Kütüphanesi
+│       ├── Contracts/        # AuthContracts.cs, AgentContracts.cs, SessionContracts.cs, StreamingContracts.cs
+│       └── Network/          # NexMoteHttp.cs (DNS gecikme korumalı soket yöneticisi)
 ├── web/                      # React 18 + TypeScript + Vite Web Teknisyen Konsolu
 │   └── src/
-│       ├── App.tsx           # Ana UI Bileşeni (Login, Cihaz Listesi, Donanım Metrikleri, Terminal, İndirmeler)
+│       ├── App.tsx           # Ana UI Bileşeni (Login, Cihaz Listesi, Detay Paneli [Genel Bakış/Performans/Terminal/Aktivite sekmeleri], İndirmeler)
 │       ├── api.ts            # REST API Fetch Kontratları, DTO Tipleri, admin token yönetimi
 │       ├── main.tsx          # React DOM Başlangıç Noktası
 │       └── styles.css        # Vanilla CSS SaaS Tasarım Sistemi (Glassmorphism, Light Theme, CSS Variables)
-├── docs/                     # Sistem Dokümantasyonları ve Güvenlik
-│   ├── server-credentials.md # VPS IP, Root Şifresi, SSH Anahtar Bilgileri, Admin/Enrollment sırlarının okunma yolu
-│   ├── architecture.md       # Sistem Mimarisi ve Veri Akış Şeması
-│   ├── security-model.md     # Güvenlik ve Yetkilendirme Modeli
-│   └── infra/                # dev-run.md, iis-publish.md (Nginx ve Systemd Yayına Alma Dokümanları)
 ├── scripts/
-│   ├── package-windows.ps1   # Agent+Technician'ı publish edip MSI'ları üretir, downloads/versions.json yazar
-│   ├── build-msi.ps1         # WiX v4 ile .wxs üretip MSI derler (Version parametreli)
-│   └── installer-assets/     # MSI localization ve fallback yükleyici betikler
+│   ├── package-windows.ps1   # Agent+Technician'ı publish edip Inno Setup (.exe) / WiX (.msi) üretir
+│   ├── agent-setup.iss       # Inno Setup 1.5 saniyelik ultra hızlı Agent yükleyici konfigürasyonu
+│   ├── technician-setup.iss  # Inno Setup 1.5 saniyelik ultra hızlı Teknisyen yükleyici konfigürasyonu
+│   ├── build-msi.ps1         # WiX v4 ile kurumsal per-machine .msi derleme betiği
+│   └── installer-assets/     # Installer lisans ve grafik bileşenleri
 ├── assets/                   # Uygulama İkonları (nexmote.ico)
-└── downloads/                # Üretilen Dağıtım Paketleri (MSI / ZIP) ve versions.json
+└── downloads/                # Üretilen Dağıtım Paketleri (EXE / MSI) ve versions.json
 ```
 
 ---
 
-## 📊 Veritabanı Mimarisi (EF Core & SQLite)
+## 🏗️ Genel Mimari ve Veri Akış Şeması
+
+```
+                            [ Web Teknisyen Konsolu ] (React 18 + TS + Vite)
+                                       │
+                                       ▼  (REST API: /api/devices, /api/remote-sessions)
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                               NEXMOTE BACKEND SUNUCUSU                                │
+│                   (ASP.NET Core 8 Minimal API + SignalR + SQLite)                      │
+│                                                                                        │
+│   ├── REST Endpoints: Auth, Cihaz Kayıt (Enroll), Heartbeat, Settings, OTA Updates     │
+│   ├── SignalR Hub (/hubs/signaling): Çoklu ekran karesi, girdi, komut ve dosya rölesi │
+│   └── Veritabanı (nexmote.db): Devices, RemoteSessions, ServerSettings, CommandAudits   │
+└───────────────────────┬────────────────────────────────────────┬───────────────────────┘
+                        │                                        │
+     (WebSocket / WSS)  │                                        │  (WebSocket / WSS & nexmote://)
+                        ▼                                        ▼
+┌───────────────────────────────────────────────┐ ┌──────────────────────────────────────┐
+│            HEDEF WINDOWS İSTEMCİSİ            │ │      TEKNİSYEN MASAÜSTÜ UYGULAMASI   │
+│                                               │ │            (WPF .NET 8)              │
+│  ┌─────────────────────────────────────────┐  │ │                                      │
+│  │ Windows Background Service (LocalSystem)│  │ │  ├── Canlı Oturum (Multi-Screen)     │
+│  │ ├── 20s Heartbeat & Gerçek CPU Sampler  │  │ │  ├── Fare & Klavye Koordinat Haritası│
+│  │ ├── UAC & SAS Registry Ayarları         │  │ │  ├── Uzak Shell (CMD/PowerShell)     │
+│  │ ├── Pending MSI/EXE Otomatik Kurulumu   │  │ │  ├── Kalite Modu (Oto/Hız/Dengeli)   │
+│  │ └── 1s Session Watchdog & Launcher      │  │ │  └── Güç Yönetimi & Yeniden Başlatma │
+│  └────────────────────┬────────────────────┘  │ └──────────────────────────────────────┘
+│                       │ (CreateProcessAsUser  │
+│                       │  + SeTcbPrivilege)    │
+│  ┌────────────────────▼────────────────────┐  │
+│  │ Aktif Oturum Süreçleri (User Session)   │  │
+│  │ ├── NexMote.Agent.Tray.exe (--tray)     │  │
+│  │ │   ├── Tray Icon & Dashboard Paneli    │  │
+│  │ │   ├── Çoklu Ekran GDI+ Yakalama       │  │
+│  │ │   └── 4 Kademeli Adaptif Akış Motoru  │  │
+│  │ └── NexMote.Agent.Tray.exe              │  │
+│  │     (--input-helper / SYSTEM Yetkili)   │  │
+│  │     └── Named Pipe Girdi Enjektörü      │  │
+│  │         (UAC Onay Tıklamaları İçin)     │  │
+│  └─────────────────────────────────────────┘  │
+└───────────────────────────────────────────────┘
+```
+
+---
+
+## 🔒 Güvenlik & Yetkilendirme Modeli
+
+1. **Uçtan Uca İletişim Güvenliği:** Tüm iletişim HTTPS / WSS (TLS 1.3) üzerinden şifrelenir.
+2. **Kimlik Doğrulama Katmanları:**
+   - **Admin / Teknisyen:** `POST /api/auth/login` ile Bearer Token alır. Tüm yönetimsel endpoint'ler (`/api/devices`, `/api/settings`, `/api/remote-sessions`, `/api/agents/*/update`) `AdminAuthFilter` ile sıkı şekilde korunur.
+   - **Agent Kayıt (Enrollment):** Sunucuda belirlenen gizli `EnrollmentKey` gerektirir.
+   - **Agent Canlılık (Heartbeat & Audit):** Kayıt anında sunucu tarafından üretilen 32 baytlık cihaza özel `AgentToken` ile doğrulanır.
+3. **UAC ve Yönetici Yetkileri:**
+   - Uzak komutlarda "Yönetici Olarak Çalıştır" seçildiğinde komut doğrudan Windows `runas` ile yükseltilir.
+   - SYSTEM yetkili `--input-helper` modülü, Windows `SoftwareSASGeneration` ve `PromptOnSecureDesktop=0` ile UAC pencerelerine teknisyenin güvenle tıklayabilmesini sağlar.
+4. **Denetim (Audit Logging):** Çalıştırılan tüm CMD ve PowerShell komutları, çıkış kodları, standart hata ve çıktı özetleriyle birlikte veritabanında `CommandAudits` tablosuna kaydedilir.
 
 SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 
@@ -72,7 +167,7 @@ SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 | `DomainName` | string | Çalışma Grubu / Domain |
 | `OperatingSystem` | string | İşletim Sistemi Sürümü |
 | `AgentVersion` | string | Yüklü Agent Sürümü — **her heartbeat'te güncellenir** (sadece enrollment anında değil), gerçek çalışan assembly versiyonundan okunur |
-| `ActiveUser` | string | ⚠️ Bilinen kusur: bu alan LocalSystem olarak çalışan Windows Servisi'nin heartbeat kodundan geliyor, bu yüzden gerçek oturum açmış kullanıcı yerine genelde makine hesabını (`DOMAIN\MAKINE$`) gösterir |
+| `ActiveUser` | string | LocalSystem servisi, `SessionProcessLauncher.GetActiveSessionUserName()` ile aktif konsol oturumunu `WTSQuerySessionInformation` (WTSUserName/WTSDomainName) üzerinden doğrudan sorgular — gerçek oturum kullanıcısını (`DOMAIN\kullanici`) döner. Oturumda kimse giriş yapmamışsa (kilit/giriş ekranı) makine hesabına (`DOMAIN\MAKINE$`) geri düşer. |
 | `IpAddress` | string | Yerel / Dış IP Adresi |
 | `LocationCode` | string | Lokasyon Kodu (Örn: OFFICE, LAB) |
 | `CpuUsagePercent` | double | **Gerçek** CPU kullanımı — `GetSystemTimes` ile ölçülür, 10 dakikalık kayan pencere ortalaması (`CpuUsageSampler.cs`); RAM'den türetilen eski sahte hesaplama kaldırıldı |
@@ -155,6 +250,7 @@ Backend'de daha önce **hiç kimlik doğrulama yoktu** — `/api/devices`, `/api
 3. **Disk:** `DriveInfo` ile sistem sürücüsü boş alanı.
 4. **IPv4:** Sanal ağ kartları (Hyper-V, WSL, VMware) filtrelenir, gerçek fiziksel yerel IP tespit edilir. (`NetworkInfo.cs` — kullanılmayan, daha zayıf bir kopyaydı — silindi.)
 5. **Web Konsolu:** `App.tsx` Donanım & Performans kartlarında artık backend'den gelen **gerçek** değerleri gösterir; ayrıca cihazın versiyonu `/api/updates/check`'teki en güncel sürümden eskiyse turuncu "Güncelleme mevcut" rozeti çıkar.
+6. **Cihaz Detay Paneli (Pixven'den esinlenen sekme ayrımı — `docs/pixven-agent-feature-review.md`):** Sağdaki detay çekmecesi `Genel Bakış` (kimlik: OS, IP, aktif kullanıcı, domain, lokasyon, ajan sürümü, cihaz ID) ve `Performans` (CPU/RAM/Disk gauge'ları) olarak iki ayrı sekmeye bölündü (eskiden tek "Donanım" sekmesiydi). Cihaz çevrimdışıysa hem Genel Bakış'ta son görülme zamanı gösterilir hem de Performans sekmesinde `.stale-data-notice` uyarı bandıyla verinin güncel olmayabileceği belirtilir — Pixven incelemesinde tespit edilen "çevrimdışı cihazda hangi verinin bayat olduğu belli değil" sorununa karşı bilinçli bir tasarım kararı.
 
 ---
 
@@ -239,7 +335,7 @@ cmd /c "npm --prefix web run build"
 
 ### 3. Backend Sunucuyu Yerelde Çalıştırma
 ```powershell
-.\.dotnet\dotnet.exe run --project backend/src/NexMote.Api/NexMote.Api.csproj --urls "http://127.0.0.1:5080"
+.\.dotnet\dotnet.exe run --project src/NexMote.Api/NexMote.Api.csproj --urls "http://127.0.0.1:5080"
 ```
 Yerel geliştirmede `Admin:ApiKey` = `dev-admin-api-key`, `Enrollment:Key` = `dev-enrollment-key` (appsettings.json'da tanımlı, production'da KULLANILMAZ).
 
@@ -255,28 +351,28 @@ Bu, `downloads/NexMote-Agent-Setup.msi`, `downloads/NexMote-Technician-Setup.msi
 ### 5. Canlı Sunucuya Yayınlama (Deploy to Production)
 ```powershell
 # 1. Linux x64 paketini derle
-.\.dotnet\dotnet.exe publish backend/src/NexMote.Api/NexMote.Api.csproj -c Release -r linux-x64 --self-contained false -o ./publish-linux
+.\.dotnet\dotnet.exe publish src/NexMote.Api/NexMote.Api.csproj -c Release -r linux-x64 --self-contained false -o ./publish-linux
 
 # 2. Web ön yüzünü derle ve kopyala
 cmd /c "npm --prefix web run build"
 powershell -Command "New-Item -ItemType Directory -Force -Path 'publish-linux\wwwroot'; Copy-Item -Recurse -Force 'web\dist\*' 'publish-linux\wwwroot\'"
 
 # 3. Ziple ve SCP ile sunucuya yükle
-powershell -Command "Compress-Archive -Path 'publish-linux\*' -DestinationPath 'publish-linux.zip' -Force; scp -i '$env:USERPROFILE\.ssh\id_ed25519' 'publish-linux.zip' root@72.62.198.100:/tmp/publish-linux.zip"
+powershell -Command "Compress-Archive -Path 'publish-linux\*' -DestinationPath 'publish-linux.zip' -Force; scp -i '$env:USERPROFILE\.ssh\id_ed25519' 'publish-linux.zip' root@186.241.21.133:/tmp/publish-linux.zip"
 
 # 4. Sunucuda aç ve servisi yeniden başlat
-powershell -Command "ssh -i '$env:USERPROFILE\.ssh\id_ed25519' root@72.62.198.100 'unzip -o /tmp/publish-linux.zip -d /var/www/nexmote/ && systemctl restart nexmote.service'"
+powershell -Command "ssh -i '$env:USERPROFILE\.ssh\id_ed25519' root@186.241.21.133 'unzip -o /tmp/publish-linux.zip -d /var/www/nexmote/ && systemctl restart nexmote.service'"
 
 # 5. MSI'ları HER İKİ downloads klasörüne de yükle (bkz. yukarıdaki not)
-scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@72.62.198.100:/var/www/nexmote/wwwroot/downloads/
-scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@72.62.198.100:/var/www/nexmote/downloads/
+scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@186.241.21.133:/var/www/nexmote/wwwroot/downloads/
+scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@186.241.21.133:/var/www/nexmote/downloads/
 ```
 
 ---
 
 ## 🌐 Canlı Sunucu (Production) Özeti
 
-- **İşletim Sistemi:** Ubuntu 24.04.4 LTS (Hostinger KVM 1 VPS - `72.62.198.100`)
+- **İşletim Sistemi:** Ubuntu 24.04.4 LTS (Hostinger Germany - Frankfurt VPS - `186.241.21.133`)
 - **Web Sunucu:** Nginx (`/etc/nginx/sites-available/nexmote`) - Reverse Proxy & WebSocket Headers
 - **SSL Sertifikası:** Let's Encrypt Certbot 256-bit SSL (`https://nexmote.com`, `https://www.nexmote.com`, `https://api.nexmote.com`)
 - **Servis Yöneticisi:** `systemd` (`nexmote.service` -> `/var/www/nexmote/NexMote.Api.dll --urls http://127.0.0.1:5080`)
@@ -286,12 +382,32 @@ scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi down
 
 ---
 
-## ⚠️ Bilinen Kusurlar / Devam Eden İşler
+## 🔍 Log Konumları, Kurulum Parametreleri & Sorun Giderme
 
-1. **`ActiveUser` alanı yanlış:** Windows Servisi'nin (LocalSystem) heartbeat kodu `Environment.UserName` okuyor, bu LocalSystem bağlamında gerçek oturum kullanıcısını değil makine hesabını (`DOMAIN\MAKINE$`) döndürüyor. Düzeltme, Tray'in (kullanıcı oturumunda çalışır) bu bilgiyi ayrıca bildirmesini gerektirir.
-2. **UAC/SYSTEM input helper saha testi bekliyor:** `SessionProcessLauncher` + `--input-helper` mekanizması standart bir teknik kullanıyor ama gerçek bir hedef makinede uçtan uca doğrulanmadı.
-3. **Bootstrap catch-22:** 0.3.2 öncesi bir agent, kendi kendine güncelleme mekanizmasındaki düzeltmeyi de otomatik alamaz — en az bir kez elle MSI kurulumu gerekiyor.
+### 1. Kurulum ve Çalışma Logları (Agent & Teknisyen)
+- **Windows Servisi ve Ajan Logları:** `C:\ProgramData\NexMote\Logs\agent-service.log`
+- **Süreç Başlatma Hata Logları:** `C:\ProgramData\NexMote\Logs\agent-service-startup-error.log`
+- **Genel Sistem Logları:** `C:\ProgramData\NexMote\Logs\`
+
+### 2. Kurulum ve Sessiz Dağıtım Parametreleri
+- **Inno Setup (`.exe`):**
+  - Tamamen sessiz, bildirim vermeden, yeniden başlatmadan kurulum:
+    ```cmd
+    NexMote-Agent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+    ```
+- **Windows Installer (`.msi`):**
+  - Active Directory GPO / Intune sessiz kurulum:
+    ```cmd
+    msiexec /i NexMote-Agent-Setup.msi /qn /norestart
+    ```
+
+### 3. Sık Karşılaşılan Durumlar ve Çözümleri
+- **Cihaz Web Konsolunda "Çevrimiçi" Görünmüyor:**
+  - `C:\ProgramData\NexMote\Logs\agent-service.log` dosyasını inceleyin. `ServerUrl`'in `https://nexmote.com` olduğundan ve ağ güvenlik duvarının outbound 443 portunu engellemediğinden emin olun.
+- **Kullanıcı Oturumunda Tepsi Simgesi Çıkmıyor:**
+  - `Task Manager` üzerinden `NexMote.Agent.Tray.exe` sürecinin çalışıp çalışmadığını kontrol edin. Servis `RunSessionWatchdogAsync` ile her saniye oturumu denetler.
 
 ---
 
 *Gelecekte projeye müdahale edecek tüm AI geliştiriciler bu master rehberdeki mimariye, veritabanı şemasına ve tasarım kurallarına bağlı kalmalıdır.*
+

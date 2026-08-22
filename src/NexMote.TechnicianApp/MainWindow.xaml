@@ -1,20 +1,21 @@
 <Window x:Class="NexMote.TechnicianApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="NexMote - Teknisyen Konsolu" Height="800" Width="1280"
+        Title="NexMote - Teknisyen Konsolu" Height="820" Width="1360"
         MinHeight="600" MinWidth="900"
         WindowState="Maximized"
-        Background="#F8FAFC"
-        FontFamily="Segoe UI"
+        Background="#0B0F19"
+        Foreground="#F8FAFC"
+        FontFamily="Segoe UI Variable, Segoe UI"
         WindowStartupLocation="CenterScreen"
         PreviewKeyDown="Window_PreviewKeyDown"
         PreviewKeyUp="Window_PreviewKeyUp">
     <Window.Resources>
         <!-- Light SaaS button, matches the web console's palette (blue accent, white/slate surfaces) -->
         <Style x:Key="ToolBtn" TargetType="Button">
-            <Setter Property="Background" Value="#FFFFFF"/>
-            <Setter Property="Foreground" Value="#334155"/>
-            <Setter Property="BorderBrush" Value="#E2E8F0"/>
+            <Setter Property="Background" Value="#1E293B"/>
+            <Setter Property="Foreground" Value="#F8FAFC"/>
+            <Setter Property="BorderBrush" Value="#334155"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="12,7"/>
             <Setter Property="Margin" Value="3,0"/>
@@ -148,13 +149,13 @@
                     <Border Background="#ECFDF5" BorderBrush="#A7F3D0" BorderThickness="1" CornerRadius="8" Padding="10,4" Margin="0,0,10,0">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <Ellipse Width="7" Height="7" Fill="#10B981" Margin="0,0,6,0"/>
-                            <TextBlock Text="https://nexmote.com" Foreground="#047857" FontSize="11.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="HeaderServerUrlText" Text="https://nexmote.com" Foreground="#047857" FontSize="11.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
                     <Border Background="#F1F5F9" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="8" Padding="10,4">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="👤" Margin="0,0,5,0" FontSize="11"/>
-                            <TextBlock Text="admin@nexmote.com" Foreground="#334155" FontSize="11.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" Margin="0,0,6,0" FontSize="11" Foreground="#64748B"/>
+                            <TextBlock x:Name="HeaderUserText" Text="Yönetici" Foreground="#334155" FontSize="11.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -168,7 +169,7 @@
                     <StackPanel VerticalAlignment="Center">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="NexMote" Foreground="#0F172A" FontSize="15" FontWeight="Bold" />
-                            <TextBlock Text="Teknisyen Konsolu" Foreground="#64748B" FontSize="12" Margin="8,2,0,0" FontWeight="SemiBold"/>
+                            <TextBlock Text="Teknisyen konsolu" Foreground="#64748B" FontSize="12" Margin="8,2,0,0" FontWeight="SemiBold"/>
                         </StackPanel>
                         <TextBlock x:Name="SessionText" Foreground="#94A3B8" FontSize="11" Text="Oturum bekleniyor..." Margin="0,1,0,0"/>
                     </StackPanel>
@@ -193,13 +194,14 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
                     <!-- Card 1: Toplam Cihaz -->
                     <Border Grid.Column="0" Background="#FFFFFF" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,0,8,0">
                         <DockPanel LastChildFill="True">
                             <Border DockPanel.Dock="Left" Width="36" Height="36" Background="#EFF6FF" CornerRadius="8" Margin="0,0,12,0">
-                                <TextBlock Text="🖥️" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#2563EB" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Border>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="TOPLAM CİHAZ" Foreground="#64748B" FontSize="11" FontWeight="SemiBold"/>
@@ -212,7 +214,7 @@
                     <Border Grid.Column="1" Background="#FFFFFF" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="4,0,4,0">
                         <DockPanel LastChildFill="True">
                             <Border DockPanel.Dock="Left" Width="36" Height="36" Background="#ECFDF5" CornerRadius="8" Margin="0,0,12,0">
-                                <TextBlock Text="🟢" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Ellipse Width="11" Height="11" Fill="#10B981" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Border>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="ÇEVRİMİÇİ CİHAZLAR" Foreground="#047857" FontSize="11" FontWeight="SemiBold"/>
@@ -221,15 +223,28 @@
                         </DockPanel>
                     </Border>
 
-                    <!-- Card 3: Servis & Bulut Durumu -->
-                    <Border Grid.Column="2" Background="#FFFFFF" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="8,0,0,0">
+                    <!-- Card 3: Çevrimdışı Cihaz -->
+                    <Border Grid.Column="2" Background="#FFFFFF" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="4,0,4,0">
                         <DockPanel LastChildFill="True">
-                            <Border DockPanel.Dock="Left" Width="36" Height="36" Background="#F1F5F9" CornerRadius="8" Margin="0,0,12,0">
-                                <TextBlock Text="⚡" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Border DockPanel.Dock="Left" Width="36" Height="36" Background="#F8FAFC" CornerRadius="8" Margin="0,0,12,0">
+                                <Ellipse Width="11" Height="11" Fill="#94A3B8" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Border>
                             <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="BULUT BAĞLANTISI" Foreground="#64748B" FontSize="11" FontWeight="SemiBold"/>
-                                <TextBlock Text="NexMote Signaling Hub • Aktif" Foreground="#2563EB" FontSize="13" FontWeight="Bold" Margin="0,2,0,0"/>
+                                <TextBlock Text="ÇEVRİMDIŞI CİHAZLAR" Foreground="#64748B" FontSize="11" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="OfflineCountText" Text="0" Foreground="#334155" FontSize="18" FontWeight="Bold"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Card 4: Servis & Bulut Durumu -->
+                    <Border Grid.Column="3" Background="#FFFFFF" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="8,0,0,0">
+                        <DockPanel LastChildFill="True">
+                            <Border DockPanel.Dock="Left" Width="36" Height="36" Background="#F1F5F9" CornerRadius="8" Margin="0,0,12,0">
+                                <TextBlock Text="&#xE774;" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#2563EB" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="SİNYALLEŞME" Foreground="#64748B" FontSize="11" FontWeight="SemiBold"/>
+                                <TextBlock Text="Hub aktif" Foreground="#2563EB" FontSize="13" FontWeight="Bold" Margin="0,2,0,0"/>
                             </StackPanel>
                         </DockPanel>
                     </Border>
@@ -238,9 +253,9 @@
                 <!-- ROW 1: Header, Search & Action Bar -->
                 <DockPanel Grid.Row="1" Margin="0,0,0,14" LastChildFill="True">
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                        <Button x:Name="CheckUpdatesBtn" Style="{StaticResource ToolBtn}" Content="🚀 Güncelleme Kontrol Et" Click="CheckUpdatesBtn_Click" ToolTip="Sunucudan en son Teknisyen Konsolu güncellemesini kontrol eder ve yükler" Padding="12,7" Margin="0,0,8,0" />
-                        <Button Style="{StaticResource ToolBtn}" Content="🔄 Yenile" Click="RefreshDevices_Click" Padding="12,7" Margin="0,0,8,0" />
-                        <Button Style="{StaticResource DangerBtn}" Content="🔒 Çıkış Yap" Click="LogoutBtn_Click" Padding="12,7" />
+                        <Button x:Name="CheckUpdatesBtn" Style="{StaticResource ToolBtn}" Content="Güncellemeyi kontrol et" Click="CheckUpdatesBtn_Click" ToolTip="Sunucudan en son Teknisyen Konsolu güncellemesini kontrol eder ve yükler" Padding="12,7" Margin="0,0,8,0" />
+                        <Button Style="{StaticResource ToolBtn}" Content="Yenile" Click="RefreshDevices_Click" Padding="12,7" Margin="0,0,8,0" />
+                        <Button Style="{StaticResource DangerBtn}" Content="Çıkış yap" Click="LogoutBtn_Click" Padding="12,7" />
                     </StackPanel>
 
                     <!-- Search Input Box -->
@@ -250,10 +265,11 @@
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="🔍" Foreground="#94A3B8" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
-                            <TextBox x:Name="SearchBox" Grid.Column="1" BorderThickness="0" Background="Transparent" VerticalAlignment="Center" FontSize="12.5" Foreground="#0F172A" TextChanged="SearchBox_TextChanged"/>
+                            <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="Segoe MDL2 Assets" Foreground="#94A3B8" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
+                            <TextBox x:Name="SearchBox" Grid.Column="1" BorderThickness="0" Background="Transparent" VerticalAlignment="Center" FontSize="12.5" Foreground="#0F172A" TextChanged="SearchBox_TextChanged" ToolTip="Cihaz adı, IP, kullanıcı, lokasyon veya işletim sistemi ara"/>
                         </Grid>
                     </Border>
+                    <TextBlock x:Name="FilterSummaryText" Foreground="#64748B" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0" Text="Tüm cihazlar gösteriliyor."/>
                 </DockPanel>
 
                 <!-- ROW 2: Devices DataGrid (white card, soft border, matches web console tables) -->
@@ -330,7 +346,7 @@
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                            <TextBlock Text="👤" Margin="0,0,6,0" FontSize="11"/>
+                                            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" Margin="0,0,6,0" FontSize="11" Foreground="#94A3B8"/>
                                             <TextBlock Text="{Binding ActiveUser}" Foreground="#334155" FontSize="12"/>
                                         </StackPanel>
                                     </DataTemplate>
@@ -351,11 +367,28 @@
                             <!-- Lokasyon -->
                             <DataGridTextColumn Header="LOKASYON" Binding="{Binding LocationCode}" Width="100" />
 
+                            <DataGridTemplateColumn Header="CPU / RAM" Width="160">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel VerticalAlignment="Center">
+                                            <DockPanel LastChildFill="False">
+                                                <TextBlock Text="{Binding CpuText}" Foreground="#0F172A" FontFamily="Consolas" FontSize="11.5" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                                                <TextBlock Text="{Binding MemoryUsageText}" Foreground="#64748B" FontSize="11.5"/>
+                                            </DockPanel>
+                                            <ProgressBar Value="{Binding CpuUsagePercent}" Maximum="100" Height="4" Margin="0,4,0,0" Background="#E2E8F0" Foreground="#2563EB"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+
+                            <DataGridTextColumn Header="AJAN" Binding="{Binding AgentVersionLabel}" Width="90" />
+                            <DataGridTextColumn Header="SON SİNYAL" Binding="{Binding LastSeenLabel}" Width="120" />
+
                             <!-- İşlem Butonu -->
                             <DataGridTemplateColumn Header="İŞLEM" Width="*">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <Button Content="⚡ Bağlan"
+                                        <Button Content="Bağlan"
                                                 Style="{StaticResource PrimaryBtn}"
                                                 Padding="14,5"
                                                 FontSize="12"
@@ -390,15 +423,22 @@
 
                 <StackPanel x:Name="PlaceholderPanel"
                             HorizontalAlignment="Center"
-                            VerticalAlignment="Center"
-                            IsHitTestVisible="False">
-                    <TextBlock Text="🖥️" FontSize="52" HorizontalAlignment="Center" Margin="0,0,0,12" />
-                    <TextBlock x:Name="PlaceholderText"
-                               Text="Uzaktan yüksek hızlı görüntü akışı bekleniyor..."
-                               Foreground="#94A3B8"
-                               FontSize="15"
-                               FontWeight="Medium"
-                               HorizontalAlignment="Center" />
+                            VerticalAlignment="Center">
+                    <Border Background="#E60F172A" BorderBrush="#334155" BorderThickness="1" CornerRadius="12" Padding="28,24" HorizontalAlignment="Center">
+                        <StackPanel HorizontalAlignment="Center" Width="360">
+                            <TextBlock x:Name="PlaceholderIcon" Text="🔄" FontSize="36" HorizontalAlignment="Center" Margin="0,0,0,10" />
+                            <TextBlock x:Name="PlaceholderTitle" Text="Görüntü Akışı Bekleniyor" Foreground="#F8FAFC" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,6" TextAlignment="Center"/>
+                            <TextBlock x:Name="PlaceholderText"
+                                       Text="Uzak cihaz açıldığında canlı yayın otomatik olarak bağlanacaktır."
+                                       Foreground="#94A3B8"
+                                       FontSize="12.5"
+                                       TextWrapping="Wrap"
+                                       HorizontalAlignment="Center"
+                                       TextAlignment="Center"
+                                       Margin="0,0,0,16"/>
+                            <Button x:Name="PlaceholderRetryBtn" Content="⚡ Şimdi Yeniden Bağlan" Style="{StaticResource PrimaryBtn}" Height="34" FontSize="12" Click="RefreshScreenBtn_Click" HorizontalAlignment="Center" Padding="16,0"/>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
                 <!-- Top-Left Device Info & Telemetry Badge -->
@@ -413,7 +453,7 @@
                         Padding="10,6"
                         Panel.ZIndex="99">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="🖥️" FontSize="12" Margin="0,0,6,0"/>
+                        <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="12" Foreground="#94A3B8" Margin="0,0,6,0"/>
                         <TextBlock Text="✓" Foreground="#10B981" FontWeight="Bold" FontSize="12" Margin="0,0,6,0"/>
                         <TextBlock x:Name="SessionDeviceNameText" Text="Uzak Oturum" Foreground="White" FontWeight="SemiBold" FontSize="12"/>
                         <TextBlock Text=" · " Foreground="#64748B" Margin="2,0"/>
@@ -444,51 +484,66 @@
                             <DropShadowEffect Color="#000000" Opacity="0.5" BlurRadius="18" ShadowDepth="3" Direction="270"/>
                         </Border.Effect>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <!-- Pin Button -->
-                            <Button x:Name="PinIslandBtn" Style="{StaticResource IslandBtn}" Content="📌" ToolTip="Araç Çubuğunu Sabitle / Otomatik Gizle" Click="PinIslandBtn_Click"/>
-
                             <!-- Displays Switcher -->
-                            <Button x:Name="IslandDisplaysBtn" Style="{StaticResource IslandBtn}" Content="🖥️ Ekranlar" ToolTip="Monitör Seçimi (Soldan Sağa Sıralı)" Click="IslandDisplaysBtn_Click">
+                            <Button x:Name="IslandDisplaysBtn" Style="{StaticResource IslandBtn}" Content="Ekranlar" ToolTip="Monitör seçimi (soldan sağa sıralı)" Click="IslandDisplaysBtn_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu x:Name="IslandDisplaysContextMenu"/>
                                 </Button.ContextMenu>
                             </Button>
 
                             <!-- View Mode -->
-                            <Button x:Name="IslandViewModeBtn" Style="{StaticResource IslandBtn}" Content="📐 Görünüm" ToolTip="Görünüm Modu (Sığdır / Yay / 1:1)" Click="ViewModeBtn_Click">
+                            <Button x:Name="IslandViewModeBtn" Style="{StaticResource IslandBtn}" Content="Görünüm" ToolTip="Görünüm modu (sığdır / yay / 1:1)" Click="ViewModeBtn_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="📐 Ekrana Sığdır (Orantılı)" Click="ViewModeFit_Click" />
-                                        <MenuItem Header="↔️ Ekrana Yay (Tam Doldur)" Click="ViewModeStretch_Click" />
-                                        <MenuItem Header="🔍 Orijinal Boyut (1:1 Piksel)" Click="ViewModeOriginal_Click" />
+                                        <MenuItem Header="Ekrana sığdır (orantılı)" Click="ViewModeFit_Click" />
+                                        <MenuItem Header="Ekrana yay (tam doldur)" Click="ViewModeStretch_Click" />
+                                        <MenuItem Header="Orijinal boyut (1:1 piksel)" Click="ViewModeOriginal_Click" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+
+                            <!-- Adaptive Quality Profile Switcher -->
+                            <Button x:Name="IslandQualityBtn" Style="{StaticResource IslandBtn}" Content="⚡ Kalite" ToolTip="Bağlantı ve görüntü kalitesi profili" Click="IslandQualityBtn_Click">
+                                <Button.ContextMenu>
+                                    <ContextMenu x:Name="IslandQualityContextMenu">
+                                        <MenuItem x:Name="QualityAutoItem" Header="⚡ Otomatik (Ağ Uyumlu - Önerilen)" IsChecked="True" Click="QualityAuto_Click" />
+                                        <Separator />
+                                        <MenuItem x:Name="QualitySpeedItem" Header="🚀 Hız &amp; Sıfır Gecikme Öncelikli" Click="QualitySpeed_Click" />
+                                        <MenuItem x:Name="QualityBalancedItem" Header="⚖️ Dengeli Standart (40 FPS)" Click="QualityBalanced_Click" />
+                                        <MenuItem x:Name="QualityCrystalItem" Header="💎 Kristal Netlik (Maksimum Kalite)" Click="QualityCrystal_Click" />
                                     </ContextMenu>
                                 </Button.ContextMenu>
                             </Button>
 
                             <!-- Command Terminal Drawer -->
-                            <Button x:Name="IslandCommandBtn" Style="{StaticResource IslandBtn}" Content="⌨️ Komut" ToolTip="Uzak CMD / PowerShell Komut Terminali" Click="CommandPanelToggleBtn_Click"/>
+                            <Button x:Name="IslandCommandBtn" Style="{StaticResource IslandBtn}" Content="Komut" ToolTip="Uzak CMD / PowerShell komut terminali" Click="CommandPanelToggleBtn_Click"/>
+
+                            <!-- Ctrl+Alt+Del / SAS Action -->
+                            <Button x:Name="IslandSasBtn" Style="{StaticResource IslandBtn}" Content="🔑 Kilit Aç" ToolTip="Uzak bilgisayara Ctrl+Alt+Del (SAS) gönderir" Click="SendSasBtn_Click"/>
 
                             <!-- Power / SAS Actions -->
-                            <Button x:Name="IslandPowerBtn" Style="{StaticResource IslandBtn}" Content="⚡ Güç" ToolTip="Güç ve Sistem İşlemleri (Ctrl+Alt+Del, Kilitle, Kapat)" Click="PowerMenuBtn_Click">
+                            <Button x:Name="IslandPowerBtn" Style="{StaticResource IslandBtn}" Content="Güç" ToolTip="Güç ve sistem işlemleri" Click="PowerMenuBtn_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="🔒 Bilgisayarı Kilitle" Click="PowerLock_Click" />
-                                        <MenuItem Header="🚪 Oturumu Kapat (Log off)" Click="PowerLogoff_Click" />
+                                        <MenuItem Header="🔑 Ctrl+Alt+Del Gönder (Kilit Ekranı)" Click="SendSasBtn_Click" />
                                         <Separator />
-                                        <MenuItem Header="🔄 Yeniden Başlat (Normal)" Click="PowerReboot_Click" />
-                                        <MenuItem Header="🛡️ Ağ Destekli Güvenli Modda Yeniden Başlat" Click="PowerRebootSafe_Click" />
-                                        <MenuItem Header="🔄 Normal Başlatma Moduna Dön (Safeboot Kaldır)" Click="PowerRebootNormal_Click" />
+                                        <MenuItem Header="Bilgisayarı kilitle" Click="PowerLock_Click" />
+                                        <MenuItem Header="Oturumu kapat" Click="PowerLogoff_Click" />
                                         <Separator />
-                                        <MenuItem Header="🔌 Bilgisayarı Kapat (Shutdown)" Click="PowerShutdown_Click" />
+                                        <MenuItem Header="Yeniden başlat" Click="PowerReboot_Click" />
+                                        <MenuItem Header="Ağ destekli güvenli modda yeniden başlat" Click="PowerRebootSafe_Click" />
+                                        <MenuItem Header="Normal başlatma moduna dön" Click="PowerRebootNormal_Click" />
+                                        <Separator />
+                                        <MenuItem Header="Bilgisayarı kapat" Click="PowerShutdown_Click" />
                                     </ContextMenu>
                                 </Button.ContextMenu>
                             </Button>
 
                             <!-- Screen Refresh -->
-                            <Button x:Name="IslandRefreshBtn" Style="{StaticResource IslandBtn}" Content="🔄 Yenile" ToolTip="Uzak Ekranı Yenile" Click="RefreshScreenBtn_Click"/>
+                            <Button x:Name="IslandRefreshBtn" Style="{StaticResource IslandBtn}" Content="Yenile" ToolTip="Uzak ekranı yenile" Click="RefreshScreenBtn_Click"/>
 
                             <!-- Disconnect Session (Red Pill) -->
-                            <Button x:Name="IslandDisconnectBtn" Style="{StaticResource IslandDangerBtn}" Content="✕ Sonlandır" ToolTip="Bağlantıyı Sonlandır" Click="DisconnectBtn_Click"/>
+                            <Button x:Name="IslandDisconnectBtn" Style="{StaticResource IslandDangerBtn}" Content="Sonlandır" ToolTip="Bağlantıyı sonlandır" Click="DisconnectBtn_Click"/>
                         </StackPanel>
                     </Border>
 
@@ -526,19 +581,15 @@
                         </Grid.RowDefinitions>
 
                         <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,8">
-                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolBtn}" Content="✖ Kapat" Click="CommandPanelToggleBtn_Click" Padding="10,4" />
+                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolBtn}" Content="Kapat" Click="CommandPanelToggleBtn_Click" Padding="10,4" />
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Uzak Komut Çalıştır" Foreground="#0F172A" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0" />
+                                <TextBlock Text="Uzak komut çalıştır" Foreground="#0F172A" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0" />
                                 <Button x:Name="ShellCmdBtn" Style="{StaticResource ShellTabBtn}" Content="CMD" Background="#2563EB" Foreground="White" Click="ShellCmdBtn_Click" />
                                 <Button x:Name="ShellPsBtn" Style="{StaticResource ShellTabBtn}" Content="PowerShell" Click="ShellPsBtn_Click" />
-                                <CheckBox x:Name="RunAsAdminCheckBox"
-                                          Content="🛡️ Yönetici Olarak Çalıştır (UAC)"
-                                          Foreground="#B45309"
-                                          FontWeight="SemiBold"
-                                          FontSize="11.5"
-                                          VerticalAlignment="Center"
-                                          Margin="16,0,0,0"
-                                          ToolTip="Aktifken hedef cihazda gerçek Windows UAC izni istemi çıkar; kullanıcı onaylamazsa komut çalışmaz." />
+                                <Border Background="#ECFDF5" BorderBrush="#A7F3D0" BorderThickness="1" CornerRadius="4" Padding="8,2" VerticalAlignment="Center" Margin="16,0,0,0"
+                                        ToolTip="Komutlar hedef bilgisayarda her zaman tam Yönetici / SYSTEM yetkisiyle yürütülür.">
+                                    <TextBlock Text="🛡️ Yönetici Yetkili (SYSTEM)" Foreground="#065F46" FontWeight="SemiBold" FontSize="11.5" />
+                                </Border>
                             </StackPanel>
                         </DockPanel>
 
@@ -557,7 +608,7 @@
                                  Margin="0,0,0,8" />
 
                         <DockPanel Grid.Row="2" LastChildFill="True">
-                            <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryBtn}" Content="▶ Çalıştır" Click="RunCommandBtn_Click" Padding="14,6" />
+                            <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryBtn}" Content="Çalıştır" Click="RunCommandBtn_Click" Padding="14,6" />
                             <TextBox x:Name="CommandInputBox"
                                      Background="#F8FAFC"
                                      Foreground="#0F172A"

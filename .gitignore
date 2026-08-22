@@ -14,6 +14,8 @@ appsettings.Development.json
 artifacts/
 downloads/*.zip
 downloads/*.msi
+downloads/*.exe
+downloads/*.bat
 downloads/*.wixpdb
 dotnet-*.txt
 dotnet-*.log
@@ -33,3 +35,8 @@ dotnet-install.ps1
 publish-linux/
 publish-linux.zip
 docs/server-credentials.md
+scratch/
+chat.py
+.freebuff/
+walkthrough.md
+

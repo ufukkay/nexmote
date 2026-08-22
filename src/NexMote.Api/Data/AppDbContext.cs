@@ -33,9 +33,21 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<CommandAuditEntity> CommandAudits => Set<CommandAuditEntity>();
 
+    /// <summary>
+    /// Yönetici tarafından web panelinden silinen cihazlar tablosu (otomatik yeniden kaydolmayı engeller).
+    /// </summary>
+    public DbSet<DeletedDeviceEntity> DeletedDevices => Set<DeletedDeviceEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        // Silinen cihazlar indeksi
+        modelBuilder.Entity<DeletedDeviceEntity>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.HasIndex(d => new { d.DeviceName, d.DomainName });
+        });
 
         // Cihaz adı ve domain adına göre bileşik indeks
         modelBuilder.Entity<DeviceEntity>(entity =>
@@ -135,6 +147,18 @@ public sealed class DeviceEntity
 
     /// <summary>Cihazın ilk kayıt (enrollment) zamanı.</summary>
     public DateTimeOffset EnrolledAt { get; set; }
+
+    /// <summary>Tüm ağ bağdaştırıcıları detayları (JSON).</summary>
+    public string? NetworkAdaptersJson { get; set; }
+
+    /// <summary>Cihazda kurulu programların listesi (JSON).</summary>
+    public string? InstalledAppsJson { get; set; }
+
+    /// <summary>Cihazda yüklü olan işletim sistemi güncelleştirmeleri (KB / Hotfixes) (JSON).</summary>
+    public string? WindowsUpdatesJson { get; set; }
+
+    /// <summary>Cihazın anakart, BIOS, işlemci, RAM modülleri ve fiziksel disklerine ait seri numaraları ve donanım envanter detayları (JSON).</summary>
+    public string? HardwareDetailsJson { get; set; }
 }
 
 /// <summary>
@@ -232,4 +256,23 @@ public sealed class CommandAuditEntity
 
     /// <summary>Komutun yürütüldüğü zaman damgası.</summary>
     public DateTimeOffset ExecutedAt { get; set; }
+}
+
+/// <summary>
+/// Yönetici tarafından silinen ve otomatik kaydolması engellenen bilgisayar kaydı.
+/// </summary>
+public sealed class DeletedDeviceEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    [Required]
+    [MaxLength(256)]
+    public string DeviceName { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(256)]
+    public string DomainName { get; set; } = string.Empty;
+
+    public DateTimeOffset DeletedAt { get; set; } = DateTimeOffset.UtcNow;
 }

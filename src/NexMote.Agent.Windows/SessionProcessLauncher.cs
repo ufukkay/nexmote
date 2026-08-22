@@ -1,17 +1,12 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
+using NexMote.Shared.Telemetry;
 
 namespace NexMote.Agent.Windows;
 
 /// <summary>
 /// Windows Servisi (LocalSystem) içerisinden aktif kullanıcı masaüstü oturumuna (Session 1, 2 vb.)
 /// SYSTEM yetkisine sahip bir süreç (NexMote.Agent.Tray.exe --input-helper) başlatan Win32 API köprüsü.
-/// 
-/// Neden Gerekli (UIPI & UAC İzolasyonu):
-/// Standart kullanıcı yetkisindeki bir süreçten gönderilen fare/klavye girdileri (SendInput),
-/// Windows UIPI (User Interface Privilege Isolation) güvenlik katmanı nedeniyle daha yüksek bütünlükteki
-/// UAC (Kullanıcı Hesabı Denetimi) onay pencerelerine ve parola alanlarına tıklayamaz.
-/// Bu sınıf sayesinde başlatılan yardımcı süreç SYSTEM yetkisinde çalıştığından, teknisyenin uzaktan
-/// gönderdiği tıklamalar UAC onay pencerelerine sorunsuz şekilde etki edebilir.
 /// </summary>
 internal static class SessionProcessLauncher
 {
@@ -19,6 +14,87 @@ internal static class SessionProcessLauncher
     /// Fiziksel konsolda (ekran başında) aktif olan interaktif Windows oturum numarasını (Session ID) döner.
     /// </summary>
     public static uint GetActiveConsoleSessionId() => WTSGetActiveConsoleSessionId();
+
+    /// <summary>
+    /// Fiziksel konsolda aktif olan interaktif oturumda gerçekten oturum açmış kullanıcının
+    /// veya kilit ekranındaysa son oturum açan kullanıcının temiz adını (Domain olmaksızın) döner.
+    ///
+    /// Gerçek çözümleme mantığı <see cref="SessionUserResolver"/> içinde tutulur — Tray süreci de aynı
+    /// sonucu üretmesi gerektiğinden (aksi halde sunucu, hangi sürecin son heartbeat attığına göre
+    /// tutarsız bir ActiveUser görür), burada tekrarlanmaz.
+    /// </summary>
+    public static string GetActiveSessionUserName() => SessionUserResolver.GetActiveSessionUserName();
+
+    /// <summary>
+    /// Belirtilen oturumda gerçek bir kullanıcının oturum açmış olup olmadığını (User Token varlığı) denetler.
+    /// </summary>
+    public static bool IsUserLoggedIn(uint sessionId)
+    {
+        if (WTSQueryUserToken(sessionId, out var userToken))
+        {
+            CloseHandle(userToken);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Aktif konsol oturumunda Tepsi (Tray) uygulamasının çalışıp çalışmadığını Mutex ve Süreç üzerinden denetler.
+    /// </summary>
+    public static bool IsTrayRunningInSession(uint sessionId)
+    {
+        try
+        {
+            var mutexName = $@"Global\NexMote_Agent_Tray_Session_{sessionId}";
+            if (Mutex.TryOpenExisting(mutexName, out var mutex))
+            {
+                mutex.Dispose();
+                return true;
+            }
+        }
+        catch { }
+
+        // Fallback: Check if NexMote.Agent.Tray process is running in session
+        return IsProcessRunningInSession("NexMote.Agent.Tray", sessionId);
+    }
+
+    /// <summary>
+    /// Aktif konsol oturumunda SYSTEM yetkili Girdi Yardımcısının (--input-helper) çalışıp çalışmadığını Mutex üzerinden denetler.
+    /// </summary>
+    public static bool IsInputHelperRunningInSession(uint sessionId)
+    {
+        try
+        {
+            var mutexName = $@"Global\NexMoteInputHelperMutex_{sessionId}";
+            if (Mutex.TryOpenExisting(mutexName, out var mutex))
+            {
+                mutex.Dispose();
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Giriş/Kilit ekranında çalışan SYSTEM yetkili Canlı Oturum Yayıncısının (--system-session) çalışıp çalışmadığını Mutex üzerinden denetler.
+    /// </summary>
+    public static bool IsSystemSessionStreamerRunningInSession(uint sessionId)
+    {
+        try
+        {
+            var mutexName = $@"Global\NexMote_System_Session_Streamer_{sessionId}";
+            if (Mutex.TryOpenExisting(mutexName, out var mutex))
+            {
+                mutex.Dispose();
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
 
     /// <summary>
     /// Belirtilen oturum içerisinde hedef isimli sürecin çalışıp çalışmadığını kontrol eder.
@@ -38,6 +114,97 @@ internal static class SessionProcessLauncher
         }
         catch { }
         return false;
+    }
+
+    /// <summary>
+    /// Aktif konsol oturumunda oturum açmış gerçek kullanıcının kimliğiyle (User Token)
+    /// belirtilen yürütülebilir dosyayı başlatır. Bu sayede NotifyIcon (Tepsi Simgesi), bildirimler ve GUI
+    /// doğrudan kullanıcının Windows Explorer görev çubuğunda ve masaüstünde görünür.
+    /// </summary>
+    public static bool TryLaunchInActiveSessionAsUser(string exePath, string arguments, out string error)
+    {
+        error = string.Empty;
+        var sessionId = WTSGetActiveConsoleSessionId();
+        if (sessionId == 0xFFFFFFFF)
+        {
+            error = "Aktif interaktif konsol oturumu bulunamadı.";
+            return false;
+        }
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out var procToken))
+        {
+            EnableProcessPrivileges(procToken);
+            CloseHandle(procToken);
+        }
+
+        if (!WTSQueryUserToken(sessionId, out var userToken))
+        {
+            error = $"WTSQueryUserToken başarısız: {Marshal.GetLastWin32Error()} (Kullanıcı henüz oturum açmamış olabilir).";
+            return false;
+        }
+
+        try
+        {
+            if (!DuplicateTokenEx(userToken, TOKEN_ALL_ACCESS, IntPtr.Zero, SECURITY_IMPERSONATION_LEVEL.SecurityIdentification, TOKEN_TYPE.TokenPrimary, out var primaryUserToken))
+            {
+                error = $"DuplicateTokenEx başarısız: {Marshal.GetLastWin32Error()}";
+                return false;
+            }
+
+            try
+            {
+                var hasEnv = CreateEnvironmentBlock(out var envBlock, primaryUserToken, false);
+                try
+                {
+                    var si = new STARTUPINFO();
+                    si.cb = Marshal.SizeOf<STARTUPINFO>();
+                    si.lpDesktop = @"winsta0\default";
+
+                    const int CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+
+                    var commandLine = $"\"{exePath}\" {arguments}";
+                    var workingDir = Path.GetDirectoryName(exePath);
+
+                    var created = CreateProcessAsUser(
+                        primaryUserToken,
+                        null,
+                        commandLine,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        false,
+                        CREATE_UNICODE_ENVIRONMENT,
+                        hasEnv ? envBlock : IntPtr.Zero,
+                        workingDir,
+                        ref si,
+                        out var pi);
+
+                    if (!created)
+                    {
+                        error = $"CreateProcessAsUser (as user) başarısız: {Marshal.GetLastWin32Error()}";
+                        return false;
+                    }
+
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    return true;
+                }
+                finally
+                {
+                    if (hasEnv)
+                    {
+                        DestroyEnvironmentBlock(envBlock);
+                    }
+                }
+            }
+            finally
+            {
+                CloseHandle(primaryUserToken);
+            }
+        }
+        finally
+        {
+            CloseHandle(userToken);
+        }
     }
 
     /// <summary>
@@ -165,14 +332,31 @@ internal static class SessionProcessLauncher
     }
 
     /// <summary>
-    /// Süreç belirteci üzerinde SeTcbPrivilege (Act as part of the operating system) ayrıcalığını etkinleştirir.
+    /// Süreç belirteci üzerinde SeTcbPrivilege, SeAssignPrimaryTokenPrivilege ve SeIncreaseQuotaPrivilege ayrıcalıklarını etkinleştirir.
     /// </summary>
+    private static bool EnableProcessPrivileges(IntPtr tokenHandle)
+    {
+        EnablePrivilege(tokenHandle, "SeTcbPrivilege");
+        EnablePrivilege(tokenHandle, "SeAssignPrimaryTokenPrivilege");
+        EnablePrivilege(tokenHandle, "SeIncreaseQuotaPrivilege");
+        return true;
+    }
+
     private static bool EnableTcbPrivilege(IntPtr tokenHandle, out string error)
     {
         error = string.Empty;
-        if (!LookupPrivilegeValue(null, "SeTcbPrivilege", out var luid))
+        if (!EnablePrivilege(tokenHandle, "SeTcbPrivilege"))
         {
-            error = $"LookupPrivilegeValue başarısız: {Marshal.GetLastWin32Error()}";
+            error = "SeTcbPrivilege ayrıcalığı etkinleştirilemedi.";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool EnablePrivilege(IntPtr tokenHandle, string privilegeName)
+    {
+        if (!LookupPrivilegeValue(null, privilegeName, out var luid))
+        {
             return false;
         }
 
@@ -183,20 +367,8 @@ internal static class SessionProcessLauncher
             Attributes = SE_PRIVILEGE_ENABLED
         };
 
-        if (!AdjustTokenPrivileges(tokenHandle, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
-        {
-            error = $"AdjustTokenPrivileges başarısız: {Marshal.GetLastWin32Error()}";
-            return false;
-        }
-
-        var lastError = Marshal.GetLastWin32Error();
-        if (lastError == ERROR_NOT_ALL_ASSIGNED)
-        {
-            error = "SeTcbPrivilege ayrıcalığı belirteçte tanımlı değil (Servis LocalSystem olarak çalışmalıdır).";
-            return false;
-        }
-
-        return true;
+        AdjustTokenPrivileges(tokenHandle, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+        return Marshal.GetLastWin32Error() != ERROR_NOT_ALL_ASSIGNED;
     }
 
     private const uint TOKEN_DUPLICATE = 0x0002;
@@ -321,4 +493,7 @@ internal static class SessionProcessLauncher
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr phToken);
 }

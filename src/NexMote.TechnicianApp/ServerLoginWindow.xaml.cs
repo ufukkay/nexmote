@@ -1,10 +1,11 @@
 using System.Windows;
+using NexMote.Shared.Network;
 
 namespace NexMote.TechnicianApp;
 
 /// <summary>
-/// Sunucu adresi ve yönetici giriş bilgilerini (E-posta ve Şifre) doğrulayan ve saklayan giriş penceresi.
-/// Sessiz otomatik giriş başarısız olduğunda veya şifre değiştiğinde gösterilir.
+/// Sunucu adresi ve yönetici giriş bilgilerini (e-posta ve parola) doğrulayan ve saklayan giriş penceresi.
+/// Sessiz otomatik giriş başarısız olduğunda veya parola değiştiğinde gösterilir.
 /// </summary>
 public partial class ServerLoginWindow : Window
 {
@@ -26,7 +27,7 @@ public partial class ServerLoginWindow : Window
         
         ServerUrlBox.Text = string.IsNullOrWhiteSpace(defaultServerUrl) ? "https://nexmote.com" : defaultServerUrl;
         EmailBox.Text = string.IsNullOrWhiteSpace(defaultEmail) ? "admin@nexmote.com" : defaultEmail;
-        PasswordBox.Password = "admin123";
+        PasswordBox.Password = string.Empty;
     }
 
     /// <summary>
@@ -36,15 +37,9 @@ public partial class ServerLoginWindow : Window
     {
         ErrorText.Text = string.Empty;
 
-        var url = ServerUrlBox.Text.Trim();
+        var url = NexMoteHttp.NormalizeUrl(ServerUrlBox.Text);
         var email = EmailBox.Text.Trim();
         var password = PasswordBox.Password.Trim();
-
-        if (string.IsNullOrEmpty(url) || !Uri.TryCreate(url, UriKind.Absolute, out _))
-        {
-            ErrorText.Text = "Geçerli bir sunucu adresi girin (ör. https://nexmote.com).";
-            return;
-        }
 
         if (string.IsNullOrEmpty(email))
         {
@@ -54,11 +49,11 @@ public partial class ServerLoginWindow : Window
 
         if (string.IsNullOrEmpty(password))
         {
-            ErrorText.Text = "Lütfen şifrenizi girin.";
+            ErrorText.Text = "Lütfen parolanızı girin.";
             return;
         }
 
-        ServerUrl = url.TrimEnd('/');
+        ServerUrl = url;
         Email = email;
         Password = password;
         DialogResult = true;

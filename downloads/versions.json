@@ -1,10 +1,10 @@
 ﻿{
     "agent":  {
-                  "version":  "0.5.4",
-                  "releaseNotes":  "Ajan ve Teknisyen iÃ§in etkileÅŸimli gÃ¼ncelleme onay diyaloglarÄ± ve modern arayÃ¼z eklendi."
+                  "version":  "0.6.2",
+                  "releaseNotes":  "v0.6.2: Klavye ve fare girdi yonlendirme onarimi, sadelestirilmis sag tik menusu, Denetim Masasi uzerinden kaldirma ve arka plan guncelleme iyilestirmesi."
               },
     "technician":  {
-                       "version":  "0.5.4",
-                       "releaseNotes":  "Teknisyen Konsolu Maximized pencere, KPI kartlarÄ±, dinamik arama ve SaaS veri tablosu tasarÄ±mÄ± uygulandÄ±."
+                       "version":  "0.6.2",
+                       "releaseNotes":  "v0.6.2: UTF-8 karakter duzeltmesi, canli ekran optimizasyonlari ve gelistirilmis uzaktan guncelleme yoneticisi."
                    }
 }

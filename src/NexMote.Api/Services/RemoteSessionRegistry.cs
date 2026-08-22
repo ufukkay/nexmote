@@ -11,6 +11,8 @@ namespace NexMote.Api.Services;
 public sealed class RemoteSessionRegistry
 {
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
+    private static readonly TimeSpan InviteLifetime = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ActiveSessionLifetime = TimeSpan.FromHours(8);
 
     public RemoteSessionRegistry(IDbContextFactory<AppDbContext> dbFactory)
     {
@@ -18,7 +20,7 @@ public sealed class RemoteSessionRegistry
     }
 
     /// <summary>
-    /// Belirtilen hedef cihaz için 5 dakika geçerli benzersiz bir oturum ve "nexmote://" deep-link başlatma URL'i üretir.
+    /// Belirtilen hedef cihaz için 5 dakika geçerli benzersiz bir davet ve "nexmote://" deep-link başlatma URL'i üretir.
     /// </summary>
     /// <param name="deviceId">Hedef cihaz kimliği.</param>
     /// <param name="serverUrl">Sunucu genel URL'i.</param>
@@ -30,7 +32,7 @@ public sealed class RemoteSessionRegistry
         var id = Guid.NewGuid();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
         var now = DateTimeOffset.UtcNow;
-        var expiresAt = now.AddMinutes(5);
+        var expiresAt = now.Add(InviteLifetime);
 
         var entity = new RemoteSessionEntity
         {
@@ -45,7 +47,7 @@ public sealed class RemoteSessionRegistry
         db.SaveChanges();
 
         // Teknisyen masaüstü uygulamasını tetikleyen custom URI protokol formatı
-        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}";
+        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}&deviceId={deviceId}";
         return new CreateRemoteSessionResponse(id, deviceId, launchUri, expiresAt);
     }
 
@@ -62,6 +64,24 @@ public sealed class RemoteSessionRegistry
         {
             return null;
         }
+
+        return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
+    }
+
+    public RemoteSessionRecord? Activate(Guid sessionId, string token)
+    {
+        using var db = _dbFactory.CreateDbContext();
+
+        var session = db.RemoteSessions.FirstOrDefault(s => s.Id == sessionId);
+        if (session is null ||
+            session.ExpiresAt <= DateTimeOffset.UtcNow ||
+            !string.Equals(session.Token, token, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        session.ExpiresAt = DateTimeOffset.UtcNow.Add(ActiveSessionLifetime);
+        db.SaveChanges();
 
         return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
     }

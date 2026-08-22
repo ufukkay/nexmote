@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
@@ -21,6 +23,7 @@ public sealed class DeviceRegistry
     /// <summary>
     /// Yeni bir cihazı sisteme kaydeder veya mevcut cihazın işletim sistemi ve sürüm bilgilerini günceller.
     /// Cihaza özel 32-byte rastgele bir güvenlik token'ı üretir ve döner.
+    /// Enrollment key'i SHA-256 hash olarak veritabanına kaydeder; plaintext asla saklanmaz.
     /// </summary>
     /// <param name="request">Agent tarafından gönderilen kayıt bilgileri.</param>
     /// <returns>Cihaz ID'si ve güvenlik token'ını içeren yanıt.</returns>
@@ -28,16 +31,27 @@ public sealed class DeviceRegistry
     {
         using var db = _dbFactory.CreateDbContext();
 
-        // Aynı bilgisayar adı ve domain'e sahip mevcut kaydı kontrol et
-        var existing = db.Devices.FirstOrDefault(device =>
-            device.DeviceName.ToLower() == request.DeviceName.ToLower() &&
-            device.DomainName.ToLower() == request.DomainName.ToLower());
+        var nameLower = request.DeviceName.ToLowerInvariant();
+        var domainLower = request.DomainName.ToLowerInvariant();
 
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        // Eğer bu cihaz daha önce yönetici tarafından silinmişse, otomatik kaydı engelle
+        var isDeleted = db.DeletedDevices.Any(d => d.DeviceName.ToLower() == nameLower && d.DomainName.ToLower() == domainLower);
+        if (isDeleted)
+        {
+            throw new InvalidOperationException("Bu cihaz yönetici tarafından sistemden silinmiştir.");
+        }
+
+        var existing = db.Devices.FirstOrDefault(device =>
+            device.DeviceName.ToLower() == nameLower &&
+            device.DomainName.ToLower() == domainLower);
+
         var now = DateTimeOffset.UtcNow;
+        string token;
 
         if (existing is null)
         {
+            // Cihaza özgü 64-karakter hex token üret (kriptografik olarak güçlü)
+            token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
             existing = new DeviceEntity
             {
                 Id = Guid.NewGuid(),
@@ -55,6 +69,11 @@ public sealed class DeviceRegistry
         }
         else
         {
+            // Mevcut cihaz yeniden kaydoluyorsa mevcut token'ı koru (böylece servis ve tray arasındaki token senkronizasyonu bozulmaz)
+            token = string.IsNullOrWhiteSpace(existing.AgentToken)
+                ? Convert.ToHexString(RandomNumberGenerator.GetBytes(32))
+                : existing.AgentToken;
+
             existing.OperatingSystem = request.OperatingSystem;
             existing.AgentVersion = request.AgentVersion;
             existing.SerialNumber = request.SerialNumber;
@@ -75,6 +94,7 @@ public sealed class DeviceRegistry
 
     /// <summary>
     /// Cihazdan gelen periyodik heartbeat sinyalini ve CPU/RAM/Disk donanım telemetrisini işler.
+    /// Token karşılaştırması timing-safe (CryptographicOperations.FixedTimeEquals) yöntemiyle yapılır.
     /// </summary>
     /// <param name="deviceId">Cihaz kimliği.</param>
     /// <param name="request">Heartbeat verisi ve donanım metrikleri.</param>
@@ -84,7 +104,13 @@ public sealed class DeviceRegistry
         using var db = _dbFactory.CreateDbContext();
         var device = db.Devices.FirstOrDefault(d => d.Id == deviceId);
 
-        if (device is null || device.AgentToken != request.AgentToken)
+        if (device is null)
+        {
+            return false;
+        }
+
+        // Timing-safe karşılaştırma: == operatörü yan-kanal saldırısına açıktır
+        if (!TokenEquals(device.AgentToken, request.AgentToken))
         {
             return false;
         }
@@ -101,6 +127,51 @@ public sealed class DeviceRegistry
         if (!string.IsNullOrWhiteSpace(request.AgentVersion))
         {
             device.AgentVersion = request.AgentVersion;
+        }
+
+        if (request.NetworkAdapters != null && request.NetworkAdapters.Count > 0)
+        {
+            try
+            {
+                device.NetworkAdaptersJson = JsonSerializer.Serialize(request.NetworkAdapters);
+            }
+            catch { }
+        }
+
+        if (request.InstalledApps != null && request.InstalledApps.Count > 0)
+        {
+            try
+            {
+                device.InstalledAppsJson = JsonSerializer.Serialize(request.InstalledApps);
+            }
+            catch { }
+        }
+
+        if (request.WindowsUpdates != null && request.WindowsUpdates.Count > 0)
+        {
+            try
+            {
+                device.WindowsUpdatesJson = JsonSerializer.Serialize(request.WindowsUpdates);
+            }
+            catch { }
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SerialNumber))
+        {
+            device.SerialNumber = request.SerialNumber;
+        }
+
+        if (request.HardwareDetails != null)
+        {
+            try
+            {
+                device.HardwareDetailsJson = JsonSerializer.Serialize(request.HardwareDetails);
+                if (string.IsNullOrWhiteSpace(device.SerialNumber) && !string.IsNullOrWhiteSpace(request.HardwareDetails.SystemSerialNumber))
+                {
+                    device.SerialNumber = request.HardwareDetails.SystemSerialNumber;
+                }
+            }
+            catch { }
         }
 
         db.SaveChanges();
@@ -133,15 +204,64 @@ public sealed class DeviceRegistry
     }
 
     /// <summary>
+    /// Belirtilen kimliğe sahip tekil cihazın detay ve donanım bilgilerini döner.
+    /// </summary>
+    public DeviceSummary? GetById(Guid id)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == id);
+        return device is null ? null : ToSummary(device);
+    }
+
+    /// <summary>
+    /// Belirtilen kimliğe sahip cihazı veritabanından kalıcı olarak siler.
+    /// </summary>
+    /// <param name="id">Silinecek cihaz kimliği.</param>
+    /// <returns>Cihaz bulundu ve silindiyse true; bulunamadıysa false.</returns>
+    public bool Delete(Guid id)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var device = db.Devices.FirstOrDefault(d => d.Id == id);
+        if (device is null)
+        {
+            return false;
+        }
+
+        var nameLower = device.DeviceName.ToLowerInvariant();
+        var domainLower = device.DomainName.ToLowerInvariant();
+        var isAlreadyInDeleted = db.DeletedDevices.Any(d => d.DeviceName.ToLower() == nameLower && d.DomainName.ToLower() == domainLower);
+        if (!isAlreadyInDeleted)
+        {
+            db.DeletedDevices.Add(new DeletedDeviceEntity
+            {
+                Id = Guid.NewGuid(),
+                DeviceName = device.DeviceName,
+                DomainName = device.DomainName,
+                DeletedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        db.Devices.Remove(device);
+        db.SaveChanges();
+        return true;
+    }
+
+    /// <summary>
     /// Belirtilen cihaz kimliği ve agent token'ının doğruluğunu kontrol eder.
+    /// Timing-safe karşılaştırma kullanır.
     /// </summary>
     /// <param name="deviceId">Cihaz kimliği.</param>
     /// <param name="agentToken">Doğrulanacak token.</param>
     public bool ValidateAgent(Guid deviceId, string agentToken)
     {
+        if (string.IsNullOrEmpty(agentToken))
+        {
+            return false;
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
-        return device is not null && string.Equals(device.AgentToken, agentToken, StringComparison.Ordinal);
+        return device is not null && TokenEquals(device.AgentToken, agentToken);
     }
 
     /// <summary>
@@ -149,13 +269,53 @@ public sealed class DeviceRegistry
     /// </summary>
     private static DeviceSummary ToSummary(DeviceEntity device)
     {
+        List<NetworkAdapterInfo>? adapters = null;
+        if (!string.IsNullOrWhiteSpace(device.NetworkAdaptersJson))
+        {
+            try
+            {
+                adapters = JsonSerializer.Deserialize<List<NetworkAdapterInfo>>(device.NetworkAdaptersJson);
+            }
+            catch { }
+        }
+
+        List<InstalledAppInfo>? apps = null;
+        if (!string.IsNullOrWhiteSpace(device.InstalledAppsJson))
+        {
+            try
+            {
+                apps = JsonSerializer.Deserialize<List<InstalledAppInfo>>(device.InstalledAppsJson);
+            }
+            catch { }
+        }
+
+        List<WindowsUpdateInfo>? updates = null;
+        if (!string.IsNullOrWhiteSpace(device.WindowsUpdatesJson))
+        {
+            try
+            {
+                updates = JsonSerializer.Deserialize<List<WindowsUpdateInfo>>(device.WindowsUpdatesJson);
+            }
+            catch { }
+        }
+
+        HardwareInventoryInfo? hardware = null;
+        if (!string.IsNullOrWhiteSpace(device.HardwareDetailsJson))
+        {
+            try
+            {
+                hardware = JsonSerializer.Deserialize<HardwareInventoryInfo>(device.HardwareDetailsJson);
+            }
+            catch { }
+        }
+
         return new DeviceSummary(
             device.Id,
             device.DeviceName,
             device.DomainName,
             device.OperatingSystem ?? "Windows",
             device.AgentVersion ?? "1.0.0",
-            device.ActiveUser,
+            CleanUserName(device.ActiveUser),
             device.IpAddress,
             device.LocationCode,
             DateTimeOffset.UtcNow - device.LastSeenAt < TimeSpan.FromMinutes(2),
@@ -163,6 +323,50 @@ public sealed class DeviceRegistry
             device.CpuUsagePercent,
             device.MemoryTotalMb,
             device.MemoryUsedMb,
-            device.DiskFreeMb);
+            device.DiskFreeMb,
+            adapters,
+            apps,
+            updates,
+            device.SerialNumber,
+            hardware);
+    }
+
+    private static string? CleanUserName(string? rawUser)
+    {
+        if (string.IsNullOrWhiteSpace(rawUser)) return null;
+        var user = rawUser.Trim();
+        var idx = user.LastIndexOf('\\');
+        if (idx >= 0 && idx < user.Length - 1) user = user.Substring(idx + 1);
+        var at = user.IndexOf('@');
+        if (at > 0) user = user.Substring(0, at);
+        user = user.Trim();
+        if (user.EndsWith("$", StringComparison.Ordinal) ||
+            string.Equals(user, "SYSTEM", StringComparison.OrdinalIgnoreCase)) return null;
+        return string.IsNullOrEmpty(user) ? null : user;
+    }
+
+    /// <summary>
+    /// İki token string'ini yan-kanal (timing) saldırılarına karşı güvenli şekilde karşılaştırır.
+    /// CryptographicOperations.FixedTimeEquals sabit zamanda çalışır; uzunluk farkı olsa da erken çıkmaz.
+    /// </summary>
+    private static bool TokenEquals(string storedToken, string providedToken)
+    {
+        if (string.IsNullOrEmpty(storedToken) || string.IsNullOrEmpty(providedToken))
+        {
+            return false;
+        }
+
+        var storedBytes = Encoding.UTF8.GetBytes(storedToken);
+        var providedBytes = Encoding.UTF8.GetBytes(providedToken);
+
+        // Uzunluk farklıysa FixedTimeEquals false döner ama biz yine de sabit süre harcıyoruz
+        if (storedBytes.Length != providedBytes.Length)
+        {
+            // Uzunluk bilgisini sızdırmamak için referans uzunlukta dummy karşılaştırma yap
+            CryptographicOperations.FixedTimeEquals(storedBytes, storedBytes);
+            return false;
+        }
+
+        return CryptographicOperations.FixedTimeEquals(storedBytes, providedBytes);
     }
 }

@@ -27,34 +27,34 @@
                     <TextBlock Text="N" Foreground="White" FontWeight="Bold" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="NexMote Technician Console" Foreground="#0F172A" FontSize="16" FontWeight="Bold" />
-                    <TextBlock Text="Teknisyen Oturumu &amp; Sunucu Bağlantısı" Foreground="#64748B" FontSize="12" />
+                    <TextBlock Text="NexMote" Foreground="#0F172A" FontSize="16" FontWeight="Bold" />
+                    <TextBlock Text="Teknisyen oturumu ve sunucu bağlantısı" Foreground="#64748B" FontSize="12" />
                 </StackPanel>
             </StackPanel>
 
             <Border Grid.Row="1" Height="1" Background="#E2E8F0" Margin="0,0,0,20" />
 
-            <!-- Server URL Field -->
+            <!-- Server address field -->
             <StackPanel Grid.Row="2" Margin="0,0,0,14">
-                <TextBlock Text="Sunucu Adresi (Server URL)" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
+                <TextBlock Text="Sunucu adresi" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
                 <TextBox x:Name="ServerUrlBox" Background="#F8FAFC" Foreground="#0F172A" BorderBrush="#E2E8F0" BorderThickness="1" Padding="10,8" FontSize="13" />
             </StackPanel>
 
             <!-- Email Field -->
             <StackPanel Grid.Row="3" Margin="0,0,0,14">
-                <TextBlock Text="E-Posta Adresi" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
+                <TextBlock Text="E-posta adresi" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
                 <TextBox x:Name="EmailBox" Background="#F8FAFC" Foreground="#0F172A" BorderBrush="#E2E8F0" BorderThickness="1" Padding="10,8" FontSize="13" />
             </StackPanel>
 
             <!-- Password Field -->
             <StackPanel Grid.Row="4" Margin="0,0,0,10">
-                <TextBlock Text="Şifre" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
+                <TextBlock Text="Parola" Foreground="#64748B" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,5" />
                 <PasswordBox x:Name="PasswordBox" Background="#F8FAFC" Foreground="#0F172A" BorderBrush="#E2E8F0" BorderThickness="1" Padding="10,8" FontSize="13" />
             </StackPanel>
 
             <!-- Remember Me Checkbox -->
             <DockPanel Grid.Row="5" LastChildFill="True" Margin="0,4,0,0">
-                <CheckBox x:Name="RememberMeCheckBox" Content="Beni Hatırla" Foreground="#64748B" FontSize="12" IsChecked="True" VerticalAlignment="Center" />
+                <CheckBox x:Name="RememberMeCheckBox" Content="Bu cihazda hatırla" Foreground="#64748B" FontSize="12" IsChecked="True" VerticalAlignment="Center" />
             </DockPanel>
 
             <!-- Error Banner -->
@@ -63,7 +63,7 @@
             <!-- Buttons -->
             <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
                 <Button Content="İptal" Width="100" Height="36" Margin="0,0,10,0" Click="Cancel_Click" Background="#F1F5F9" Foreground="#334155" BorderThickness="1" BorderBrush="#E2E8F0" FontSize="13" FontWeight="SemiBold" />
-                <Button Content="🔑 Giriş Yap" Width="120" Height="36" Click="Connect_Click" Background="#2563EB" Foreground="White" BorderThickness="0" FontSize="13" FontWeight="Bold" />
+                <Button Content="Giriş yap" Width="120" Height="36" Click="Connect_Click" Background="#2563EB" Foreground="White" BorderThickness="0" FontSize="13" FontWeight="Bold" />
             </StackPanel>
         </Grid>
     </Border>

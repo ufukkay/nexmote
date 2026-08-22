@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -12,6 +13,7 @@ using System.Windows.Media.Imaging;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Win32;
 using NexMote.Shared.Contracts;
+using NexMote.Shared.Network;
 
 namespace NexMote.TechnicianApp;
 
@@ -31,7 +33,7 @@ public partial class MainWindow : Window
     private static readonly string RunningVersion =
         System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http = NexMoteHttp.CreateClient();
     private string _serverUrl = "https://nexmote.com";
     private string _loginEmail = "admin@nexmote.com";
     private string _loginPassword = "admin123";
@@ -48,12 +50,17 @@ public partial class MainWindow : Window
     private readonly Dictionary<int, Image> _displayImages = new();
     private readonly Dictionary<int, DisplayItem> _displayMeta = new();
     private readonly Dictionary<int, Point> _lastRemotePointPerDisplay = new();
+    private int _remoteInputSentCount;
 
     // Performance & Stats metrics
     private int _frameCount;
     private long _bytesReceived;
     private long _lastStatsTimestamp = Stopwatch.GetTimestamp();
     private long _lastFrameReceivedTicks = Stopwatch.GetTimestamp();
+    private long _remoteInputSequence;
+    private double _smoothedLatencyMs;
+    private readonly Queue<double> _latencySamples = new();
+    private readonly Dictionary<int, int> _framesPerDisplay = new();
     private bool _isFullScreen;
     private WindowStyle _previousWindowStyle;
     private WindowState _previousWindowState;
@@ -63,13 +70,16 @@ public partial class MainWindow : Window
     private long _pingSentTimestamp;
 
     public bool CredentialsReady { get; private set; } = true;
-    private bool _isIslandPinned = true;
     private bool _isIslandCollapsed = false;
+    private Guid _currentConnectedDeviceId = Guid.Empty;
+    private bool _isAwaitingReboot = false;
+    private CancellationTokenSource? _rebootWatchdogCts;
 
     public MainWindow()
     {
         InitializeComponent();
         Title = $"{Title} (v{RunningVersion})";
+        UpdateHeaderIdentity();
 
         RemoteScrollViewer.SizeChanged += (s, e) =>
         {
@@ -130,9 +140,10 @@ public partial class MainWindow : Window
             TechnicianAppSettings.Save(storedUrl, storedEmail ?? "admin@nexmote.com", storedPassword ?? "admin123", storedToken);
         }
 
-        _serverUrl = storedUrl;
+        _serverUrl = NexMoteHttp.NormalizeUrl(storedUrl);
         _loginEmail = storedEmail ?? "admin@nexmote.com";
         _loginPassword = storedPassword ?? "admin123";
+        UpdateHeaderIdentity();
 
         if (!string.IsNullOrWhiteSpace(storedToken))
         {
@@ -154,6 +165,7 @@ public partial class MainWindow : Window
         _serverUrl = prompt.ServerUrl;
         _loginEmail = prompt.Email;
         _loginPassword = prompt.Password;
+        UpdateHeaderIdentity();
         if (prompt.RememberMe)
         {
             TechnicianAppSettings.Save(_serverUrl, prompt.Email, prompt.Password);
@@ -220,6 +232,7 @@ public partial class MainWindow : Window
         RemoteCanvasGrid.Visibility = Visibility.Collapsed;
         SessionText.Text = "Cihaz Seçimi";
         StatusText.Text = "Cihaz listesi yükleniyor...";
+        UpdateHeaderIdentity();
 
         MultiScreenPanel.Children.Clear();
         _displayImages.Clear();
@@ -263,11 +276,16 @@ public partial class MainWindow : Window
             query.TryGetValue("token", out var token);
             query.TryGetValue("serverUrl", out var serverUrl);
             query.TryGetValue("deviceName", out var deviceName);
+            if (query.TryGetValue("deviceId", out var devIdStr) && Guid.TryParse(devIdStr, out var parsedDeviceId))
+            {
+                _currentConnectedDeviceId = parsedDeviceId;
+            }
 
             if (!string.IsNullOrWhiteSpace(serverUrl))
             {
                 _serverUrl = serverUrl;
                 TechnicianAppSettings.Save(_serverUrl, _loginEmail, _loginPassword);
+                UpdateHeaderIdentity();
             }
 
             SessionText.Text = $"Oturum: {sessionId}";
@@ -307,9 +325,11 @@ public partial class MainWindow : Window
                 _allDevices = devices;
                 ApplyDeviceFilter();
                 var onlineCount = devices.Count(d => d.IsOnline);
+                var offlineCount = devices.Count - onlineCount;
                 TotalCountText.Text = devices.Count.ToString();
                 OnlineCountText.Text = onlineCount.ToString();
-                StatusText.Text = $"Toplam {devices.Count} cihaz bulundu ({onlineCount} online).";
+                OfflineCountText.Text = offlineCount.ToString();
+                StatusText.Text = $"Toplam {devices.Count} cihaz bulundu ({onlineCount} çevrimiçi).";
             }
         }
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
@@ -323,9 +343,11 @@ public partial class MainWindow : Window
                     _allDevices = devices;
                     ApplyDeviceFilter();
                     var onlineCount = devices.Count(d => d.IsOnline);
+                    var offlineCount = devices.Count - onlineCount;
                     TotalCountText.Text = devices.Count.ToString();
                     OnlineCountText.Text = onlineCount.ToString();
-                    StatusText.Text = $"Toplam {devices.Count} cihaz bulundu ({onlineCount} online).";
+                    OfflineCountText.Text = offlineCount.ToString();
+                    StatusText.Text = $"Toplam {devices.Count} cihaz bulundu ({onlineCount} çevrimiçi).";
                     return;
                 }
             }
@@ -355,15 +377,32 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(query))
         {
             DevicesDataGrid.ItemsSource = _allDevices;
+            FilterSummaryText.Text = $"Tüm cihazlar gösteriliyor · {_allDevices.Count} kayıt";
             return;
         }
 
-        DevicesDataGrid.ItemsSource = _allDevices.Where(d =>
+        var filtered = _allDevices.Where(d =>
             (d.DeviceName?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
             (d.IpAddress?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
             (d.ActiveUser?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
             (d.LocationCode?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
             (d.OperatingSystem?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false)).ToList();
+
+        DevicesDataGrid.ItemsSource = filtered;
+        FilterSummaryText.Text = $"{filtered.Count} kayıt eşleşti · arama: {query}";
+    }
+
+    private void UpdateHeaderIdentity()
+    {
+        if (HeaderServerUrlText is not null)
+        {
+            HeaderServerUrlText.Text = _serverUrl;
+        }
+
+        if (HeaderUserText is not null)
+        {
+            HeaderUserText.Text = string.IsNullOrWhiteSpace(_loginEmail) ? "Yönetici" : _loginEmail;
+        }
     }
 
     private async void RefreshDevices_Click(object sender, RoutedEventArgs e)
@@ -391,6 +430,7 @@ public partial class MainWindow : Window
     {
         try
         {
+            _currentConnectedDeviceId = deviceId;
             StatusText.Text = "Uzaktan oturum başlatılıyor...";
             var request = new CreateRemoteSessionRequest(deviceId);
             var response = await _http.PostAsJsonAsync($"{_serverUrl.TrimEnd('/')}/api/remote-sessions", request);
@@ -399,7 +439,7 @@ public partial class MainWindow : Window
             {
                 var err = await response.Content.ReadAsStringAsync();
                 StatusText.Text = $"Oturum başlatılamadı: {err}";
-                MessageBox.Show($"Cihaza bağlanılamadı. Cihazın online olduğundan emin olun.\n({err})", "Bağlantı Hatası", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show($"Cihaza bağlanılamadı. Cihazın çevrimiçi olduğundan emin olun.\n({err})", "Bağlantı hatası", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -433,7 +473,10 @@ public partial class MainWindow : Window
             StatusText.Text = "Sinyalleşme sunucusuna bağlanılıyor...";
             var hubUrl = $"{serverUrl.TrimEnd('/')}/hubs/signaling";
             _connection = new HubConnectionBuilder()
-                .WithUrl(hubUrl)
+                .WithUrl(hubUrl, options =>
+                {
+                    options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+                })
                 .WithAutomaticReconnect()
                 .Build();
 
@@ -458,7 +501,19 @@ public partial class MainWindow : Window
 
                 if (string.Equals(type, "screen-frame-multi", StringComparison.OrdinalIgnoreCase))
                 {
-                    Dispatcher.Invoke(() => ShowFrame(payload));
+                    _ = ProcessIncomingFrameAsync(payload);
+                    return;
+                }
+
+                if (string.Equals(type, "network-probe-ack", StringComparison.OrdinalIgnoreCase))
+                {
+                    Dispatcher.Invoke(() => HandleNetworkProbeAck(payload));
+                    return;
+                }
+
+                if (string.Equals(type, "input-ack", StringComparison.OrdinalIgnoreCase))
+                {
+                    Dispatcher.Invoke(() => StatusText.Text = "Uzak girdi hedefte uygulandı.");
                     return;
                 }
 
@@ -482,7 +537,34 @@ public partial class MainWindow : Window
 
             _connection.Closed += error =>
             {
-                Dispatcher.Invoke(() => StatusText.Text = $"Bağlantı kapandı: {error?.Message ?? "oturum sonlandırıldı."}");
+                if (_isAwaitingReboot && _currentConnectedDeviceId != Guid.Empty)
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        PlaceholderPanel.Visibility = Visibility.Visible;
+                        PlaceholderTitle.Text = "Uzak Bilgisayar Yeniden Başlatılıyor";
+                        PlaceholderText.Text = "Cihaz ile bağlantı kesildi. Windows açıldığında oturum otomatik olarak bağlanacaktır.";
+                        StatusText.Text = "Uzak cihazın açılması bekleniyor (Otomatik Yeniden Bağlanma)...";
+                    });
+
+                    _ = StartRebootRecoveryWatchdogAsync(_currentConnectedDeviceId);
+                    return Task.CompletedTask;
+                }
+
+                if (_currentConnectedDeviceId != Guid.Empty && RemoteCanvasGrid.Visibility == Visibility.Visible)
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        PlaceholderPanel.Visibility = Visibility.Visible;
+                        PlaceholderTitle.Text = "Bağlantı Kesildi";
+                        PlaceholderText.Text = "Uzak cihaz ile bağlantı koptu. 'Şimdi Yeniden Bağlan' butonuna basabilir veya bekleyebilirsiniz.";
+                        StatusText.Text = "Bağlantı kapandı. Yeniden bağlanılıyor...";
+                    });
+                }
+                else
+                {
+                    Dispatcher.Invoke(() => StatusText.Text = $"Bağlantı kapandı: {error?.Message ?? "oturum sonlandırıldı."}");
+                }
                 return Task.CompletedTask;
             };
 
@@ -511,15 +593,15 @@ public partial class MainWindow : Window
                 _pingSentTimestamp = Stopwatch.GetTimestamp();
                 try
                 {
-                    await _connection.InvokeAsync("SendSignal", _sessionId.Value, "ping", _pingSentTimestamp.ToString());
+                    var probe = new NetworkProbe(Guid.NewGuid(), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    await _connection.InvokeAsync("SendSignal", _sessionId.Value, "network-probe", JsonSerializer.Serialize(probe));
                 }
                 catch { }
 
-                // Watchdog: If no frame received in over 6 seconds during an active session, request screen refresh
+                // Watchdog: If no frame received in over 12 seconds during an active session, request screen refresh
                 var secondsSinceLastFrame = (double)(Stopwatch.GetTimestamp() - _lastFrameReceivedTicks) / Stopwatch.Frequency;
-                if (secondsSinceLastFrame > 6.0)
+                if (secondsSinceLastFrame > 12.0)
                 {
-                    StatusText.Text = "🟡 Görüntü yenileniyor (Otomatik Kurtarma)...";
                     try
                     {
                         await _connection.InvokeAsync("SendSignal", _sessionId.Value, "refresh-screen", "");
@@ -536,30 +618,72 @@ public partial class MainWindow : Window
         if (long.TryParse(payload, out var sentTicks))
         {
             var rttMs = Math.Round((double)(Stopwatch.GetTimestamp() - sentTicks) * 1000 / Stopwatch.Frequency, 0);
-            LatencyText.Text = $"Ping: {rttMs} ms";
+            AddLatencySample(rttMs);
         }
     }
+
+    private void HandleNetworkProbeAck(string payload)
+    {
+        try
+        {
+            var ack = JsonSerializer.Deserialize<NetworkProbeAck>(payload);
+            if (ack is null)
+            {
+                return;
+            }
+
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            AddLatencySample(Math.Max(0, nowMs - ack.SentAtUnixMs));
+        }
+        catch
+        {
+        }
+    }
+
+    private void AddLatencySample(double rttMs)
+    {
+        _latencySamples.Enqueue(rttMs);
+        while (_latencySamples.Count > 24)
+        {
+            _latencySamples.Dequeue();
+        }
+
+        _smoothedLatencyMs = _smoothedLatencyMs <= 0 ? rttMs : (_smoothedLatencyMs * 0.75) + (rttMs * 0.25);
+        var p95 = _latencySamples.OrderBy(x => x).Skip(Math.Max(0, (int)Math.Ceiling(_latencySamples.Count * 0.95) - 1)).FirstOrDefault();
+        LatencyText.Text = $"RTT: {Math.Round(_smoothedLatencyMs)} ms · p95 {Math.Round(p95)} ms";
+    }
+
+    private string _lastScreenInfoFingerprint = string.Empty;
 
     private void UpdateScreenInfo(string payload)
     {
         try
         {
-            _screenInfo = JsonSerializer.Deserialize<RemoteScreenInfo>(payload);
-            if (_screenInfo is not null)
+            var screenInfo = JsonSerializer.Deserialize<RemoteScreenInfo>(payload);
+            if (screenInfo is not null)
             {
-                var displays = (_screenInfo.Displays ?? Array.Empty<DisplayItem>())
+                var displays = (screenInfo.Displays ?? Array.Empty<DisplayItem>())
                     .Where(d => d.Index > 0)
                     .OrderBy(d => d.Left)
                     .ThenBy(d => d.Index)
                     .ToList();
+
+                var fingerprint = $"{screenInfo.Width}x{screenInfo.Height}_{displays.Count}_" +
+                                  string.Join(",", displays.Select(d => $"{d.Index}:{d.Width}x{d.Height}@{d.Left},{d.Top}"));
+
+                _screenInfo = screenInfo;
 
                 var count = displays.Count;
                 StatusText.Text = count > 1
                     ? $"{count} ekran eş zamanlı akıyor (Soldan sağa sıralı)."
                     : $"Uzak Çözünürlük: {_screenInfo.Width} x {_screenInfo.Height}";
 
-                UpdateDisplaySelectorUI(displays);
-                BuildMultiScreenLayout();
+                if (fingerprint != _lastScreenInfoFingerprint || _displayImages.Count == 0)
+                {
+                    _lastScreenInfoFingerprint = fingerprint;
+                    UpdateDisplaySelectorUI(displays);
+                    BuildMultiScreenLayout();
+                }
             }
         }
         catch (Exception ex)
@@ -574,7 +698,7 @@ public partial class MainWindow : Window
 
         var allItem = new MenuItem
         {
-            Header = $"🖥️ Tüm Ekranlar ({displays.Count})",
+            Header = $"Tüm ekranlar ({displays.Count})",
             Tag = 0
         };
         allItem.Click += (s, e) => SelectDisplay(0, "Tüm Ekranlar");
@@ -590,7 +714,7 @@ public partial class MainWindow : Window
             var d = displays[i];
             var item = new MenuItem
             {
-                Header = $"🖥️ {d.Name} ({d.Width}x{d.Height})",
+                Header = $"{d.Name} ({d.Width}x{d.Height})",
                 Tag = d.Index
             };
             item.Click += (s, e) => SelectDisplay(d.Index, d.Name);
@@ -605,13 +729,6 @@ public partial class MainWindow : Window
         StatusText.Text = _selectedDisplayIndex == 0
             ? "Tüm ekranlar eş zamanlı gösteriliyor."
             : $"{displayName} tam boyuta alındı.";
-    }
-
-    private void PinIslandBtn_Click(object sender, RoutedEventArgs e)
-    {
-        _isIslandPinned = !_isIslandPinned;
-        PinIslandBtn.Content = _isIslandPinned ? "📌" : "📍";
-        PinIslandBtn.ToolTip = _isIslandPinned ? "Araç Çubuğunu Sabitle / Otomatik Gizle" : "Otomatik Gizle Açık";
     }
 
     private void IslandCollapseHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -669,13 +786,75 @@ public partial class MainWindow : Window
         StatusText.Text = "Görünüm: Orijinal Boyut (1:1 Piksel)";
     }
 
+    private string _currentQualityMode = "auto";
+    private string _currentQualityLabel = "⚡ Otomatik";
+
+    private void IslandQualityBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.ContextMenu != null)
+        {
+            btn.ContextMenu.PlacementTarget = btn;
+            btn.ContextMenu.IsOpen = true;
+        }
+    }
+
+    private async void QualityAuto_Click(object sender, RoutedEventArgs e)
+    {
+        await SetQualityProfileAsync("auto", "⚡ Otomatik (Ağ Uyumlu)", QualityAutoItem);
+    }
+
+    private async void QualitySpeed_Click(object sender, RoutedEventArgs e)
+    {
+        await SetQualityProfileAsync("speed", "🚀 Hız & Düşük Gecikme", QualitySpeedItem);
+    }
+
+    private async void QualityBalanced_Click(object sender, RoutedEventArgs e)
+    {
+        await SetQualityProfileAsync("balanced", "⚖️ Dengeli Standart", QualityBalancedItem);
+    }
+
+    private async void QualityCrystal_Click(object sender, RoutedEventArgs e)
+    {
+        await SetQualityProfileAsync("quality", "💎 Kristal Netlik", QualityCrystalItem);
+    }
+
+    private async Task SetQualityProfileAsync(string mode, string label, MenuItem selectedItem)
+    {
+        _currentQualityMode = mode;
+        _currentQualityLabel = label;
+
+        if (QualityAutoItem != null) QualityAutoItem.IsChecked = (selectedItem == QualityAutoItem);
+        if (QualitySpeedItem != null) QualitySpeedItem.IsChecked = (selectedItem == QualitySpeedItem);
+        if (QualityBalancedItem != null) QualityBalancedItem.IsChecked = (selectedItem == QualityBalancedItem);
+        if (QualityCrystalItem != null) QualityCrystalItem.IsChecked = (selectedItem == QualityCrystalItem);
+
+        if (IslandQualityBtn != null)
+        {
+            IslandQualityBtn.Content = mode switch
+            {
+                "speed" => "🚀 Hız",
+                "balanced" => "⚖️ Dengeli",
+                "quality" => "💎 Kristal",
+                _ => "⚡ Kalite"
+            };
+        }
+
+        if (_sessionId is not null && _connection?.State == HubConnectionState.Connected)
+        {
+            try
+            {
+                await _connection.InvokeAsync("SendSignal", _sessionId.Value, "set-quality-mode", mode);
+                StatusText.Text = $"Kalite profili güncellendi: {label}";
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = $"Kalite profili ayarlanamadı: {ex.Message}";
+            }
+        }
+    }
+
     private void BuildMultiScreenLayout()
     {
-        MultiScreenPanel.Children.Clear();
-        _displayImages.Clear();
-        _displayMeta.Clear();
-        _lastRemotePointPerDisplay.Clear();
-
         var allDisplays = (_screenInfo?.Displays ?? Array.Empty<DisplayItem>())
             .Where(d => d.Index > 0)
             .OrderBy(d => d.Left)
@@ -703,6 +882,75 @@ public partial class MainWindow : Window
         var availWidth = RemoteScrollViewer.ActualWidth > 50 ? RemoteScrollViewer.ActualWidth : 1200;
         var availHeight = RemoteScrollViewer.ActualHeight > 50 ? RemoteScrollViewer.ActualHeight : 700;
 
+        // Check if existing elements can be updated in-place without tearing down visual tree
+        var visibleIndices = visibleDisplays.Select(d => d.Index).ToHashSet();
+        var existingIndices = _displayImages.Keys.ToHashSet();
+
+        if (visibleIndices.SetEquals(existingIndices) && MultiScreenPanel.Children.Count == visibleDisplays.Count)
+        {
+            // Fast in-place layout update (Zero flicker, zero focus drop)
+            for (int i = 0; i < visibleDisplays.Count; i++)
+            {
+                var display = visibleDisplays[i];
+                var displayIndex = display.Index;
+                if (!_displayImages.TryGetValue(displayIndex, out var image)) continue;
+
+                double tileWidth, tileHeight;
+                if (_currentStretch == Stretch.None)
+                {
+                    tileWidth = display.Width;
+                    tileHeight = display.Height;
+                }
+                else if (isSingleView)
+                {
+                    tileWidth = availWidth;
+                    tileHeight = availHeight;
+                }
+                else
+                {
+                    var aspect = display.Height > 0 ? display.Width / (double)display.Height : 16.0 / 9.0;
+                    var totalScreens = visibleDisplays.Count;
+                    var maxPerScreenWidth = Math.Max(320, (availWidth - (totalScreens * 6)) / totalScreens);
+                    tileHeight = Math.Min(availHeight, maxPerScreenWidth / aspect);
+                    tileWidth = tileHeight * aspect;
+                }
+
+                image.Width = tileWidth;
+                image.Height = tileHeight;
+                image.Stretch = _currentStretch;
+
+                if (MultiScreenPanel.Children[i] is Border border)
+                {
+                    border.Margin = isSingleView ? new Thickness(0) : new Thickness(2);
+                    border.BorderThickness = isSingleView ? new Thickness(0) : new Thickness(1);
+                    border.CornerRadius = isSingleView ? new CornerRadius(0) : new CornerRadius(6);
+                    if (border.Child is Grid grid)
+                    {
+                        grid.Width = tileWidth;
+                        grid.Height = tileHeight;
+                        if (grid.Children.OfType<TextBlock>().FirstOrDefault() is TextBlock label)
+                        {
+                            label.Visibility = isSingleView ? Visibility.Collapsed : Visibility.Visible;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        var existingSources = new Dictionary<int, ImageSource>();
+        foreach (var (idx, img) in _displayImages)
+        {
+            if (img.Source != null)
+            {
+                existingSources[idx] = img.Source;
+            }
+        }
+
+        MultiScreenPanel.Children.Clear();
+        _displayImages.Clear();
+        _lastRemotePointPerDisplay.Clear();
+
         foreach (var display in visibleDisplays)
         {
             var displayIndex = display.Index;
@@ -714,12 +962,12 @@ public partial class MainWindow : Window
                 tileWidth = display.Width;
                 tileHeight = display.Height;
             }
-            else if (isSingleView) // Single display full viewport mode
+            else if (isSingleView)
             {
                 tileWidth = availWidth;
                 tileHeight = availHeight;
             }
-            else // Multi display side-by-side mode
+            else
             {
                 var aspect = display.Height > 0 ? display.Width / (double)display.Height : 16.0 / 9.0;
                 var totalScreens = visibleDisplays.Count;
@@ -734,37 +982,11 @@ public partial class MainWindow : Window
                 Width = tileWidth,
                 Height = tileHeight,
                 Focusable = true,
-                SnapsToDevicePixels = true
+                SnapsToDevicePixels = true,
+                Source = existingSources.GetValueOrDefault(display.Index)
             };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             RenderOptions.SetEdgeMode(image, EdgeMode.Aliased);
-
-            image.MouseMove += (s, e) => HandleTileMouseMove(displayIndex, image, e);
-            image.MouseLeftButtonDown += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "left", true); e.Handled = true; };
-            image.MouseLeftButtonUp += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "left", false); e.Handled = true; };
-            image.MouseRightButtonDown += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "right", true); e.Handled = true; };
-            image.MouseRightButtonUp += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "right", false); e.Handled = true; };
-            image.MouseDown += (s, e) =>
-            {
-                if (e.ChangedButton == MouseButton.Middle)
-                {
-                    HandleTileMouseButton(displayIndex, image, e, "middle", true);
-                    e.Handled = true;
-                }
-            };
-            image.MouseUp += (s, e) =>
-            {
-                if (e.ChangedButton == MouseButton.Middle)
-                {
-                    HandleTileMouseButton(displayIndex, image, e, "middle", false);
-                    e.Handled = true;
-                }
-            };
-            image.MouseWheel += (s, e) =>
-            {
-                RemoteScrollViewer.Focus();
-                _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId ?? Guid.Empty, "mouse-wheel", WheelDelta: e.Delta, DisplayIndex: displayIndex));
-            };
 
             var label = new TextBlock
             {
@@ -777,10 +999,18 @@ public partial class MainWindow : Window
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Top,
                 Margin = new Thickness(6),
-                Visibility = isSingleView ? Visibility.Collapsed : Visibility.Visible
+                Visibility = isSingleView ? Visibility.Collapsed : Visibility.Visible,
+                IsHitTestVisible = false
             };
 
-            var tileGrid = new Grid { Width = tileWidth, Height = tileHeight };
+            var tileGrid = new Grid
+            {
+                Width = tileWidth,
+                Height = tileHeight,
+                Background = Brushes.Transparent,
+                Focusable = true,
+                Cursor = Cursors.Arrow
+            };
             tileGrid.Children.Add(image);
             tileGrid.Children.Add(label);
 
@@ -792,12 +1022,54 @@ public partial class MainWindow : Window
                 BorderBrush = isSingleView ? Brushes.Transparent : new SolidColorBrush(Color.FromRgb(0x33, 0x41, 0x55)),
                 BorderThickness = isSingleView ? new Thickness(0) : new Thickness(1),
                 Margin = isSingleView ? new Thickness(0) : new Thickness(2),
-                Background = new SolidColorBrush(Color.FromRgb(0x00, 0x00, 0x00))
+                Background = new SolidColorBrush(Color.FromRgb(0x00, 0x00, 0x00)),
+                Focusable = true
             };
+
+            AttachRemoteInputHandlers(tileBorder, displayIndex, image);
 
             _displayImages[display.Index] = image;
             MultiScreenPanel.Children.Add(tileBorder);
         }
+    }
+
+    private void AttachRemoteInputHandlers(UIElement target, int displayIndex, Image image)
+    {
+        target.PreviewMouseMove += (s, e) => HandleTileMouseMove(displayIndex, image, e);
+        target.PreviewMouseLeftButtonDown += (s, e) => { FocusRemoteInputSurface(target); HandleTileMouseButton(displayIndex, image, e, "left", true); e.Handled = true; };
+        target.PreviewMouseLeftButtonUp += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "left", false); e.Handled = true; };
+        target.PreviewMouseRightButtonDown += (s, e) => { FocusRemoteInputSurface(target); HandleTileMouseButton(displayIndex, image, e, "right", true); e.Handled = true; };
+        target.PreviewMouseRightButtonUp += (s, e) => { HandleTileMouseButton(displayIndex, image, e, "right", false); e.Handled = true; };
+        target.PreviewMouseDown += (s, e) =>
+        {
+            FocusRemoteInputSurface(target);
+            if (e.ChangedButton == MouseButton.Middle)
+            {
+                HandleTileMouseButton(displayIndex, image, e, "middle", true);
+                e.Handled = true;
+            }
+        };
+        target.PreviewMouseUp += (s, e) =>
+        {
+            if (e.ChangedButton == MouseButton.Middle)
+            {
+                HandleTileMouseButton(displayIndex, image, e, "middle", false);
+                e.Handled = true;
+            }
+        };
+        target.PreviewMouseWheel += (s, e) =>
+        {
+            FocusRemoteInputSurface(target);
+            _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId ?? Guid.Empty, "mouse-wheel", WheelDelta: e.Delta, DisplayIndex: displayIndex));
+            e.Handled = true;
+        };
+    }
+
+    private void FocusRemoteInputSurface(UIElement target)
+    {
+        RemoteScrollViewer.Focus();
+        target.Focus();
+        Keyboard.Focus(target);
     }
 
     private bool TryMapTileToRemote(int displayIndex, Image image, Point tilePoint, out int x, out int y)
@@ -825,12 +1097,10 @@ public partial class MainWindow : Window
             var offsetY = (image.ActualHeight - meta.Height) / 2.0;
             var imageX = tilePoint.X - offsetX;
             var imageY = tilePoint.Y - offsetY;
-            if (imageX < 0 || imageY < 0 || imageX > meta.Width || imageY > meta.Height)
-            {
-                return false;
-            }
-            x = (int)Math.Round(imageX);
-            y = (int)Math.Round(imageY);
+            var clampedX = Math.Clamp(imageX, 0, meta.Width);
+            var clampedY = Math.Clamp(imageY, 0, meta.Height);
+            x = (int)Math.Round(clampedX);
+            y = (int)Math.Round(clampedY);
             x = Math.Clamp(x, 0, meta.Width - 1);
             y = Math.Clamp(y, 0, meta.Height - 1);
             return true;
@@ -845,13 +1115,11 @@ public partial class MainWindow : Window
             var imageX = tilePoint.X - offsetX;
             var imageY = tilePoint.Y - offsetY;
 
-            if (imageX < 0 || imageY < 0 || imageX > renderedWidth || imageY > renderedHeight)
-            {
-                return false;
-            }
+            var clampedX = Math.Clamp(imageX, 0, renderedWidth);
+            var clampedY = Math.Clamp(imageY, 0, renderedHeight);
 
-            x = (int)Math.Round(imageX / scale);
-            y = (int)Math.Round(imageY / scale);
+            x = (int)Math.Round(clampedX / scale);
+            y = (int)Math.Round(clampedY / scale);
             x = Math.Clamp(x, 0, meta.Width - 1);
             y = Math.Clamp(y, 0, meta.Height - 1);
             return true;
@@ -906,20 +1174,19 @@ public partial class MainWindow : Window
         _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId ?? Guid.Empty, "mouse-button", x, y, button, isDown, DisplayIndex: displayIndex));
     }
 
-    private void ShowFrame(string payload)
+    private async Task ProcessIncomingFrameAsync(string payload)
     {
         try
         {
+            var payloadByteCount = Encoding.UTF8.GetByteCount(payload);
             var frame = JsonSerializer.Deserialize<MultiScreenFrame>(payload);
-            if (frame is null || !_displayImages.TryGetValue(frame.DisplayIndex, out var image))
+            if (frame is null || string.IsNullOrEmpty(frame.JpegBase64))
             {
                 return;
             }
 
-            _lastFrameReceivedTicks = Stopwatch.GetTimestamp();
+            // Decode JPEG on background thread pool (Zero UI Dispatcher load!)
             var bytes = Convert.FromBase64String(frame.JpegBase64);
-            _bytesReceived += bytes.Length;
-
             using var stream = new MemoryStream(bytes);
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
@@ -928,25 +1195,100 @@ public partial class MainWindow : Window
             bitmap.EndInit();
             bitmap.Freeze();
 
-            image.Source = bitmap;
-            if (PlaceholderPanel.Visibility == Visibility.Visible)
+            await Dispatcher.BeginInvoke(() =>
             {
-                PlaceholderPanel.Visibility = Visibility.Collapsed;
-            }
-
-            CalculateMetrics();
+                ApplyRenderedFrame(frame, bitmap, payloadByteCount);
+            });
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"Kare okunamadı: {ex.Message}";
+            await Dispatcher.BeginInvoke(() => StatusText.Text = $"Kare çözme hatası: {ex.Message}");
         }
+    }
+
+    private void ApplyRenderedFrame(MultiScreenFrame frame, BitmapImage bitmap, int payloadByteCount)
+    {
+        if (!_displayImages.TryGetValue(frame.DisplayIndex, out var image) || image is null)
+        {
+            if (_displayImages.Count == 1 && frame.DisplayIndex == 0)
+            {
+                image = _displayImages.Values.FirstOrDefault();
+            }
+            else if (_displayImages.Count == 0)
+            {
+                image = CreateFallbackDisplayImage(frame.DisplayIndex);
+            }
+        }
+
+        if (image is null) return;
+
+        _lastFrameReceivedTicks = Stopwatch.GetTimestamp();
+        _bytesReceived += payloadByteCount;
+        _framesPerDisplay[frame.DisplayIndex] = _framesPerDisplay.GetValueOrDefault(frame.DisplayIndex) + 1;
+
+        image.Source = bitmap;
+
+        if (PlaceholderPanel.Visibility == Visibility.Visible)
+        {
+            PlaceholderPanel.Visibility = Visibility.Collapsed;
+        }
+
+        CalculateMetrics();
+        _ = SendFrameAckAsync(frame);
+    }
+
+    private Image CreateFallbackDisplayImage(int displayIndex)
+    {
+        var image = new Image
+        {
+            Stretch = _currentStretch,
+            Width = Math.Max(800, RemoteScrollViewer.ActualWidth > 0 ? RemoteScrollViewer.ActualWidth : 1280),
+            Height = Math.Max(600, RemoteScrollViewer.ActualHeight > 0 ? RemoteScrollViewer.ActualHeight : 720),
+            Focusable = true,
+            SnapsToDevicePixels = true
+        };
+        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+        RenderOptions.SetEdgeMode(image, EdgeMode.Aliased);
+
+        var tileGrid = new Grid
+        {
+            Background = Brushes.Transparent,
+            Focusable = true,
+            Cursor = Cursors.Arrow
+        };
+        tileGrid.Children.Add(image);
+
+        var tileBorder = new Border
+        {
+            Child = tileGrid,
+            CornerRadius = new CornerRadius(0),
+            ClipToBounds = true,
+            Background = new SolidColorBrush(Color.FromRgb(0x00, 0x00, 0x00)),
+            Focusable = true
+        };
+
+        AttachRemoteInputHandlers(tileBorder, displayIndex, image);
+        _displayImages[displayIndex] = image;
+        _displayMeta[displayIndex] = new DisplayItem(displayIndex, "Ekran", 1920, 1080, 0, 0);
+        MultiScreenPanel.Children.Add(tileBorder);
+        return image;
     }
 
     private async void RefreshScreenBtn_Click(object sender, RoutedEventArgs e)
     {
+        if (_currentConnectedDeviceId != Guid.Empty && (_connection == null || _connection.State != HubConnectionState.Connected || _isAwaitingReboot || PlaceholderPanel.Visibility == Visibility.Visible))
+        {
+            StatusText.Text = "Cihaza yeniden bağlanılıyor...";
+            PlaceholderPanel.Visibility = Visibility.Visible;
+            PlaceholderTitle.Text = "Cihaza Yeniden Bağlanılıyor";
+            PlaceholderText.Text = "Canlı oturum yeniden kuruluyor, lütfen bekleyin...";
+            await InitiateRemoteSessionAsync(_currentConnectedDeviceId);
+            return;
+        }
+
         if (_sessionId.HasValue && _connection?.State == HubConnectionState.Connected)
         {
-            StatusText.Text = "🔄 Ekran akışı ve bilgisi yenileniyor...";
+            StatusText.Text = "Ekran akışı ve bilgisi yenileniyor...";
             try
             {
                 await _connection.InvokeAsync("SendSignal", _sessionId.Value, "refresh-screen", "");
@@ -955,6 +1297,24 @@ public partial class MainWindow : Window
             {
                 StatusText.Text = $"Yenileme hatası: {ex.Message}";
             }
+        }
+    }
+
+    private async Task SendFrameAckAsync(MultiScreenFrame frame)
+    {
+        if (frame.Sequence <= 0 || _sessionId is null || _connection?.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var ack = new FrameAck(_sessionId.Value, frame.DisplayIndex, frame.Sequence, now, now);
+            await _connection.InvokeAsync("SendSignal", _sessionId.Value, "frame-ack", JsonSerializer.Serialize(ack));
+        }
+        catch
+        {
         }
     }
 
@@ -988,10 +1348,10 @@ public partial class MainWindow : Window
             if (isManual)
             {
                 CheckUpdatesBtn.IsEnabled = false;
-                CheckUpdatesBtn.Content = "⏳ Kontrol Ediliyor...";
+                CheckUpdatesBtn.Content = "Kontrol ediliyor...";
             }
 
-            using var http = new HttpClient();
+            using var http = NexMoteHttp.CreateClient();
             var checkUrl = $"{_serverUrl.TrimEnd('/')}/api/updates/check";
             var json = await http.GetStringAsync(checkUrl);
             using var doc = JsonDocument.Parse(json);
@@ -1033,12 +1393,12 @@ public partial class MainWindow : Window
 
                 if (result == MessageBoxResult.Yes && !string.IsNullOrEmpty(downloadUrl))
                 {
-                    StatusText.Text = "🚀 Güncelleme MSI paketi indiriliyor...";
+                    StatusText.Text = "Güncelleme MSI paketi indiriliyor...";
                     var tempMsi = Path.Combine(Path.GetTempPath(), "NexMote-Technician-Update.msi");
                     var msiBytes = await http.GetByteArrayAsync(downloadUrl);
                     await File.WriteAllBytesAsync(tempMsi, msiBytes);
 
-                    StatusText.Text = "⚙️ Yükleyici çalıştırılıyor (yönetici izni gerekebilir)...";
+                    StatusText.Text = "Yükleyici çalıştırılıyor (yönetici izni gerekebilir)...";
                     try
                     {
                         var psi = new System.Diagnostics.ProcessStartInfo("msiexec.exe", $"/i \"{tempMsi}\" /qn /norestart")
@@ -1072,7 +1432,7 @@ public partial class MainWindow : Window
             if (isManual)
             {
                 CheckUpdatesBtn.IsEnabled = true;
-                CheckUpdatesBtn.Content = "🚀 Güncelleme Kontrol Et";
+                CheckUpdatesBtn.Content = "Güncellemeyi kontrol et";
             }
         }
     }
@@ -1087,15 +1447,33 @@ public partial class MainWindow : Window
             var fps = Math.Round(_frameCount / elapsedSeconds, 1);
             var kbps = Math.Round((_bytesReceived / 1024.0) / elapsedSeconds, 1);
 
-            FpsText.Text = $"FPS: {fps} | {_displayImages.Count} Ekran";
-            ThroughputText.Text = $"Bant: {kbps} KB/s";
+            var perDisplay = _framesPerDisplay.Count == 0
+                ? $"{_displayImages.Count} ekran"
+                : string.Join(" ", _framesPerDisplay.OrderBy(x => x.Key).Select(x => $"E{x.Key}:{Math.Round(x.Value / elapsedSeconds, 1)}"));
+            FpsText.Text = $"FPS: {fps} | {perDisplay}";
+            ThroughputText.Text = $"Hat: {kbps} KB/s";
             if (SessionStatsText != null)
             {
-                SessionStatsText.Text = $"{fps} FPS · {kbps} KB/s";
+                var health = _smoothedLatencyMs switch
+                {
+                    <= 30 => "Mükemmel",
+                    <= 75 => "İyi",
+                    <= 140 => "Orta",
+                    _ => "Zayıf"
+                };
+                var modeTag = _currentQualityMode switch
+                {
+                    "speed" => "🚀 Hız",
+                    "balanced" => "⚖️ Dengeli",
+                    "quality" => "💎 Kristal",
+                    _ => "⚡ Oto"
+                };
+                SessionStatsText.Text = $"{fps} FPS · {kbps} KB/s · {Math.Round(_smoothedLatencyMs)} ms ({health}) · {modeTag}";
             }
 
             _frameCount = 0;
             _bytesReceived = 0;
+            _framesPerDisplay.Clear();
             _lastStatsTimestamp = now;
         }
     }
@@ -1108,13 +1486,117 @@ public partial class MainWindow : Window
 
         try
         {
+            if (action.StartsWith("reboot", StringComparison.OrdinalIgnoreCase))
+            {
+                _isAwaitingReboot = true;
+                PlaceholderPanel.Visibility = Visibility.Visible;
+                PlaceholderTitle.Text = "Uzak Bilgisayar Yeniden Başlatılıyor";
+                PlaceholderText.Text = "Cihaz ile bağlantı kesildi. Windows açıldığında oturum otomatik olarak bağlanacaktır.";
+                StatusText.Text = "Uzak bilgisayar yeniden başlatılıyor. Otomatik yeniden bağlanma devrede...";
+            }
+
             var req = new PowerActionRequest(_sessionId.Value, action);
             await _connection.InvokeAsync("SendSignal", _sessionId.Value, "power-action", JsonSerializer.Serialize(req));
-            StatusText.Text = $"⚡ {label} komutu iletildi.";
+            StatusText.Text = $"{label} komutu iletildi.";
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Güç işlemi başarısız: {ex.Message}";
+        }
+    }
+
+    private async Task StartRebootRecoveryWatchdogAsync(Guid deviceId)
+    {
+        _rebootWatchdogCts?.Cancel();
+        _rebootWatchdogCts?.Dispose();
+        _rebootWatchdogCts = new CancellationTokenSource();
+        var ct = _rebootWatchdogCts.Token;
+
+        var maxWaitSeconds = 300; // 5 dakika bekleme süresi
+        var startTimestamp = Stopwatch.GetTimestamp();
+
+        // 7 saniye cihazın kapanmasını bekle
+        try
+        {
+            await Task.Delay(7000, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        while (!ct.IsCancellationRequested)
+        {
+            var elapsedSec = (Stopwatch.GetTimestamp() - startTimestamp) / Stopwatch.Frequency;
+            if (elapsedSec > maxWaitSeconds)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = "Yeniden başlatma zaman aşımına uğradı (5 dk).";
+                    _isAwaitingReboot = false;
+                    DisconnectBtn_Click(this, new RoutedEventArgs());
+                });
+                break;
+            }
+
+            try
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = $"Uzak cihazın açılması bekleniyor ({elapsedSec} sn)...";
+                    PlaceholderTitle.Text = "Uzak Cihazın Açılması Bekleniyor";
+                    PlaceholderText.Text = $"Cihaz yeniden başlatılıyor ({elapsedSec} sn)...\nAçıldığı an Windows giriş ekranı otomatik bağlanacaktır.";
+                });
+
+                var response = await _http.GetAsync($"{_serverUrl.TrimEnd('/')}/api/devices/{deviceId}", ct);
+                if (response.IsSuccessStatusCode)
+                {
+                    var dev = await response.Content.ReadFromJsonAsync<DeviceSummary>(cancellationToken: ct);
+                    if (dev != null && dev.IsOnline)
+                    {
+                        // Cihaz çevrimiçi oldu!
+                        await Dispatcher.InvokeAsync(async () =>
+                        {
+                            StatusText.Text = "Cihaz çevrimiçi oldu! Canlı oturum otomatik başlatılıyor...";
+                            PlaceholderTitle.Text = "Cihaz Çevrimiçi Oldu";
+                            PlaceholderText.Text = "Windows giriş ekranı canlı olarak bağlanıyor, lütfen bekleyin...";
+                            _isAwaitingReboot = false;
+                            await Task.Delay(1500); // Ajanın soket odasına katılması için kısa tolerans
+                            await InitiateRemoteSessionAsync(deviceId);
+                        });
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch { }
+
+            try
+            {
+                await Task.Delay(3000, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    private async void SendSasBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_sessionId is null || _connection?.State != HubConnectionState.Connected) return;
+
+        try
+        {
+            await _connection.InvokeAsync("SendSignal", _sessionId.Value, "send-sas", "{}");
+            StatusText.Text = "Ctrl+Alt+Del (SAS) sinyali iletildi.";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"SAS gönderilemedi: {ex.Message}";
         }
     }
 
@@ -1127,6 +1609,8 @@ public partial class MainWindow : Window
 
     private async void DisconnectBtn_Click(object sender, RoutedEventArgs e)
     {
+        _rebootWatchdogCts?.Cancel();
+        _isAwaitingReboot = false;
         _pingTimer?.Stop();
         if (_connection is not null)
         {
@@ -1218,8 +1702,18 @@ public partial class MainWindow : Window
 
         try
         {
+            input = input with
+            {
+                Sequence = ++_remoteInputSequence,
+                SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
             var payload = JsonSerializer.Serialize(input);
             await _connection.InvokeAsync("SendSignal", _sessionId.Value, "remote-input", payload);
+            _remoteInputSentCount++;
+            if (_remoteInputSentCount <= 3 || _remoteInputSentCount % 100 == 0)
+            {
+                await Dispatcher.BeginInvoke(() => StatusText.Text = $"Uzak girdi gönderiliyor ({_remoteInputSentCount})...");
+            }
         }
         catch (Exception ex)
         {
@@ -1341,9 +1835,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var runAsAdmin = RunAsAdminCheckBox.IsChecked == true;
+        const bool runAsAdmin = true;
         _pendingCommandRequestId = Guid.NewGuid().ToString("N");
-        CommandOutputBox.Text += $"> {(runAsAdmin ? "🛡️ [Yönetici] " : string.Empty)}{command}{Environment.NewLine}";
+        CommandOutputBox.Text += $"> [Yönetici] {command}{Environment.NewLine}";
         CommandOutputBox.ScrollToEnd();
         CommandInputBox.Clear();
 
@@ -1364,7 +1858,7 @@ public partial class MainWindow : Window
         try
         {
             var result = JsonSerializer.Deserialize<RemoteCommandResult>(payload);
-            if (result is null || result.RequestId != _pendingCommandRequestId)
+            if (result is null || (_sessionId.HasValue && result.SessionId != _sessionId.Value))
             {
                 return;
             }
@@ -1380,7 +1874,7 @@ public partial class MainWindow : Window
             }
 
             CommandOutputBox.Text += result.ElevationDenied
-                ? $"[⚠️ Yönetici izni reddedildi veya UAC istemi zaman aşımına uğradı]{Environment.NewLine}{Environment.NewLine}"
+                ? $"[Yönetici izni reddedildi veya UAC istemi zaman aşımına uğradı]{Environment.NewLine}{Environment.NewLine}"
                 : result.TimedOut
                     ? $"[Zaman aşımı]{Environment.NewLine}{Environment.NewLine}"
                     : $"[Çıkış kodu: {result.ExitCode}] ({result.DurationMs} ms){Environment.NewLine}{Environment.NewLine}";
@@ -1422,6 +1916,7 @@ public sealed class DeviceModel
     public double CpuUsagePercent { get; set; }
     public long MemoryTotalMb { get; set; }
     public long MemoryUsedMb { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
     public bool IsOnline { get; set; }
 
     public string StatusLabel => IsOnline ? "Çevrimiçi" : "Çevrimdışı";
@@ -1431,7 +1926,43 @@ public sealed class DeviceModel
         ? new SolidColorBrush(Color.FromRgb(0x10, 0xB9, 0x81))
         : new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8));
 
-    public string StatusText => IsOnline ? "🟢 Online" : "🔴 Offline";
+    public string CpuText => $"CPU %{Math.Round(CpuUsagePercent, 0)}";
+    public string MemoryUsageText
+    {
+        get
+        {
+            if (MemoryTotalMb <= 0)
+            {
+                return "RAM --";
+            }
+
+            var percent = Math.Round(MemoryUsedMb * 100.0 / MemoryTotalMb, 0);
+            return $"RAM %{percent}";
+        }
+    }
+
+    public string AgentVersionLabel => string.IsNullOrWhiteSpace(AgentVersion) ? "-" : $"v{AgentVersion}";
+
+    public string LastSeenLabel
+    {
+        get
+        {
+            if (IsOnline)
+            {
+                return "şimdi";
+            }
+
+            if (LastSeenAt == default)
+            {
+                return "-";
+            }
+
+            var local = LastSeenAt.ToLocalTime();
+            return local.ToString("HH:mm");
+        }
+    }
+
+    public string StatusText => IsOnline ? "Çevrimiçi" : "Çevrimdışı";
 }
 
 /// <summary>

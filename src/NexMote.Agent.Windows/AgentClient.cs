@@ -1,12 +1,16 @@
 using Microsoft.Extensions.Options;
 using NexMote.Shared.Contracts;
+using NexMote.Shared.Identity;
+using NexMote.Shared.Network;
+using NexMote.Shared.Telemetry;
 using System.Net.Http.Json;
 using System.Reflection;
 
 namespace NexMote.Agent.Windows;
 
 /// <summary>
-/// Windows Agent servisinin NexMote sunucusu ile REST API üzerinden iletişim kurmasını (Enrollment ve Heartbeat) sağlayan istemci.
+/// Windows Agent servisinin NexMote sunucusu ile REST API üzerinden iletişim kurmasını
+/// (Enrollment ve Heartbeat) sağlayan istemci.
 /// </summary>
 public sealed class AgentClient
 {
@@ -34,13 +38,13 @@ public sealed class AgentClient
             options.EnrollmentKey,
             Environment.MachineName,
             Environment.UserDomainName,
-            Environment.OSVersion.VersionString,
+            SystemTelemetry.GetFriendlyOperatingSystemName(),
             RunningVersion,
             null,
             options.LocationCode ?? "OFFICE");
 
         var cleanServerUrl = GetCleanServerUrl(options.ServerUrl);
-        var url = new Uri(new Uri(cleanServerUrl + "/"), "api/agents/enroll");
+        var url = BuildUrl(cleanServerUrl, "api/agents/enroll");
         var response = await _httpClient.PostAsJsonAsync(url, request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
@@ -60,32 +64,83 @@ public sealed class AgentClient
     {
         var options = _optionsMonitor.CurrentValue;
         var (totalRamMb, usedRamMb) = SystemTelemetry.GetMemoryMetrics();
+
+        // Aktif konsol oturumunda giriş yapmış veya son oturum açan kullanıcının temiz adını al (domain öneki olmadan)
+        var activeUser = SessionProcessLauncher.GetActiveSessionUserName();
+
+        var hardware = SystemTelemetry.GetHardwareInventory();
+
         var request = new DeviceHeartbeatRequest(
             identity.AgentToken,
-            $"{Environment.UserDomainName}\\{Environment.UserName}",
+            activeUser,
             SystemTelemetry.GetPrimaryIPv4Address(),
             _cpuUsageSampler.GetAveragePercent(),
             totalRamMb,
             usedRamMb,
             SystemTelemetry.GetDiskFreeMb(),
             Environment.TickCount64 / 1000,
-            RunningVersion);
+            RunningVersion,
+            SystemTelemetry.GetNetworkAdapters(),
+            SystemTelemetry.GetInstalledApplications(),
+            SystemTelemetry.GetInstalledWindowsUpdates(),
+            hardware.SystemSerialNumber,
+            hardware);
 
         var cleanServerUrl = GetCleanServerUrl(options.ServerUrl);
-        var url = new Uri(new Uri(cleanServerUrl + "/"), $"api/agents/{identity.DeviceId}/heartbeat");
+        var url = BuildUrl(cleanServerUrl, $"api/agents/{identity.DeviceId}/heartbeat");
         var response = await _httpClient.PostAsJsonAsync(url, request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 
     /// <summary>
-    /// Sunucu URL'indeki olası geçersiz yerel IP veya eksiklikleri temizleyerek canlı adrese zorlar.
+    /// SYSTEM yetkisiyle (Worker'ın doğrudan SignalR Hub bağlantısı üzerinden) çalıştırılan uzak komutların
+    /// denetim kaydını sunucuya iletir. Bu olmadan en yetkili komut çalıştırma yolu hiç audit izi bırakmaz.
     /// </summary>
-    private static string GetCleanServerUrl(string rawUrl)
+    public async Task PostCommandAuditAsync(DeviceIdentity identity, Guid sessionId, string shell, string command, int exitCode, string stdOut, string stdErr, long durationMs, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(rawUrl) || rawUrl.Contains("192.168.0") || rawUrl.Contains("127.0.0.1") || rawUrl.Contains("localhost") || rawUrl.StartsWith("http://"))
+        try
         {
-            return "https://nexmote.com";
+            var options = _optionsMonitor.CurrentValue;
+            var entry = new CommandAuditEntry(
+                identity.DeviceId,
+                identity.AgentToken,
+                sessionId,
+                shell,
+                command,
+                exitCode,
+                Truncate(stdOut, 2000),
+                Truncate(stdErr, 2000),
+                durationMs,
+                DateTimeOffset.UtcNow);
+
+            var cleanServerUrl = GetCleanServerUrl(options.ServerUrl);
+            var url = BuildUrl(cleanServerUrl, "api/audit/commands");
+            await _httpClient.PostAsJsonAsync(url, entry, cancellationToken);
         }
-        return rawUrl.TrimEnd('/');
+        catch
+        {
+            // Audit iletimi best-effort'tur; komut zaten çalıştı ve sonucu teknisyene döndürüldü.
+        }
+    }
+
+    private static string Truncate(string? value, int max)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return value.Length > max ? value[..max] : value;
+    }
+
+    /// <summary>
+    /// Sunucu URL'ini doğrular ve güvenli hale getirir (yerel/özel adresleri üretim sunucusuna zorlar).
+    /// Tray sürecinin de aynı kuralı uygulaması gerektiğinden, gerçek mantık paylaşımlı
+    /// <see cref="NexMoteHttp.EnforceProductionUrl"/> içinde tutulur — burada tekrarlanmaz.
+    /// </summary>
+    internal static string GetCleanServerUrl(string? rawUrl) => NexMoteHttp.EnforceProductionUrl(rawUrl);
+
+    /// <summary>
+    /// Base URL ve path'i güvenli şekilde birleştirir.
+    /// </summary>
+    private static Uri BuildUrl(string baseUrl, string path)
+    {
+        return new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), path);
     }
 }
