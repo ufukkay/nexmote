@@ -293,6 +293,30 @@ export async function listDownloads(): Promise<DownloadPackage[]> {
 }
 
 /**
+ * Gömülü admin kimlik bilgili özel sessiz kurulum paketini indirir.
+ * Genel indirme kataloğundan farklı olarak Bearer admin token'ı gerektirir.
+ */
+export async function downloadSilentInstaller(): Promise<void> {
+  const response = await fetch("/api/silent-installer", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error(
+      response.status === 404
+        ? "Sessiz kurulum paketi sunucuya henüz yüklenmemiş."
+        : "Sessiz kurulum paketi indirilemedi."
+    );
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "NexMote-Sessiz-Kurulum.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Sunucu genel yapılandırma ayarlarını okur.
  */
 export async function getServerSettings(): Promise<ServerSettings> {

@@ -36,6 +36,36 @@ public sealed class DownloadCatalog
     public string DownloadsPath { get; } = GetDownloadsDirectory();
 
     /// <summary>
+    /// Hassas/ozel kurulum paketlerinin (orn. gomulu kimlik bilgili sessiz kurulum araclari) bulundugu,
+    /// wwwroot DISINDA kalan ve statik dosya sunumuyla asla servis edilmeyen dizin. Sadece admin token'i
+    /// dogrulanmis /api/silent-installer endpoint'i uzerinden erisilebilir.
+    /// </summary>
+    public string PrivatePath { get; } = GetPrivateDirectory();
+
+    private static string GetPrivateDirectory()
+    {
+        var appBasePrivate = Path.Combine(AppContext.BaseDirectory, "private");
+        if (Directory.Exists(appBasePrivate))
+        {
+            return appBasePrivate;
+        }
+
+        return Path.Combine(FindRepositoryRoot(), "artifacts", "private-installers");
+    }
+
+    /// <summary>
+    /// PrivatePath icindeki dosyayi dondurur (yol geleneksellemesine karsi sadece dosya adi kullanilir).
+    /// </summary>
+    public DownloadFile? GetPrivateFile(string fileName)
+    {
+        var safeFileName = Path.GetFileName(fileName);
+        var path = Path.Combine(PrivatePath, safeFileName);
+        return File.Exists(path)
+            ? new DownloadFile(path, safeFileName, GetContentType(safeFileName))
+            : null;
+    }
+
+    /// <summary>
     /// Ortama göre uygun downloads dizinini tespit eder (appBase, wwwroot/downloads veya repo downloads).
     /// </summary>
     private static string GetDownloadsDirectory()

@@ -381,7 +381,7 @@ scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi down
 - **Servis Yöneticisi:** `systemd` (`nexmote.service` -> `/var/www/nexmote/NexMote.Api.dll --urls http://127.0.0.1:5080`)
   - Sırlar: `/etc/systemd/system/nexmote.service.d/override.conf` (`Admin__ApiKey`, `Enrollment__Key` — repoya işlenmez)
 - **Veritabanı:** SQLite (`/var/www/nexmote/nexmote.db`)
-- **Kayıtlı test/demo cihazları:** TAL-01888 (aktif test cihazı), DESKTOP-SIH3FAC (gerçek müşteri cihazı — dikkatli olun, test için kullanmayın), 36D6735F-A0A6-4, PC-UFUK
+- **Kayıtlı test/demo cihazları:** TAL-01888 (aktif test cihazı), DESKTOP-SIH3FAC (kullanıcının kendi bilgisayarı — 2026-08-22'de doğrulandı, test için kullanılabilir), 36D6735F-A0A6-4, PC-UFUK
 
 ---
 

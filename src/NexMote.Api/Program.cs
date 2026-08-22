@@ -290,6 +290,19 @@ admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<Ap
 admin.MapGet("/server-metrics", (ServerTelemetryService metrics) => Results.Ok(metrics.GetMetrics()));
 
 /// <summary>
+/// Gomulu admin kimlik bilgili ozel sessiz kurulum paketini indirir. Genel /downloads
+/// katalogunun aksine bu endpoint admin.MapGroup icinde oldugu icin AdminAuthFilter ile
+/// Bearer token dogrulamasi gerektirir - herkese acik degildir.
+/// </summary>
+admin.MapGet("/silent-installer", (DownloadCatalog downloads) =>
+{
+    var file = downloads.GetPrivateFile("NexMote-Sessiz-Kurulum.zip");
+    return file is null
+        ? Results.NotFound(new { message = "Sessiz kurulum paketi sunucuda bulunamadı." })
+        : Results.File(file.Path, file.ContentType, file.FileName);
+});
+
+/// <summary>
 /// MSI veya kurulum dosyasını doğrudan indirme endpoint'i.
 /// </summary>
 app.MapGet("/downloads/{fileName}", (string fileName, DownloadCatalog downloads) =>

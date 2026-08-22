@@ -52,6 +52,7 @@ import {
   deleteDevice,
   DeviceSummary,
   DownloadPackage,
+  downloadSilentInstaller,
   executeDeviceCommand,
   getServerMetrics,
   getServerSettings,
@@ -212,6 +213,7 @@ export function App() {
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [downloads, setDownloads] = useState<DownloadPackage[]>([]);
   const [updatingDeviceId, setUpdatingDeviceId] = useState<string | null>(null);
+  const [silentInstallerDownloading, setSilentInstallerDownloading] = useState(false);
   const [settings, setSettings] = useState<ServerSettings>({
     serverUrl: "https://nexmote.com",
     enrollmentKey: "dev-enrollment-key",
@@ -549,6 +551,19 @@ export function App() {
       addActivityLog(`Ajan güncelleme başarısız: ${error instanceof Error ? error.message : "Hata"}`, "warn");
     } finally {
       setUpdatingDeviceId(null);
+    }
+  }
+
+  async function handleDownloadSilentInstaller() {
+    setSilentInstallerDownloading(true);
+    try {
+      await downloadSilentInstaller();
+      addActivityLog("Sessiz kurulum paketi indirildi.", "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Sessiz kurulum paketi indirilemedi");
+      addActivityLog(`Sessiz kurulum paketi indirilemedi: ${error instanceof Error ? error.message : "Hata"}`, "warn");
+    } finally {
+      setSilentInstallerDownloading(false);
     }
   }
 
@@ -2654,6 +2669,29 @@ export function App() {
                   );
                 })}
               </div>
+            </div>
+
+            <div className="content-card">
+              <h2 className="content-card-title">Özel Sessiz Kurulum Paketi</h2>
+              <div className="stale-data-notice">
+                <AlertCircle size={14} />
+                <span>
+                  İçinde gömülü yönetici kimlik bilgisi bulunur. Sadece hedef cihaza özel, doğrudan bir
+                  kanaldan (şifreli e-posta, tek seferlik link) iletin — genel dağıtım listelerine
+                  eklemeyin. Kurulum tamamlanınca gömülü hesabın şifresini değiştirin.
+                </span>
+              </div>
+              <p className="content-card-copy">
+                Ofis dışındaki, uzak masaüstü erişimi olmayan cihazlara; kullanıcıya şifre söylemeden,
+                hiçbir onay penceresi göstermeden ajanı sessizce kuran paket.
+              </p>
+              <button
+                className="btn-secondary"
+                onClick={handleDownloadSilentInstaller}
+                disabled={silentInstallerDownloading}
+              >
+                <Download size={14} /> {silentInstallerDownloading ? "İndiriliyor..." : "Sessiz Kurulum Paketini İndir"}
+              </button>
             </div>
           </div>
         )}
