@@ -61,6 +61,7 @@ public sealed class DownloadCatalog
     public IReadOnlyCollection<DownloadPackageInfo> List()
     {
         Directory.CreateDirectory(DownloadsPath);
+        var versions = GetVersionInfo();
 
         return _packages
             .Select(package =>
@@ -68,6 +69,11 @@ public sealed class DownloadCatalog
                 var path = Path.Combine(DownloadsPath, package.FileName);
                 var exists = File.Exists(path);
                 var sizeBytes = exists ? new FileInfo(path).Length : 0;
+                var version = package.Id switch
+                {
+                    "technician" => versions.Technician.Version,
+                    _ => versions.Agent.Version
+                };
                 return new DownloadPackageInfo(
                     package.Id,
                     package.Name,
@@ -77,7 +83,8 @@ public sealed class DownloadCatalog
                     package.Language,
                     package.RequiresAdmin,
                     exists,
-                    sizeBytes);
+                    sizeBytes,
+                    version);
             })
             .ToArray();
     }
@@ -192,7 +199,8 @@ public sealed record DownloadPackageInfo(
     string Language,
     bool RequiresAdmin,
     bool Exists,
-    long SizeBytes);
+    long SizeBytes,
+    string Version);
 
 /// <summary>İndirilen dosya disk yolu ve MIME tipi.</summary>
 public sealed record DownloadFile(string Path, string FileName, string ContentType);

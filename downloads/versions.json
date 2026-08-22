@@ -1,10 +1,10 @@
-﻿{
+{
     "agent":  {
-                  "version":  "0.6.3",
-                  "releaseNotes":  "v0.6.2: Klavye ve fare girdi yonlendirme onarimi, sadelestirilmis sag tik menusu, Denetim Masasi uzerinden kaldirma ve arka plan guncelleme iyilestirmesi."
+                  "version":  "0.6.5",
+                  "releaseNotes":  "v0.6.5: Ajan surum numarasi artik derleme ve paketleme adimlari arasinda tutarli; surum karsilastirma hatasi (guncel ajanlarda yanlis 'guncelleme mevcut' uyarisi) giderildi."
               },
     "technician":  {
-                       "version":  "0.6.3",
-                       "releaseNotes":  "v0.6.2: UTF-8 karakter duzeltmesi, canli ekran optimizasyonlari ve gelistirilmis uzaktan guncelleme yoneticisi."
+                       "version":  "0.6.5",
+                       "releaseNotes":  "v0.6.5: Teknisyen konsolu surum numarasi artik derleme ve paketleme adimlari arasinda tutarli."
                    }
 }

@@ -75,6 +75,18 @@ type DetailTab = "overview" | "specs" | "performance" | "network" | "application
 type SortField = "deviceName" | "status" | "activeUser" | "ipAddress" | "cpu" | "agentVersion" | "lastSeen";
 type SortDirection = "asc" | "desc";
 
+function isVersionOlder(installed?: string | null, latest?: string | null): boolean {
+  if (!installed || !latest) return false;
+  const a = installed.split(".").map(Number);
+  const b = latest.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0;
+    const y = b[i] || 0;
+    if (x !== y) return x < y;
+  }
+  return false;
+}
+
 function renderSortIndicator(field: SortField, currentField: SortField, direction: SortDirection) {
   const isActive = currentField === field;
   return (
@@ -656,7 +668,7 @@ export function App() {
         (d.activeUser || "").toLowerCase().includes(q);
 
       const isWarning = Boolean(
-        (latestAgentVersion && d.agentVersion !== latestAgentVersion) ||
+        isVersionOlder(d.agentVersion, latestAgentVersion) ||
         (d.cpuUsagePercent && d.cpuUsagePercent > 90)
       );
 
@@ -725,7 +737,7 @@ export function App() {
   const userInitial = (loginEmail || "N").charAt(0).toUpperCase();
   const userDisplayName = loginEmail ? loginEmail.split("@")[0] : "Yönetici";
   const onlineCount = devices.filter((d) => d.isOnline).length;
-  const warningCount = devices.filter((d) => latestAgentVersion && d.agentVersion !== latestAgentVersion).length;
+  const warningCount = devices.filter((d) => isVersionOlder(d.agentVersion, latestAgentVersion)).length;
 
   function toggleSelectAll() {
     if (selectedDeviceIds.size === filteredAndSortedDevices.length) {
@@ -1082,7 +1094,7 @@ export function App() {
                           const isSelected = selectedDeviceId === d.id;
                           const isChecked = selectedDeviceIds.has(d.id);
                           const cpuVal = d.cpuUsagePercent || 0;
-                          const hasUpdate = Boolean(latestAgentVersion && d.agentVersion !== latestAgentVersion);
+                          const hasUpdate = isVersionOlder(d.agentVersion, latestAgentVersion);
 
                           return (
                             <tr
@@ -1246,7 +1258,7 @@ export function App() {
                     <span>{connectingId === selectedDevice.id ? "Bağlanıyor..." : "Canlı Masaüstü"}</span>
                   </button>
 
-                  {latestAgentVersion && selectedDevice.agentVersion !== latestAgentVersion && (
+                  {isVersionOlder(selectedDevice.agentVersion, latestAgentVersion) && (
                     <button
                       className="btn-hero-update"
                       onClick={() => handleUpdateAgent(selectedDevice.id)}
@@ -1308,7 +1320,7 @@ export function App() {
                   <span>v{selectedDevice.agentVersion}</span>
                 </span>
 
-                {latestAgentVersion && selectedDevice.agentVersion !== latestAgentVersion && (
+                {isVersionOlder(selectedDevice.agentVersion, latestAgentVersion) && (
                   <span className="badge-warn-hero">
                     <AlertCircle size={11} />
                     v{latestAgentVersion} mevcut
@@ -1414,7 +1426,7 @@ export function App() {
                         <span className="bento-spec-label">Yüklü Ajan Sürümü</span>
                         <span className="bento-spec-value">
                           <span className="version-pill">v{selectedDevice.agentVersion}</span>
-                          {latestAgentVersion && selectedDevice.agentVersion !== latestAgentVersion && (
+                          {isVersionOlder(selectedDevice.agentVersion, latestAgentVersion) && (
                             <span className="update-available-text"> (v{latestAgentVersion} mevcut)</span>
                           )}
                         </span>
@@ -2621,7 +2633,10 @@ export function App() {
                           {isCleanup ? <Trash2 size={18} /> : <Download size={18} />}
                         </div>
                         <div>
-                          <div className="package-name">{pkg.name}</div>
+                          <div className="package-name">
+                            {pkg.name}
+                            {pkg.version && <span className="version-pill"> v{pkg.version}</span>}
+                          </div>
                           <div className="mono-text mono-xs">
                             {pkg.fileName} · {sizeLabel} · {pkg.description}
                           </div>

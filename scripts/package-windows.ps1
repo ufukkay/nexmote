@@ -103,6 +103,10 @@ $publishArgs = @("-c", "Release", "-r", "win-x64", "--self-contained", $selfCont
 if ($selfContained) {
     $publishArgs += @("/p:PublishSingleFile=true", "/p:IncludeNativeLibrariesForSelfExtract=true")
 }
+# csproj'daki sabit <Version> yerine derlenen binary'ye HER ZAMAN bu script'in -Version
+# parametresini gom: boylece calisan .exe'nin gomulu surumu WiX ProductVersion ve
+# versions.json ile birebir ayni kalir (aksi halde ikisi birbirinden bagimsiz surukleniyordu).
+$publishArgs += @("/p:Version=$Version", "/p:AssemblyVersion=$Version.0", "/p:FileVersion=$Version.0")
 
 & $dotnet publish $agentProject @publishArgs -o $agentPublish
 if ($LASTEXITCODE -ne 0) {

@@ -130,6 +130,7 @@ export type DownloadPackage = {
   requiresAdmin: boolean;
   exists: boolean;
   sizeBytes: number;
+  version: string;
 };
 
 /**
