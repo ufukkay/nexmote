@@ -247,6 +247,28 @@ public sealed class DeviceRegistry
     }
 
     /// <summary>
+    /// Kaldırılan bir uygulamayı cihazın veritabanı ve önbellek kaydından derhal siler.
+    /// </summary>
+    public void RemoveInstalledApp(Guid deviceId, string appName)
+    {
+        try
+        {
+            using var db = _dbFactory.CreateDbContext();
+            var device = db.Devices.FirstOrDefault(d => d.Id == deviceId);
+            if (device == null || string.IsNullOrWhiteSpace(device.InstalledAppsJson)) return;
+
+            var apps = JsonSerializer.Deserialize<List<InstalledAppInfo>>(device.InstalledAppsJson);
+            if (apps != null)
+            {
+                var filtered = apps.Where(a => !string.Equals(a.Name, appName, StringComparison.OrdinalIgnoreCase)).ToList();
+                device.InstalledAppsJson = JsonSerializer.Serialize(filtered);
+                db.SaveChanges();
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Belirtilen cihaz kimliği ve agent token'ının doğruluğunu kontrol eder.
     /// Timing-safe karşılaştırma kullanır.
     /// </summary>

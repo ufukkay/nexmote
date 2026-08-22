@@ -365,6 +365,18 @@ public static class SystemTelemetry
     private static readonly object _appsLock = new();
 
     /// <summary>
+    /// Program kaldırma veya yükleme sonrası önbelleği temizler.
+    /// </summary>
+    public static void InvalidateAppCache()
+    {
+        lock (_appsLock)
+        {
+            _cachedApps = null;
+            _lastAppsScan = DateTimeOffset.MinValue;
+        }
+    }
+
+    /// <summary>
     /// Windows Kayıt Defteri (Registry Uninstall) üzerinden bilgisayarda kurulu olan programların listesini döner.
     /// Performans için 5 dakikalık bellek içi önbellekleme kullanır.
     /// </summary>

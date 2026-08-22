@@ -41,9 +41,12 @@ Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan 
 
 ---
 
-## 📌 Proje Özeti & Vizyon
+### 🚫 Marka ve İsim Politikası
+- **Kural:** GitHub deposunda, `README.md`, `CHANGELOG.md`, dokümantasyonlarda, commit mesajlarında ve kod yorumlarında **AnyDesk, RustDesk, TeamViewer** gibi 3. taraf firma ve ürün adları kesinlikle **geçirilmeyecektir**. Tüm özellikler ve mimari yalnızca **NexMote**'un kendi özgün kurumsal kimliği ile tanımlanacaktır.
 
-**NexMote**, kurumsal düzeyde uzaktan bilgisayar yönetimi, canlı masaüstü izleme/kontrolü, uzak terminal komut çalıştırma ve istemci destek platformudur (AnyDesk, RustDesk ve TeamViewer alternatifi).
+---
+
+**NexMote**, kurumsal düzeyde uzaktan bilgisayar yönetimi, canlı masaüstü izleme/kontrolü, uzak terminal komut çalıştırma ve istemci destek platformudur.
 
 - **Canlı Sistem URL:** [https://nexmote.com](https://nexmote.com)
 - **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
@@ -250,7 +253,7 @@ Backend'de daha önce **hiç kimlik doğrulama yoktu** — `/api/devices`, `/api
 3. **Disk:** `DriveInfo` ile sistem sürücüsü boş alanı.
 4. **IPv4:** Sanal ağ kartları (Hyper-V, WSL, VMware) filtrelenir, gerçek fiziksel yerel IP tespit edilir. (`NetworkInfo.cs` — kullanılmayan, daha zayıf bir kopyaydı — silindi.)
 5. **Web Konsolu:** `App.tsx` Donanım & Performans kartlarında artık backend'den gelen **gerçek** değerleri gösterir; ayrıca cihazın versiyonu `/api/updates/check`'teki en güncel sürümden eskiyse turuncu "Güncelleme mevcut" rozeti çıkar.
-6. **Cihaz Detay Paneli (Pixven'den esinlenen sekme ayrımı — `docs/pixven-agent-feature-review.md`):** Sağdaki detay çekmecesi `Genel Bakış` (kimlik: OS, IP, aktif kullanıcı, domain, lokasyon, ajan sürümü, cihaz ID) ve `Performans` (CPU/RAM/Disk gauge'ları) olarak iki ayrı sekmeye bölündü (eskiden tek "Donanım" sekmesiydi). Cihaz çevrimdışıysa hem Genel Bakış'ta son görülme zamanı gösterilir hem de Performans sekmesinde `.stale-data-notice` uyarı bandıyla verinin güncel olmayabileceği belirtilir — Pixven incelemesinde tespit edilen "çevrimdışı cihazda hangi verinin bayat olduğu belli değil" sorununa karşı bilinçli bir tasarım kararı.
+6. **Cihaz Detay Paneli:** Sağdaki detay çekmecesi `Genel Bakış` (kimlik: OS, IP, aktif kullanıcı, domain, lokasyon, ajan sürümü, cihaz ID) ve `Cihaz Özellikleri` (Donanım envanteri, CPU, RAM, Disk seri numaraları) olarak ayrı sekmelere bölündü. Cihaz çevrimdışıysa hem Genel Bakış'ta son görülme zamanı gösterilir hem de Cihaz Özellikleri sekmesinde `.stale-data-notice` uyarı bandıyla verinin güncel olmayabileceği belirtilir.
 
 ---
 

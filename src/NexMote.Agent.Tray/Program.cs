@@ -467,41 +467,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     return;
                 }
 
-                var prompt = MessageBox.Show(
-                    $"NexMote Ajanı için yeni bir güncelleme mevcut!\n\n" +
-                    $"Mevcut Sürüm: v{runningVer}\n" +
-                    $"Yeni Sürüm: v{latestVersion}\n" +
-                    $"Açıklama: {releaseNotes}\n\n" +
-                    $"Ajan uygulamasını şimdi güncellemek istiyor musunuz?",
-                    "NexMote Ajan Güncellemesi",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Information);
-
-                if (prompt == DialogResult.Yes && !string.IsNullOrEmpty(downloadUrl))
+                if (isManual)
                 {
-                    if (isManual)
+                    var prompt = MessageBox.Show(
+                        $"NexMote Ajanı için yeni bir güncelleme mevcut!\n\n" +
+                        $"Mevcut Sürüm: v{runningVer}\n" +
+                        $"Yeni Sürüm: v{latestVersion}\n" +
+                        $"Açıklama: {releaseNotes}\n\n" +
+                        $"Ajan uygulamasını şimdi güncellemek istiyor musunuz?",
+                        "NexMote Ajan Güncellemesi",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Information);
+
+                    if (prompt == DialogResult.Yes && !string.IsNullOrEmpty(downloadUrl))
                     {
                         using var progressForm = new UpdateProgressForm(downloadUrl, latestVersion ?? "0.6.2");
                         progressForm.ShowDialog();
                     }
-                    else
-                    {
-                        if (_notifyIcon != null)
-                        {
-                            _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
-                            _notifyIcon.BalloonTipText = "Güncelleme paketi indiriliyor...";
-                            _notifyIcon.ShowBalloonTip(2000);
-                        }
-
-                        await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl);
-
-                        if (_notifyIcon != null)
-                        {
-                            _notifyIcon.BalloonTipTitle = "NexMote Ajan Güncellemesi";
-                            _notifyIcon.BalloonTipText = "Güncelleme indirildi. Servis tarafından arka planda sessizce kurulacak.";
-                            _notifyIcon.ShowBalloonTip(3000);
-                        }
-                    }
+                }
+                else if (!string.IsNullOrEmpty(downloadUrl))
+                {
+                    // Arka plan otomatik güncellemesi: Kullanıcıyı rahatsız etmeden sessizce indir ve kur
+                    _statusItem.Text = "Servis durumu: arka plan güncellemesi indiriliyor...";
+                    await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl);
                 }
             }
             else if (isManual)
@@ -1528,32 +1516,6 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             _ = HandleRemoteSessionRequestedAsync(sessionId);
         });
 
-        _connection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
-        {
-            try
-            {
-                var result = await CommandRunner.RunAsync(shell, command, 60000, runAsAdmin);
-                if (_connection?.State == HubConnectionState.Connected)
-                {
-                    await _connection.InvokeAsync("SubmitCommandResult",
-                        requestId,
-                        result.ExitCode,
-                        result.StdOut ?? string.Empty,
-                        result.StdErr ?? string.Empty,
-                        result.DurationMs,
-                        result.TimedOut,
-                        result.ElevationDenied);
-                }
-
-                if (_identity is not null)
-                {
-                    var cmdReq = new RemoteCommandRequest(Guid.Empty, requestId.ToString(), shell, command, runAsAdmin);
-                    _ = PostCommandAuditAsync(cmdReq, result);
-                }
-            }
-            catch { }
-        });
-
         _connection.On<string, string>("SignalReceived", (type, payload) =>
         {
             if (string.Equals(type, "remote-input", StringComparison.OrdinalIgnoreCase))
@@ -1637,16 +1599,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         _connection.On<string>("RemoteUpdateRequested", msiUrl =>
         {
-            _setStatus("guncelleme istegi alindi");
-            var prompt = MessageBox.Show(
-                "Yönetici tarafından NexMote Ajanı için uzaktan güncelleme emri iletildi.\n\nAjan uygulamasını şimdi yeni sürüme güncellemek istiyor musunuz?",
-                "NexMote Ajan Güncelleme Uyarısı",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
-
-            if (prompt == DialogResult.Yes)
+            _setStatus("uzaktan sessiz guncelleme baslatildi...");
+            if (!string.IsNullOrEmpty(msiUrl))
             {
-                _setStatus("guncelleme paketi indiriliyor...");
                 _ = RemoteScreenStreamer.PerformSelfUpdateAsync(msiUrl);
             }
         });
@@ -2163,7 +2118,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                     refinementSent = false;
                 }
 
-                // Hareket durduğunda kristal netlikte iyileştirme karesi (AnyDesk / RustDesk Static Refinement)
+                // Hareket durduğunda kristal netlikte statik iyileştirme karesi
                 var timeSinceMotionMs = (now - lastMotionTicks) * 1000 / Stopwatch.Frequency;
                 var isRefinement = !refinementSent && timeSinceMotionMs > 150 && (now - lastSendTicks) > 0;
 

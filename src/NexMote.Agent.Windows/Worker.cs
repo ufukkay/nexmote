@@ -6,6 +6,7 @@ using System.Text.Json;
 using NexMote.Shared.Commands;
 using NexMote.Shared.Identity;
 using NexMote.Shared.Network;
+using NexMote.Shared.Telemetry;
 using Polly;
 
 namespace NexMote.Agent.Windows;
@@ -245,6 +246,52 @@ public sealed class Worker : BackgroundService
                 // handler'larıyla tutarlı olması için denetim kaydı da burada yazılmalı, aksi halde
                 // CommandAudits tablosunda sessiz bir uyumluluk boşluğu oluşur.
                 _ = _client.PostCommandAuditAsync(identity, Guid.Empty, shell, command, result.ExitCode, result.StdOut, result.StdErr, result.DurationMs, cancellationToken);
+
+                // Komut veya program kaldırma sonrası envanteri hemen tazeleyip sunucuya ilet
+                try
+                {
+                    SystemTelemetry.InvalidateAppCache();
+                    _ = _client.SendHeartbeatAsync(identity, cancellationToken);
+                }
+                catch { }
+            });
+
+            _hubConnection.On<string>("RemoteUpdateRequested", async msiUrl =>
+            {
+                _logger.LogInformation("Sunucudan uzaktan sessiz ajan güncelleme isteği alındı: {Url}", msiUrl);
+                if (!string.IsNullOrEmpty(msiUrl))
+                {
+                    try
+                    {
+                        var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
+                        Directory.CreateDirectory(programDataDir);
+                        var pendingMsi = Path.Combine(programDataDir, "pending-update.msi");
+                        var tempMsi = Path.Combine(programDataDir, "pending-update.tmp");
+
+                        using var http = NexMoteHttp.CreateClient();
+                        using var response = await http.GetAsync(msiUrl, HttpCompletionOption.ResponseHeadersRead);
+                        response.EnsureSuccessStatusCode();
+
+                        await using (var contentStream = await response.Content.ReadAsStreamAsync())
+                        await using (var fileStream = new FileStream(tempMsi, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
+                        {
+                            await contentStream.CopyToAsync(fileStream);
+                        }
+
+                        if (File.Exists(pendingMsi))
+                        {
+                            try { File.Delete(pendingMsi); } catch { }
+                        }
+                        File.Move(tempMsi, pendingMsi, overwrite: true);
+                        _logger.LogInformation("Uzaktan güncelleme paketi başarıyla indirildi. Kurulum tetikleniyor...");
+
+                        CheckPendingUpdate();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Uzaktan sessiz güncelleme paketi indirilemedi.");
+                    }
+                }
             });
 
             _hubConnection.On("RemoteUninstallRequested", () =>

@@ -606,6 +606,10 @@ if ($app -and $app.QuietUninstallString) {{
         using (cts.Token.Register(() => commandManager.CancelCommand(requestId)))
         {
             var result = await tcs.Task;
+            if (result.ExitCode == 0)
+            {
+                deviceRegistry.RemoveInstalledApp(id, request.AppName);
+            }
             return Results.Ok(new
             {
                 success = result.ExitCode == 0,

@@ -8,7 +8,7 @@
 [![React 18](https://img.shields.io/badge/React-18_%2B_TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![WiX v4](https://img.shields.io/badge/Installer-WiX_v4_MSI_%2B_InnoSetup-FF6F00?style=for-the-badge)](https://wixtoolset.org/)
 
-**AnyDesk, RustDesk ve TeamViewer alternatifi; kurumsal ölçekte, yüksek performanslı, self-hosted, tam donanım telemetrisi, canlı ekran kontrolü, uzaktan sessiz yönetim ve PowerShell/CMD terminal platformu.**
+**Kurumsal ölçekte, yüksek performanslı, self-hosted, tam donanım telemetrisi, canlı ekran kontrolü, uzaktan sessiz yönetim ve PowerShell/CMD terminal platformu.**
 
 [Özellikler](#-kapsamlı-özellik-listesi) • [Kullanılan Teknolojiler](#-kullanılan-yapı-ve-teknolojiler) • [Sistem Mimarisi](#-sistem-mimarisi-ve-veri-akışı) • [Ajan Ana Yasası](#-değiştirilemez-ajan-ana-yasası-4-temel-madde) • [Kurulum & Dağıtım](#-kurulum-paketleme-ve-dağıtım)
 
@@ -122,7 +122,7 @@ NexMote istemci mimarisinde aşağıdaki 4 kuraldan **asla taviz verilmez**:
 
 ### 📦 Paketleme & Dağıtım Motoru
 - **Kurumsal MSI Yükleyici:** WiX Toolset v4 (Per-Machine, UAC yetkilendirmeli, Windows Servis kayıtlı)
-- **Ultra Hızlı EXE Yükleyici:** Inno Setup (1.5 saniyede AnyDesk tarzı sessiz kurulum)
+- **Ultra Hızlı EXE Yükleyici:** Inno Setup (1.5 saniyede ultra hızlı ve sessiz kurulum)
 
 ---
 

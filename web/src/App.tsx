@@ -302,10 +302,19 @@ export function App() {
         stdErr: res.stdErr
       });
       if (res.success) {
+        setDevices(prev => prev.map(d => {
+          if (d.id === selectedDevice.id && d.installedApps) {
+            return {
+              ...d,
+              installedApps: d.installedApps.filter(a => a.name.toLowerCase() !== app.name.toLowerCase())
+            };
+          }
+          return d;
+        }));
         setStatus(`${app.name} başarıyla sessizce kaldırıldı.`);
         setTimeout(() => {
-          refresh(true);
-        }, 2000);
+          refresh(false);
+        }, 1500);
       } else {
         setStatus(`${app.name} kaldırma tamamlandı (Kod: ${res.exitCode})`);
       }
