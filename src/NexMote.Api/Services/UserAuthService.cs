@@ -310,6 +310,13 @@ public sealed class UserAuthService
             return false;
         }
 
+        if (userId == actingUserId && role != UserRoles.Admin)
+        {
+            // Kendi rolünü Admin'den düşürmek, tek admin'se yönetim ekranlarına erişimi
+            // kaybetmesine yol açabilir — sunucu tarafında engellenir.
+            return false;
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var user = db.Users.FirstOrDefault(u => u.Id == userId);
         if (user is null)
@@ -325,6 +332,13 @@ public sealed class UserAuthService
 
     public bool SetActive(Guid userId, bool active, Guid actingUserId)
     {
+        if (!active && userId == actingUserId)
+        {
+            // Bir kullanıcının kendi hesabını devre dışı bırakması, tek admin'se sistemden
+            // kimsenin çıkaramayacağı bir kilitlenmeye yol açabilir — sunucu tarafında engellenir.
+            return false;
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var user = db.Users.FirstOrDefault(u => u.Id == userId);
         if (user is null)

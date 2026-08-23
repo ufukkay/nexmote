@@ -392,7 +392,8 @@ export async function setUserRole(userId: string, role: "Admin" | "Technician"):
 export async function disableUser(userId: string): Promise<void> {
   const response = await fetch(`/api/admin/users/${userId}/disable`, { method: "POST", headers: authHeaders() });
   if (!response.ok) {
-    throw new Error("Kullanıcı devre dışı bırakılamadı.");
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Kullanıcı devre dışı bırakılamadı.");
   }
 }
 

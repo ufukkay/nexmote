@@ -354,6 +354,10 @@ admin.MapPost("/admin/users/{id:guid}/role", (Guid id, SetRoleRequest request, C
 admin.MapPost("/admin/users/{id:guid}/disable", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
 {
     var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    if (id == actingUserId)
+    {
+        return Results.BadRequest(new { message = "Kendi hesabınızı devre dışı bırakamazsınız." });
+    }
     return auth.SetActive(id, false, actingUserId) ? Results.NoContent() : Results.NotFound();
 });
 

@@ -3228,6 +3228,8 @@ export function App() {
                           <select
                             className="form-input"
                             value={u.role}
+                            disabled={u.id === currentUser?.id}
+                            title={u.id === currentUser?.id ? "Kendi rolünüzü değiştiremezsiniz" : undefined}
                             onChange={(e) => handleSetUserRole(u.id, e.target.value as "Admin" | "Technician")}
                           >
                             <option value="Technician">Teknisyen</option>
@@ -3239,7 +3241,12 @@ export function App() {
                         <td>{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString("tr-TR") : "—"}</td>
                         <td>
                           <div className="row-action-group">
-                            <button className="icon-action-btn" title={u.isActive ? "Devre dışı bırak" : "Etkinleştir"} onClick={() => handleToggleUserActive(u)}>
+                            <button
+                              className="icon-action-btn"
+                              title={u.id === currentUser?.id ? "Kendi hesabınızı devre dışı bırakamazsınız" : (u.isActive ? "Devre dışı bırak" : "Etkinleştir")}
+                              disabled={u.isActive && u.id === currentUser?.id}
+                              onClick={() => handleToggleUserActive(u)}
+                            >
                               {u.isActive ? <Ban size={14} /> : <RotateCcw size={14} />}
                             </button>
                             {u.mfaEnabled && (
