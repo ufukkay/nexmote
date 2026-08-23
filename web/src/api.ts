@@ -106,6 +106,7 @@ export type DeviceSummary = {
   serialNumber?: string;
   hardwareDetails?: HardwareInventoryInfo;
   securityProfileId?: string | null;
+  groupId?: string | null;
 };
 
 /**
@@ -691,9 +692,7 @@ export type SecurityProfile = {
   agentDisplayName?: string | null;
   iconBase64?: string | null;
   restrictTrayMenu: boolean;
-  requireDashboardPassword: boolean;
-  requireExitPassword: boolean;
-  requireUninstallPassword: boolean;
+  requirePassword: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -703,12 +702,8 @@ export type SecurityProfileInput = {
   agentDisplayName?: string;
   iconBase64?: string;
   restrictTrayMenu: boolean;
-  requireDashboardPassword: boolean;
-  dashboardPassword?: string;
-  requireExitPassword: boolean;
-  exitPassword?: string;
-  requireUninstallPassword: boolean;
-  uninstallPassword?: string;
+  requirePassword: boolean;
+  password?: string;
 };
 
 /** Güvenlik profillerini listeler (Admin). */
@@ -765,6 +760,79 @@ export async function assignSecurityProfile(deviceId: string, securityProfileId:
   });
   if (!response.ok) {
     throw new Error("Güvenlik profili atanamadı.");
+  }
+}
+
+/** Cihazları organize etmek için iç içe (şirket/departman) grup. */
+export type DeviceGroup = {
+  id: string;
+  name: string;
+  parentGroupId?: string | null;
+  defaultSecurityProfileId?: string | null;
+  createdAt: string;
+};
+
+export type DeviceGroupInput = {
+  name: string;
+  parentGroupId?: string | null;
+  defaultSecurityProfileId?: string | null;
+};
+
+/** Cihaz gruplarını listeler (Admin). */
+export async function listDeviceGroups(): Promise<DeviceGroup[]> {
+  const response = await fetch("/api/admin/device-groups", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Cihaz grupları alınamadı.");
+  }
+  return response.json();
+}
+
+/** Yeni cihaz grubu oluşturur (Admin). */
+export async function createDeviceGroup(input: DeviceGroupInput): Promise<DeviceGroup> {
+  const response = await fetch("/api/admin/device-groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Grup oluşturulamadı.");
+  }
+  return response.json();
+}
+
+/** Cihaz grubunu günceller (Admin). */
+export async function updateDeviceGroup(id: string, input: DeviceGroupInput): Promise<DeviceGroup> {
+  const response = await fetch(`/api/admin/device-groups/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Grup güncellenemedi.");
+  }
+  return response.json();
+}
+
+/** Cihaz grubunu siler (Admin). */
+export async function deleteDeviceGroup(id: string): Promise<void> {
+  const response = await fetch(`/api/admin/device-groups/${id}`, { method: "DELETE", headers: authHeaders() });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Grup silinemedi.");
+  }
+}
+
+/** Bir cihazı bir gruba atar (null = kaldır) (Admin). */
+export async function assignDeviceGroup(deviceId: string, groupId: string | null): Promise<void> {
+  const response = await fetch(`/api/devices/${deviceId}/group`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ groupId })
+  });
+  if (!response.ok) {
+    throw new Error("Grup atanamadı.");
   }
 }
 

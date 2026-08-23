@@ -188,7 +188,7 @@ internal static class Program
             return false;
         }
 
-        if (profile?.RequireUninstallPassword != true)
+        if (profile?.RequirePassword != true)
         {
             return true;
         }

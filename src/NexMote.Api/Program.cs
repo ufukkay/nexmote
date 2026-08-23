@@ -62,6 +62,7 @@ builder.Services.AddSingleton<TotpService>();
 builder.Services.AddSingleton<UserAuthService>();
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddSingleton<SecurityProfileService>();
+builder.Services.AddSingleton<DeviceGroupService>();
 
 // Web ön yüzü ve teknisyen istemcisi için CORS politikası
 builder.Services.AddCors(options =>
@@ -228,20 +229,31 @@ using (var scope = app.Services.CreateScope())
                 ""AgentDisplayName"" TEXT NULL,
                 ""IconBase64"" TEXT NULL,
                 ""RestrictTrayMenu"" INTEGER NOT NULL,
-                ""RequireDashboardPassword"" INTEGER NOT NULL,
-                ""DashboardPasswordHash"" TEXT NULL,
-                ""RequireExitPassword"" INTEGER NOT NULL,
-                ""ExitPasswordHash"" TEXT NULL,
-                ""RequireUninstallPassword"" INTEGER NOT NULL,
-                ""UninstallPasswordHash"" TEXT NULL,
+                ""RequirePassword"" INTEGER NOT NULL,
+                ""PasswordHash"" TEXT NULL,
                 ""CreatedAt"" TEXT NOT NULL,
                 ""UpdatedAt"" TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS ""DeviceGroups"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_DeviceGroups"" PRIMARY KEY,
+                ""Name"" TEXT NOT NULL,
+                ""ParentGroupId"" TEXT NULL,
+                ""DefaultSecurityProfileId"" TEXT NULL,
+                ""CreatedAt"" TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ""IX_DeviceGroups_ParentGroupId"" ON ""DeviceGroups"" (""ParentGroupId"");
         ");
     }
     catch { }
 
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""Devices"" ADD COLUMN ""SecurityProfileId"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""Devices"" ADD COLUMN ""GroupId"" TEXT;"); } catch { }
+
+    // Güvenlik profili: eski 3-şifreli şemadan (RequireDashboardPassword vb.) tek şifreye (RequirePassword/
+    // PasswordHash) geçiş — eski kolonlar zaten var olan veritabanlarında zararsız şekilde kullanılmadan kalır.
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""RequirePassword"" INTEGER NOT NULL DEFAULT 0;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""PasswordHash"" TEXT;"); } catch { }
 
     // SMTP ayar kolonları — ServerSettings tablosu EnsureCreated() ile daha önce oluşturulmuş bir
     // veritabanında bu kolonlar yok, DeletedDevices/Users ile aynı ALTER TABLE deseni.
@@ -505,6 +517,40 @@ admin.MapPost("/devices/{id:guid}/security-profile", (Guid id, AssignSecurityPro
 {
     var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
     return profiles.AssignToDevice(id, request.SecurityProfileId, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
+/// <summary>Cihaz gruplarını (şirket/departman) listeler (Admin Yetkisi Gerekir).</summary>
+admin.MapGet("/admin/device-groups", (DeviceGroupService groups) => Results.Ok(groups.List()));
+
+/// <summary>Yeni cihaz grubu oluşturur (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/device-groups", (DeviceGroupRequest request, ClaimsPrincipal actor, DeviceGroupService groups) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = groups.Create(request, actingUserId);
+    return result is null ? Results.BadRequest(new { message = "Ad boş olamaz veya üst grup/profil geçersiz." }) : Results.Ok(result);
+});
+
+/// <summary>Cihaz grubunu günceller (Admin Yetkisi Gerekir).</summary>
+admin.MapPut("/admin/device-groups/{id:guid}", (Guid id, DeviceGroupRequest request, ClaimsPrincipal actor, DeviceGroupService groups) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = groups.Update(id, request, actingUserId);
+    return result is null ? Results.BadRequest(new { message = "Grup bulunamadı, ad boş olamaz, üst grup bir çevrim oluşturuyor ya da profil geçersiz." }) : Results.Ok(result);
+});
+
+/// <summary>Cihaz grubunu siler — alt grubu varsa reddedilir, atanmış cihazlar serbest kalır (Admin Yetkisi Gerekir).</summary>
+admin.MapDelete("/admin/device-groups/{id:guid}", (Guid id, ClaimsPrincipal actor, DeviceGroupService groups) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var (success, error) = groups.Delete(id, actingUserId);
+    return success ? Results.NoContent() : Results.BadRequest(new { message = error });
+});
+
+/// <summary>Bir cihazı bir gruba atar/kaldırır (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/devices/{id:guid}/group", (Guid id, AssignDeviceGroupRequest request, ClaimsPrincipal actor, DeviceGroupService groups) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return groups.AssignDeviceToGroup(id, request.GroupId, actingUserId) ? Results.NoContent() : Results.NotFound();
 });
 
 /// <summary>

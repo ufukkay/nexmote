@@ -6,9 +6,11 @@ using NexMote.Shared.Contracts;
 namespace NexMote.Api.Services;
 
 /// <summary>
-/// Kurumsal ajan güvenlik profillerinin (branding, kısıtlı tray menüsü, Durum Paneli/Çıkış/Kaldırma
-/// şifre korumaları) yönetimi, cihazlara atanması ve ajan tarafından sorgulanan doğrulama işlemleri.
-/// Şifreler sunucuda hash'lenir; ajan hiçbir zaman şifre veya hash almaz, sadece doğrulama sonucunu (bool) alır.
+/// Kurumsal ajan güvenlik profillerinin (branding, kısıtlı tray menüsü, tek şifreyle korunan Durum
+/// Paneli/Çıkış/Kaldırma işlemleri) yönetimi, cihazlara/gruplara atanması ve ajan tarafından sorgulanan
+/// doğrulama işlemleri. Şifre sunucuda hash'lenir; ajan hiçbir zaman şifre veya hash almaz, sadece
+/// doğrulama sonucunu (bool) alır. Bir cihazın etkin profili, kendi atamasından ya da (kendi ataması
+/// yoksa) grup hiyerarşisinden (<see cref="DeviceGroupService"/>) miras alınabilir.
 /// </summary>
 public sealed class SecurityProfileService
 {
@@ -51,7 +53,7 @@ public sealed class SecurityProfileService
             return null;
         }
 
-        if (!PasswordsSatisfied(request, isCreate: true))
+        if (request.RequirePassword && string.IsNullOrWhiteSpace(request.Password))
         {
             return null;
         }
@@ -77,15 +79,16 @@ public sealed class SecurityProfileService
             return null;
         }
 
-        if (!PasswordsSatisfied(request, isCreate: false))
-        {
-            return null;
-        }
-
         using var db = _dbFactory.CreateDbContext();
         var profile = db.SecurityProfiles.FirstOrDefault(p => p.Id == id);
         if (profile is null)
         {
+            return null;
+        }
+
+        if (request.RequirePassword && string.IsNullOrWhiteSpace(request.Password) && string.IsNullOrEmpty(profile.PasswordHash))
+        {
+            // İlk kez açılıyorsa (daha önce hiç şifresi yoktu) bir şifre zorunludur.
             return null;
         }
 
@@ -106,10 +109,14 @@ public sealed class SecurityProfileService
             return false;
         }
 
-        // Bu profili kullanan cihazları önce serbest bırak — kısıtlama olmadan çalışmaya devam etsinler.
+        // Bu profili kullanan cihazları/grupları önce serbest bırak — kısıtlama olmadan çalışmaya devam etsinler.
         foreach (var device in db.Devices.Where(d => d.SecurityProfileId == id))
         {
             device.SecurityProfileId = null;
+        }
+        foreach (var group in db.DeviceGroups.Where(g => g.DefaultSecurityProfileId == id))
+        {
+            group.DefaultSecurityProfileId = null;
         }
 
         db.SecurityProfiles.Remove(profile);
@@ -150,22 +157,14 @@ public sealed class SecurityProfileService
         }
 
         using var db = _dbFactory.CreateDbContext();
-        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
-        if (device?.SecurityProfileId is null)
-        {
-            // Profil atanmamış — kısıtlama yok, varsayılan davranış.
-            return new AgentSecurityProfileResponse(null, null, false, false, false, false);
-        }
-
-        var profile = db.SecurityProfiles.AsNoTracking().FirstOrDefault(p => p.Id == device.SecurityProfileId.Value);
+        var profile = ResolveEffectiveProfile(db, deviceId);
         if (profile is null)
         {
-            return new AgentSecurityProfileResponse(null, null, false, false, false, false);
+            // Profil yok (ne cihazda ne mirasında) — kısıtlama yok, varsayılan davranış.
+            return new AgentSecurityProfileResponse(null, null, false, false);
         }
 
-        return new AgentSecurityProfileResponse(
-            profile.AgentDisplayName, profile.IconBase64, profile.RestrictTrayMenu,
-            profile.RequireDashboardPassword, profile.RequireExitPassword, profile.RequireUninstallPassword);
+        return new AgentSecurityProfileResponse(profile.AgentDisplayName, profile.IconBase64, profile.RestrictTrayMenu, profile.RequirePassword);
     }
 
     public bool VerifyPassword(Guid deviceId, string agentToken, string action, string password)
@@ -176,21 +175,10 @@ public sealed class SecurityProfileService
         }
 
         using var db = _dbFactory.CreateDbContext();
-        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
-        var profile = device?.SecurityProfileId is null
-            ? null
-            : db.SecurityProfiles.FirstOrDefault(p => p.Id == device.SecurityProfileId.Value);
+        var profile = ResolveEffectiveProfile(db, deviceId);
 
-        var hash = action switch
-        {
-            "dashboard" => profile?.DashboardPasswordHash,
-            "exit" => profile?.ExitPasswordHash,
-            "uninstall" => profile?.UninstallPasswordHash,
-            _ => null
-        };
-
-        var ok = !string.IsNullOrEmpty(hash) &&
-                  _passwordHasher.VerifyHashedPassword(profile!, hash, password) != PasswordVerificationResult.Failed;
+        var ok = profile is not null && !string.IsNullOrEmpty(profile.PasswordHash) &&
+                  _passwordHasher.VerifyHashedPassword(profile, profile.PasswordHash, password) != PasswordVerificationResult.Failed;
 
         db.ActivityLogs.Add(new ActivityLogEntity
         {
@@ -208,15 +196,50 @@ public sealed class SecurityProfileService
         return ok;
     }
 
-    // ----------------------------------------------------------------- Yardımcılar
-
-    private bool PasswordsSatisfied(SecurityProfileRequest request, bool isCreate)
+    /// <summary>
+    /// Bir cihazın etkin güvenlik profilini çözer: önce cihazın kendi ataması (varsa, her zaman kazanır),
+    /// yoksa cihazın grubundan başlayıp <c>ParentGroupId</c> zincirinde yukarı doğru ilk
+    /// <c>DefaultSecurityProfileId</c> dolu olan grup. Hiçbiri yoksa null (kısıtlama yok).
+    /// </summary>
+    private static SecurityProfileEntity? ResolveEffectiveProfile(AppDbContext db, Guid deviceId)
     {
-        if (request.RequireDashboardPassword && isCreate && string.IsNullOrWhiteSpace(request.DashboardPassword)) return false;
-        if (request.RequireExitPassword && isCreate && string.IsNullOrWhiteSpace(request.ExitPassword)) return false;
-        if (request.RequireUninstallPassword && isCreate && string.IsNullOrWhiteSpace(request.UninstallPassword)) return false;
-        return true;
+        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
+        if (device is null)
+        {
+            return null;
+        }
+
+        if (device.SecurityProfileId is { } directId)
+        {
+            return db.SecurityProfiles.AsNoTracking().FirstOrDefault(p => p.Id == directId);
+        }
+
+        var groupId = device.GroupId;
+        var visited = new HashSet<Guid>(); // çevrimlere karşı emniyet
+        while (groupId is { } gid && visited.Add(gid))
+        {
+            var group = db.DeviceGroups.AsNoTracking().FirstOrDefault(g => g.Id == gid);
+            if (group is null)
+            {
+                break;
+            }
+
+            if (group.DefaultSecurityProfileId is { } profileId)
+            {
+                var profile = db.SecurityProfiles.AsNoTracking().FirstOrDefault(p => p.Id == profileId);
+                if (profile is not null)
+                {
+                    return profile;
+                }
+            }
+
+            groupId = group.ParentGroupId;
+        }
+
+        return null;
     }
+
+    // ----------------------------------------------------------------- Yardımcılar
 
     private void ApplyRequest(SecurityProfileEntity profile, SecurityProfileRequest request)
     {
@@ -225,39 +248,17 @@ public sealed class SecurityProfileService
         profile.IconBase64 = string.IsNullOrWhiteSpace(request.IconBase64) ? profile.IconBase64 : request.IconBase64;
         profile.RestrictTrayMenu = request.RestrictTrayMenu;
 
-        profile.RequireDashboardPassword = request.RequireDashboardPassword;
-        if (!request.RequireDashboardPassword)
+        profile.RequirePassword = request.RequirePassword;
+        if (!request.RequirePassword)
         {
-            profile.DashboardPasswordHash = null;
+            profile.PasswordHash = null;
         }
-        else if (!string.IsNullOrWhiteSpace(request.DashboardPassword))
+        else if (!string.IsNullOrWhiteSpace(request.Password))
         {
-            profile.DashboardPasswordHash = _passwordHasher.HashPassword(profile, request.DashboardPassword);
-        }
-
-        profile.RequireExitPassword = request.RequireExitPassword;
-        if (!request.RequireExitPassword)
-        {
-            profile.ExitPasswordHash = null;
-        }
-        else if (!string.IsNullOrWhiteSpace(request.ExitPassword))
-        {
-            profile.ExitPasswordHash = _passwordHasher.HashPassword(profile, request.ExitPassword);
-        }
-
-        profile.RequireUninstallPassword = request.RequireUninstallPassword;
-        if (!request.RequireUninstallPassword)
-        {
-            profile.UninstallPasswordHash = null;
-        }
-        else if (!string.IsNullOrWhiteSpace(request.UninstallPassword))
-        {
-            profile.UninstallPasswordHash = _passwordHasher.HashPassword(profile, request.UninstallPassword);
+            profile.PasswordHash = _passwordHasher.HashPassword(profile, request.Password);
         }
     }
 
     private static SecurityProfileDetail ToDetail(SecurityProfileEntity p) => new(
-        p.Id, p.Name, p.AgentDisplayName, p.IconBase64, p.RestrictTrayMenu,
-        p.RequireDashboardPassword, p.RequireExitPassword, p.RequireUninstallPassword,
-        p.CreatedAt, p.UpdatedAt);
+        p.Id, p.Name, p.AgentDisplayName, p.IconBase64, p.RestrictTrayMenu, p.RequirePassword, p.CreatedAt, p.UpdatedAt);
 }

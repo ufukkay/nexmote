@@ -239,7 +239,9 @@ Yeni kullanıcı oluştururken artık iki seçenek var: eski "tek seferlik geçi
 | `GET`/`POST`/`PUT`/`DELETE` | `/api/admin/security-profiles*` | **Bearer (Admin)** | Güvenlik profili CRUD |
 | `POST` | `/api/devices/{id}/security-profile` | **Bearer (Admin)** | Cihaza güvenlik profili atar/kaldırır |
 | `GET` | `/api/agents/{id}/security-profile` | AgentToken | Ajanın branding + şifre-gerektirir bayrakları (hash asla dönmez) |
-| `POST` | `/api/agents/{id}/security/verify` | AgentToken | Panel/Çıkış/Kaldırma şifresini sunucuda doğrular |
+| `POST` | `/api/agents/{id}/security/verify` | AgentToken | Panel/Çıkış/Kaldırma tek şifresini sunucuda doğrular |
+| `GET`/`POST`/`PUT`/`DELETE` | `/api/admin/device-groups*` | **Bearer (Admin)** | Cihaz grupları (şirket/departman) CRUD |
+| `POST` | `/api/devices/{id}/group` | **Bearer (Admin)** | Cihazı bir gruba atar/kaldırır |
 | `POST` | `/api/admin/users/invite` | **Bearer (Admin)** | E-posta ile davet gönderir (geçici şifre yerine) |
 | `POST` | `/api/admin/settings/smtp/test` | **Bearer (Admin)** | Kayıtlı SMTP config'iyle test e-postası gönderir |
 | `GET` | `/api/invite/{token}` | — | Davet önizlemesi (davet kabul ekranı için) |
@@ -305,17 +307,26 @@ Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/
 
 ---
 
-## 🔒 Kurumsal Ajan Güvenlik Profilleri (Branding + Kısıtlı Tray Menüsü + Şifre Korumaları)
+## 🔒 Kurumsal Ajan Güvenlik Profilleri (Branding + Kısıtlı Tray Menüsü + Tek Şifre Koruması)
 
 Web konsolundan yönetilen, cihazlara atanabilen **Güvenlik Profilleri** (`SecurityProfiles` tablosu, `SecurityProfileService`) ile ajanın davranışı kurumsal ihtiyaca göre kilitlenebilir:
 
 - **Branding:** Profildeki `AgentDisplayName`/`IconBase64` doluysa Tray'in `NotifyIcon` metni/ikonu bunu kullanır (boşsa varsayılan "NexMote Agent" + kalkan ikonu).
 - **Kısıtlı tray menüsü:** `RestrictTrayMenu=true` ise sağ tık menüsü sadece **"🛡️ Durum Panelini Görüntüle"** ve **"Çıkış"** içerir — Sunucu Ayarları, Güncelleme Kontrolü, Durumu Yenile kaldırılır.
-- **Şifre korumaları (Durum Paneli / Çıkış / Kaldırma):** Ayrı ayrı açılabilir, her biri sunucuda hash'lenmiş bir şifre ister. **Doğrulama her zaman sunucu üzerinden yapılır** — ajan hiçbir zaman şifre veya hash saklamaz (`POST /api/agents/{id}/security/verify`, `AgentToken` ile korunur). Bağlantı yoksa korumalı işlem **fail-closed** durur (bağlantıyı kesip korumayı atlatamazsınız).
-- **Dağıtım mekanizması:** Tray, 60 saniyede bir `GET /api/agents/{id}/security-profile?agentToken=...`'ı sorgular (branding + boolean flag'ler döner, **şifre hash'i asla dönmez**) ve menü/ikon'u buna göre yeniden kurar (`TrayApplicationContext.RefreshSecurityProfileAsync`/`BuildContextMenu`, `src/NexMote.Agent.Tray/Program.cs`).
+- **Tek şifre koruması (2026-08-23'te sadeleştirildi):** Eskiden Durum Paneli/Çıkış/Kaldırma için 3 ayrı şifre vardı — kullanıcı isteğiyle **tek bir `RequirePassword`/`PasswordHash` alanına** indirildi: profilde şifre koruması açıksa aynı şifre her üç işlemi de (panel görme, ajanı kapatma, kaldırma) korur. `SecurityVerifyRequest.Action` alanı sadece denetim logunda hangi işlemin denendiğini ayırt etmek için kalır (`security.dashboard_verify`/`exit_verify`/`uninstall_verify`), doğrulamayı etkilemez. **Doğrulama her zaman sunucu üzerinden yapılır** — ajan hiçbir zaman şifre veya hash saklamaz (`POST /api/agents/{id}/security/verify`, `AgentToken` ile korunur). Bağlantı yoksa korumalı işlem **fail-closed** durur (bağlantıyı kesip korumayı atlatamazsınız).
+- **Dağıtım mekanizması:** Tray, periyodik olarak `GET /api/agents/{id}/security-profile?agentToken=...`'ı sorgular (branding + tek `requirePassword` bool döner, **şifre hash'i asla dönmez**) ve menü/ikon'u buna göre yeniden kurar (`TrayApplicationContext.RefreshSecurityProfileAsync`/`BuildContextMenu`, `src/NexMote.Agent.Tray/Program.cs`).
 - **Kaldırma koruması sadece `NexMote.Cleaner`'ı korur** (`Main`, elevation kontrolünden hemen sonra) — Windows'un kendi "Program Kaldır"/`msiexec /x` akışı kapsam dışı, zaten yerel yönetici yetkisi gerektiriyor. Silent modda `--password=<şifre>` argümanıyla script'li/yetkili kaldırma desteklenir.
-- **Bir profil atanmamış cihazda hiçbir kısıtlama yoktur** — geriye dönük tamamen uyumlu, mevcut davranış aynen korunur.
+- **Bir profil atanmamış (ve grubu üzerinden de miras alınan bir profili olmayan) cihazda hiçbir kısıtlama yoktur** — geriye dönük tamamen uyumlu, mevcut davranış aynen korunur.
 - **Bu özellik Agent MSI'ının yeniden paketlenip dağıtılmasını gerektirir** (Tray/Cleaner binary'leri değişti) — sadece API/Web deploy'u mevcut cihazlardaki ajanlara yansımaz, `scripts\package-windows.ps1` ile yeni bir MSI üretilip `/api/agents/{id}/update` veya elle dağıtılmalı.
+
+### Cihaz Grupları (Şirket/Departman — İç İçe, 2026-08-23)
+
+Cihazlar `DeviceGroups` tablosuyla **keyfi derinlikte iç içe gruplar** halinde organize edilebilir (`DeviceGroupEntity`: `Name`, `ParentGroupId` — kendine referans, `DefaultSecurityProfileId`). Örn: "Talay Lojistik" (şirket, üst grup yok) → "Muhasebe" (departman, `ParentGroupId` = şirket). `DeviceEntity.GroupId` ile bir cihaz bir gruba atanır (`DeviceGroupService`, `POST /api/devices/{id}/group`).
+
+- **Kademeli (inherited) güvenlik profili çözümlemesi:** `SecurityProfileService.ResolveEffectiveProfile(deviceId)` şu sırayla arar — (1) cihazın kendi `SecurityProfileId`'si varsa **her zaman kazanır** (grup mirasını ezer), (2) yoksa cihazın grubundan başlayıp `ParentGroupId` zincirinde yukarı doğru ilk `DefaultSecurityProfileId` dolu olan grup kullanılır (departmanda yoksa şirkette aranır — cycle-safe, `HashSet` ile ziyaret takibi), (3) hiçbiri yoksa kısıtlama yok. Bu tek helper hem `GetAgentProfile` hem `VerifyPassword` tarafından kullanılır.
+- **Silme/döngü koruması:** Alt grubu olan bir grup silinemez (400 döner); bir grubun `ParentGroupId`'sini kendi alt zincirindeki bir gruba çekmek döngü oluşturacağından reddedilir (`DeviceGroupService.CreatesCycle`).
+- **Web:** "Cihaz Grupları" ekranı (Admin-only, `Building2` ikonu) grup oluşturma/düzenleme formu (Ad, Üst Grup, Varsayılan Güvenlik Profili) + girintili ağaç tablosu sağlar; cihaz detay panelindeki "Oturum & Güvenlik" kartında "Güvenlik Profili" seçicinin yanında bir "Grup" seçici bulunur.
+- **Genişletilebilirlik:** Şu an sadece grup + varsayılan güvenlik profili temeli var — kullanıcı ileride departman/şirket bazlı başka özellikler (farklı ayarlar, branding vb.) eklemeyi planlıyor; `DeviceGroupEntity`/`DeviceGroupService` bu amaçla genişletilebilir tutuldu.
 
 ---
 

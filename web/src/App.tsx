@@ -47,23 +47,29 @@ import {
   KeyRound,
   ScrollText,
   Ban,
-  RotateCcw
+  RotateCcw,
+  Building2
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import {
   acceptInvite,
   ActivityLogEntry as AuditLogEntry,
+  assignDeviceGroup,
   assignSecurityProfile,
   changePassword,
   checkUpdates,
   clearStoredAdminToken,
+  createDeviceGroup,
   createRemoteSession,
   createSecurityProfile,
   createUser,
   CurrentUser,
   deleteDevice,
+  deleteDeviceGroup,
   deleteSecurityProfile,
+  DeviceGroup,
+  DeviceGroupInput,
   disableMfa,
   disableUser,
   DeviceSummary,
@@ -79,6 +85,7 @@ import {
   getStoredAdminToken,
   InstalledAppInfo,
   inviteUser,
+  listDeviceGroups,
   listDevices,
   listDownloads,
   listSecurityProfiles,
@@ -96,6 +103,7 @@ import {
   testSmtp,
   triggerAgentUpdate,
   uninstallApp,
+  updateDeviceGroup,
   updateServerSettings,
   updateSecurityProfile,
   UserSummary,
@@ -103,7 +111,7 @@ import {
   WindowsUpdateInfo
 } from "./api";
 
-type View = "devices" | "device-detail" | "downloads" | "settings" | "users" | "audit-log" | "security-profiles";
+type View = "devices" | "device-detail" | "downloads" | "settings" | "users" | "audit-log" | "security-profiles" | "device-groups";
 type StatusFilter = "all" | "online" | "offline" | "warning";
 type DetailTab = "overview" | "specs" | "performance" | "network" | "applications" | "updates" | "terminal" | "activity";
 type SortField = "deviceName" | "status" | "activeUser" | "ipAddress" | "cpu" | "agentVersion" | "lastSeen";
@@ -342,17 +350,20 @@ export function App() {
     agentDisplayName: "",
     iconBase64: "",
     restrictTrayMenu: false,
-    requireDashboardPassword: false,
-    dashboardPassword: "",
-    requireExitPassword: false,
-    exitPassword: "",
-    requireUninstallPassword: false,
-    uninstallPassword: ""
+    requirePassword: false,
+    password: ""
   };
   const [securityProfiles, setSecurityProfiles] = useState<SecurityProfile[]>([]);
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profileForm, setProfileForm] = useState<SecurityProfileInput>(emptySecurityProfileForm);
   const [savingProfile, setSavingProfile] = useState(false);
+
+  // Cihaz Grupları (Admin) state
+  const emptyGroupForm: DeviceGroupInput = { name: "", parentGroupId: null, defaultSecurityProfileId: null };
+  const [deviceGroups, setDeviceGroups] = useState<DeviceGroup[]>([]);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [groupForm, setGroupForm] = useState<DeviceGroupInput>(emptyGroupForm);
+  const [savingGroup, setSavingGroup] = useState(false);
 
   // Live Activity Event Logs
   const [activityLogs, setActivityLogs] = useState<{ id: string; text: string; time: string; level: "info" | "success" | "warn" }[]>([]);
@@ -782,12 +793,8 @@ export function App() {
       agentDisplayName: profile.agentDisplayName ?? "",
       iconBase64: profile.iconBase64 ?? "",
       restrictTrayMenu: profile.restrictTrayMenu,
-      requireDashboardPassword: profile.requireDashboardPassword,
-      dashboardPassword: "",
-      requireExitPassword: profile.requireExitPassword,
-      exitPassword: "",
-      requireUninstallPassword: profile.requireUninstallPassword,
-      uninstallPassword: ""
+      requirePassword: profile.requirePassword,
+      password: ""
     });
   }
 
@@ -848,6 +855,71 @@ export function App() {
       showToast("Güvenlik profili güncellendi.");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Güvenlik profili atanamadı.");
+    }
+  }
+
+  async function refreshDeviceGroups() {
+    try {
+      setDeviceGroups(await listDeviceGroups());
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Cihaz grupları alınamadı.");
+    }
+  }
+
+  function handleEditGroup(group: DeviceGroup) {
+    setEditingGroupId(group.id);
+    setGroupForm({
+      name: group.name,
+      parentGroupId: group.parentGroupId ?? null,
+      defaultSecurityProfileId: group.defaultSecurityProfileId ?? null
+    });
+  }
+
+  function handleCancelEditGroup() {
+    setEditingGroupId(null);
+    setGroupForm(emptyGroupForm);
+  }
+
+  async function handleSaveGroup(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingGroup(true);
+    try {
+      if (editingGroupId) {
+        await updateDeviceGroup(editingGroupId, groupForm);
+        addActivityLog(`Grup güncellendi: ${groupForm.name}`, "success");
+      } else {
+        await createDeviceGroup(groupForm);
+        addActivityLog(`Grup oluşturuldu: ${groupForm.name}`, "success");
+      }
+      handleCancelEditGroup();
+      await refreshDeviceGroups();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Grup kaydedilemedi.");
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleDeleteGroup(group: DeviceGroup) {
+    try {
+      await deleteDeviceGroup(group.id);
+      if (editingGroupId === group.id) {
+        handleCancelEditGroup();
+      }
+      await refreshDeviceGroups();
+      addActivityLog(`Grup silindi: ${group.name}`, "warn");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Grup silinemedi.");
+    }
+  }
+
+  async function handleAssignDeviceGroup(deviceId: string, groupId: string) {
+    try {
+      await assignDeviceGroup(deviceId, groupId || null);
+      setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, groupId: groupId || null } : d)));
+      showToast("Grup güncellendi.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Grup atanamadı.");
     }
   }
 
@@ -938,6 +1010,7 @@ export function App() {
         if (me.role === "Admin") {
           refreshSettings();
           refreshSecurityProfiles();
+          refreshDeviceGroups();
         }
       } catch {
         if (!cancelled) handleLogout();
@@ -961,6 +1034,7 @@ export function App() {
     if (view === "users") refreshUsers();
     if (view === "audit-log") refreshAuditLog(1);
     if (view === "security-profiles") refreshSecurityProfiles();
+    if (view === "device-groups") refreshDeviceGroups();
   }, [isAuthenticated, currentUser?.role, view]);
 
   function showToast(message: string) {
@@ -1500,6 +1574,14 @@ export function App() {
                 title="Güvenlik Profilleri"
               >
                 <Lock size={18} />
+              </button>
+
+              <button
+                className={`rail-btn ${view === "device-groups" ? "active" : ""}`}
+                onClick={() => setView("device-groups")}
+                title="Cihaz Grupları"
+              >
+                <Building2 size={18} />
               </button>
             </>
           )}
@@ -2090,6 +2172,21 @@ export function App() {
                             <option value="">Yok (kısıtlama yok)</option>
                             {securityProfiles.map((p) => (
                               <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {currentUser?.role === "Admin" && (
+                        <div className="bento-spec-item">
+                          <span className="bento-spec-label">Grup</span>
+                          <select
+                            className="form-input"
+                            value={selectedDevice.groupId ?? ""}
+                            onChange={(e) => handleAssignDeviceGroup(selectedDevice.id, e.target.value)}
+                          >
+                            <option value="">Yok (gruplanmamış)</option>
+                            {deviceGroups.map((g) => (
+                              <option key={g.id} value={g.id}>{g.name}</option>
                             ))}
                           </select>
                         </div>
@@ -3794,67 +3891,21 @@ export function App() {
                   <label className="remember-label">
                     <input
                       type="checkbox"
-                      checked={profileForm.requireDashboardPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, requireDashboardPassword: e.target.checked })}
+                      checked={profileForm.requirePassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, requirePassword: e.target.checked })}
                     />
-                    Durum Panelini açmak şifre istesin
+                    Bu profile şifre koruması ekle (Durum Paneli, Çıkış ve Kaldırma için tek şifre)
                   </label>
                 </div>
-                {profileForm.requireDashboardPassword && (
+                {profileForm.requirePassword && (
                   <div className="form-group">
-                    <label className="form-label">Durum Paneli şifresi</label>
+                    <label className="form-label">Şifre</label>
                     <input
                       type="password"
                       className="form-input"
                       placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
-                      value={profileForm.dashboardPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, dashboardPassword: e.target.value })}
-                    />
-                  </div>
-                )}
-
-                <div className="login-options-row">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={profileForm.requireExitPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, requireExitPassword: e.target.checked })}
-                    />
-                    Ajanı kapatmak (Çıkış) şifre istesin
-                  </label>
-                </div>
-                {profileForm.requireExitPassword && (
-                  <div className="form-group">
-                    <label className="form-label">Çıkış şifresi</label>
-                    <input
-                      type="password"
-                      className="form-input"
-                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
-                      value={profileForm.exitPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, exitPassword: e.target.value })}
-                    />
-                  </div>
-                )}
-
-                <div className="login-options-row">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={profileForm.requireUninstallPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, requireUninstallPassword: e.target.checked })}
-                    />
-                    Ajanı kaldırmak şifre istesin
-                  </label>
-                </div>
-                {profileForm.requireUninstallPassword && (
-                  <div className="form-group">
-                    <label className="form-label">Kaldırma şifresi</label>
-                    <input
-                      type="password"
-                      className="form-input"
-                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
-                      value={profileForm.uninstallPassword}
-                      onChange={(e) => setProfileForm({ ...profileForm, uninstallPassword: e.target.value })}
+                      value={profileForm.password}
+                      onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })}
                     />
                   </div>
                 )}
@@ -3882,7 +3933,7 @@ export function App() {
                       <th>Ad</th>
                       <th>Ajan adı</th>
                       <th>Tray kısıtlı</th>
-                      <th>Şifreler</th>
+                      <th>Şifre</th>
                       <th>Aksiyonlar</th>
                     </tr>
                   </thead>
@@ -3892,13 +3943,7 @@ export function App() {
                         <td>{profile.name}</td>
                         <td>{profile.agentDisplayName || "—"}</td>
                         <td>{profile.restrictTrayMenu ? "Evet" : "Hayır"}</td>
-                        <td>
-                          {[
-                            profile.requireDashboardPassword && "Panel",
-                            profile.requireExitPassword && "Çıkış",
-                            profile.requireUninstallPassword && "Kaldırma"
-                          ].filter(Boolean).join(", ") || "—"}
-                        </td>
+                        <td>{profile.requirePassword ? "Şifreli" : "—"}</td>
                         <td>
                           <div className="row-action-group">
                             <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditProfile(profile)}>
@@ -3911,6 +3956,118 @@ export function App() {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* View 7: Cihaz Grupları (Admin) */}
+        {view === "device-groups" && currentUser?.role === "Admin" && (
+          <div className="content-pane">
+            <div className="content-card">
+              <h2 className="content-card-title">{editingGroupId ? "Grubu düzenle" : "Yeni grup"}</h2>
+              <p className="content-card-copy">
+                Cihazları şirket/departman gibi iç içe gruplar halinde organize edin. Bir gruba varsayılan güvenlik
+                profili atarsanız, kendi profili olmayan cihazlar (doğrudan veya alt gruplar üzerinden) bunu miras alır.
+              </p>
+
+              <form onSubmit={handleSaveGroup} className="settings-form">
+                <div className="form-group">
+                  <label className="form-label">Grup adı</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Örn: Talay Lojistik veya Muhasebe"
+                    value={groupForm.name}
+                    onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Üst grup</label>
+                  <select
+                    className="form-input"
+                    value={groupForm.parentGroupId ?? ""}
+                    onChange={(e) => setGroupForm({ ...groupForm, parentGroupId: e.target.value || null })}
+                  >
+                    <option value="">Yok (en üst seviye)</option>
+                    {deviceGroups.filter((g) => g.id !== editingGroupId).map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Varsayılan güvenlik profili</label>
+                  <select
+                    className="form-input"
+                    value={groupForm.defaultSecurityProfileId ?? ""}
+                    onChange={(e) => setGroupForm({ ...groupForm, defaultSecurityProfileId: e.target.value || null })}
+                  >
+                    <option value="">Yok</option>
+                    {securityProfiles.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="row-action-group">
+                  <button type="submit" className="btn-primary" data-width="fixed" disabled={savingGroup}>
+                    <Building2 size={14} />
+                    {savingGroup ? "Kaydediliyor..." : editingGroupId ? "Grubu Güncelle" : "Grup Oluştur"}
+                  </button>
+                  {editingGroupId && (
+                    <button type="button" className="btn-secondary" onClick={handleCancelEditGroup}>
+                      İptal
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className="content-card">
+              <h2 className="content-card-title">Gruplar ({deviceGroups.length})</h2>
+              <div className="op-table-container">
+                <table className="op-table">
+                  <thead>
+                    <tr>
+                      <th>Ad</th>
+                      <th>Üst grup</th>
+                      <th>Varsayılan profil</th>
+                      <th>Aksiyonlar</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deviceGroups.map((group) => {
+                      let depth = 0;
+                      let cursor = group.parentGroupId;
+                      const seen = new Set<string>([group.id]);
+                      while (cursor && !seen.has(cursor)) {
+                        depth += 1;
+                        seen.add(cursor);
+                        cursor = deviceGroups.find((g) => g.id === cursor)?.parentGroupId ?? null;
+                      }
+                      const parentName = deviceGroups.find((g) => g.id === group.parentGroupId)?.name;
+                      const profileName = securityProfiles.find((p) => p.id === group.defaultSecurityProfileId)?.name;
+                      return (
+                        <tr key={group.id}>
+                          <td style={{ paddingLeft: 12 + depth * 20 }}>{depth > 0 ? "↳ " : ""}{group.name}</td>
+                          <td>{parentName || "—"}</td>
+                          <td>{profileName || "—"}</td>
+                          <td>
+                            <div className="row-action-group">
+                              <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditGroup(group)}>
+                                <KeyRound size={14} />
+                              </button>
+                              <button className="icon-action-btn" title="Sil" onClick={() => handleDeleteGroup(group)}>
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

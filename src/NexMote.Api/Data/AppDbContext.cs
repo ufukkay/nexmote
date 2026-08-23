@@ -63,6 +63,11 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<SecurityProfileEntity> SecurityProfiles => Set<SecurityProfileEntity>();
 
+    /// <summary>
+    /// Cihazları organize etmek için kullanılan iç içe (şirket/departman) gruplar tablosu.
+    /// </summary>
+    public DbSet<DeviceGroupEntity> DeviceGroups => Set<DeviceGroupEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -137,6 +142,13 @@ public sealed class AppDbContext : DbContext
         modelBuilder.Entity<SecurityProfileEntity>(entity =>
         {
             entity.HasKey(p => p.Id);
+        });
+
+        // Cihaz grubu birincil anahtar ve üst grup indeksi
+        modelBuilder.Entity<DeviceGroupEntity>(entity =>
+        {
+            entity.HasKey(g => g.Id);
+            entity.HasIndex(g => g.ParentGroupId);
         });
     }
 }
@@ -224,6 +236,9 @@ public sealed class DeviceEntity
 
     /// <summary>Cihaza atanmış kurumsal güvenlik profili (branding/şifre korumaları) — null ise kısıtlama yok.</summary>
     public Guid? SecurityProfileId { get; set; }
+
+    /// <summary>Cihazın organizasyon grubu (şirket/departman) — null ise gruplanmamış.</summary>
+    public Guid? GroupId { get; set; }
 }
 
 /// <summary>
@@ -540,16 +555,35 @@ public sealed class SecurityProfileEntity
     /// <summary>true ise tray sağ tık menüsü sadece "Durum Panelini Görüntüle" ve "Çıkış" içerir.</summary>
     public bool RestrictTrayMenu { get; set; }
 
-    public bool RequireDashboardPassword { get; set; }
-    public string? DashboardPasswordHash { get; set; }
+    /// <summary>true ise Durum Paneli, Çıkış ve Kaldırma işlemlerinin hepsi bu TEK şifreyi ister.</summary>
+    public bool RequirePassword { get; set; }
 
-    public bool RequireExitPassword { get; set; }
-    public string? ExitPasswordHash { get; set; }
-
-    public bool RequireUninstallPassword { get; set; }
-    public string? UninstallPasswordHash { get; set; }
+    public string? PasswordHash { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Cihazları iç içe (şirket &gt; departman &gt; ...) organize etmek için kullanılan grup. Bir gruba
+/// atanan <see cref="DefaultSecurityProfileId"/>, o gruba (veya alt gruplarına, kendi/atadan başlayıp
+/// yukarı doğru ilk dolu olan) ait cihazlar tarafından, cihaz kendi profiline sahip değilse miras alınır.
+/// </summary>
+public sealed class DeviceGroupEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    [Required]
+    [MaxLength(128)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Üst grup (şirket/departman hiyerarşisi) — null ise en üst seviye.</summary>
+    public Guid? ParentGroupId { get; set; }
+
+    /// <summary>Bu gruba (veya doğrudan grubu olmayıp bu grubun altındaki) atanan cihazların varsayılan güvenlik profili.</summary>
+    public Guid? DefaultSecurityProfileId { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

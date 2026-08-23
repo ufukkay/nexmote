@@ -516,7 +516,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Durum Paneli, profil şifre istiyorsa önce sunucuda doğrulanmadan açılmaz.</summary>
     private async void ShowDashboardGated()
     {
-        if (_securityProfile?.RequireDashboardPassword == true)
+        if (_securityProfile?.RequirePassword == true)
         {
             if (!await VerifyActionPasswordAsync("dashboard", "Durum Paneli", "Durum Panelini açmak için şifre girin:"))
             {
@@ -530,7 +530,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Ajanı kapatma (tray'den çıkış), profil şifre istiyorsa önce sunucuda doğrulanmadan yapılmaz.</summary>
     private async void RequestExit()
     {
-        if (_securityProfile?.RequireExitPassword == true)
+        if (_securityProfile?.RequirePassword == true)
         {
             if (!await VerifyActionPasswordAsync("exit", "Ajanı Kapat", "Ajanı kapatmak için şifre girin:"))
             {

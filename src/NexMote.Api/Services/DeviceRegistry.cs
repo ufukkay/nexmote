@@ -351,7 +351,8 @@ public sealed class DeviceRegistry
             updates,
             device.SerialNumber,
             hardware,
-            device.SecurityProfileId);
+            device.SecurityProfileId,
+            device.GroupId);
     }
 
     private static string? CleanUserName(string? rawUser)
