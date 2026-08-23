@@ -105,6 +105,7 @@ export type DeviceSummary = {
   windowsUpdates?: WindowsUpdateInfo[];
   serialNumber?: string;
   hardwareDetails?: HardwareInventoryInfo;
+  securityProfileId?: string | null;
 };
 
 /**
@@ -681,5 +682,89 @@ export async function uninstallApp(
   }
 
   return res.json();
+}
+
+/** Kurumsal ajan güvenlik profili — branding, kısıtlı tray menüsü ve şifre korumaları. */
+export type SecurityProfile = {
+  id: string;
+  name: string;
+  agentDisplayName?: string | null;
+  iconBase64?: string | null;
+  restrictTrayMenu: boolean;
+  requireDashboardPassword: boolean;
+  requireExitPassword: boolean;
+  requireUninstallPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SecurityProfileInput = {
+  name: string;
+  agentDisplayName?: string;
+  iconBase64?: string;
+  restrictTrayMenu: boolean;
+  requireDashboardPassword: boolean;
+  dashboardPassword?: string;
+  requireExitPassword: boolean;
+  exitPassword?: string;
+  requireUninstallPassword: boolean;
+  uninstallPassword?: string;
+};
+
+/** Güvenlik profillerini listeler (Admin). */
+export async function listSecurityProfiles(): Promise<SecurityProfile[]> {
+  const response = await fetch("/api/admin/security-profiles", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Güvenlik profilleri alınamadı.");
+  }
+  return response.json();
+}
+
+/** Yeni güvenlik profili oluşturur (Admin). */
+export async function createSecurityProfile(input: SecurityProfileInput): Promise<SecurityProfile> {
+  const response = await fetch("/api/admin/security-profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Profil oluşturulamadı.");
+  }
+  return response.json();
+}
+
+/** Güvenlik profilini günceller (Admin). */
+export async function updateSecurityProfile(id: string, input: SecurityProfileInput): Promise<SecurityProfile> {
+  const response = await fetch(`/api/admin/security-profiles/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Profil güncellenemedi.");
+  }
+  return response.json();
+}
+
+/** Güvenlik profilini siler (Admin). */
+export async function deleteSecurityProfile(id: string): Promise<void> {
+  const response = await fetch(`/api/admin/security-profiles/${id}`, { method: "DELETE", headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Profil silinemedi.");
+  }
+}
+
+/** Bir cihaza güvenlik profili atar (null = kaldır) (Admin). */
+export async function assignSecurityProfile(deviceId: string, securityProfileId: string | null): Promise<void> {
+  const response = await fetch(`/api/devices/${deviceId}/security-profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ securityProfileId })
+  });
+  if (!response.ok) {
+    throw new Error("Güvenlik profili atanamadı.");
+  }
 }
 

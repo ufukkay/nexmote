@@ -265,38 +265,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly CancellationTokenSource _cts = new();
     private DashboardForm? _dashboardForm;
     private string _serverUrl;
+    private readonly string _versionStr;
+    private AgentSecurityProfileResponse? _securityProfile;
+    private readonly System.Windows.Forms.Timer _securityProfileTimer;
+    private Icon? _customTrayIcon;
 
     public TrayApplicationContext(bool openDashboardOnStart = false, string? eventName = null)
     {
-        var versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
+        _versionStr = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.6.2";
         _uiContext = SynchronizationContext.Current;
         _serverUrl = AgentSettings.LoadServerUrl();
         _statusItem = new ToolStripMenuItem("Servis durumu: kontrol ediliyor") { Enabled = false };
         _serverItem = new ToolStripMenuItem($"Sunucu: {_serverUrl}") { Enabled = false };
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add($"NexMote Agent v{versionStr}").Enabled = false;
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_statusItem);
-        menu.Items.Add(_serverItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("🛡️ Durum Panelini Aç", null, (_, _) => ShowDashboard());
-        menu.Items.Add("🚀 Güncelleme Kontrol Et", null, async (_, _) => await CheckForAgentUpdatesAsync(isManual: true));
-        menu.Items.Add("Sunucu Ayarları...", null, (_, _) => ShowServerSettingsDialog());
-        menu.Items.Add("Durumu Yenile", null, (_, _) => RefreshStatus(showBalloon: true));
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Tray'i Kapat", null, (_, _) => ExitThread());
+        var menu = BuildContextMenu();
 
         try
         {
             _notifyIcon = new NotifyIcon
             {
                 Icon = IconHelper.GetAppIcon(),
-                Text = $"NexMote Agent v{versionStr}",
+                Text = $"NexMote Agent v{_versionStr}",
                 ContextMenuStrip = menu,
                 Visible = true
             };
-            _notifyIcon.DoubleClick += (_, _) => ShowDashboard();
+            _notifyIcon.DoubleClick += (_, _) => ShowDashboardGated();
         }
         catch
         {
@@ -372,6 +365,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _heartbeatTimer.Start();
 
+        // 60 saniyelik periyodik güvenlik profili (branding + şifre koruması bayrakları) kontrolü
+        _securityProfileTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+        _securityProfileTimer.Tick += async (_, _) =>
+        {
+            await RefreshSecurityProfileAsync();
+            _securityProfileTimer.Interval = 60000;
+        };
+        _securityProfileTimer.Start();
+
         RefreshStatus(showBalloon: false);
         _ = _streamer.EnsureStartedAsync();
         _ = SendHeartbeatAsync();
@@ -387,6 +389,228 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await Task.Delay(4000);
             await CheckForAgentUpdatesAsync(isManual: false);
         });
+    }
+
+    /// <summary>
+    /// Kurumsal güvenlik profili menü/branding bileşenlerini <see cref="_securityProfile"/>'a göre kurar.
+    /// Profil yoksa (veya kısıtlama kapalıysa) mevcut tam menü davranışı aynen korunur.
+    /// </summary>
+    private ContextMenuStrip BuildContextMenu()
+    {
+        var displayName = string.IsNullOrWhiteSpace(_securityProfile?.AgentDisplayName)
+            ? "NexMote Agent"
+            : _securityProfile!.AgentDisplayName!;
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add($"{displayName} v{_versionStr}").Enabled = false;
+        menu.Items.Add(new ToolStripSeparator());
+
+        if (_securityProfile?.RestrictTrayMenu == true)
+        {
+            // Kurumsal kilitli mod: sağ tık menüsünde sadece bu iki aksiyon görünür.
+            menu.Items.Add("🛡️ Durum Panelini Görüntüle", null, (_, _) => ShowDashboardGated());
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Çıkış", null, (_, _) => RequestExit());
+        }
+        else
+        {
+            menu.Items.Add(_statusItem);
+            menu.Items.Add(_serverItem);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("🛡️ Durum Panelini Aç", null, (_, _) => ShowDashboardGated());
+            menu.Items.Add("🚀 Güncelleme Kontrol Et", null, async (_, _) => await CheckForAgentUpdatesAsync(isManual: true));
+            menu.Items.Add("Sunucu Ayarları...", null, (_, _) => ShowServerSettingsDialog());
+            menu.Items.Add("Durumu Yenile", null, (_, _) => RefreshStatus(showBalloon: true));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Tray'i Kapat", null, (_, _) => RequestExit());
+        }
+
+        return menu;
+    }
+
+    /// <summary>Sunucudan bu cihaza atanmış güvenlik profilini çeker, branding/menüyü UI thread'inde günceller.</summary>
+    private async Task RefreshSecurityProfileAsync()
+    {
+        try
+        {
+            var identity = DeviceIdentityFile.Load();
+            if (identity is null) return;
+
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
+            var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security-profile?agentToken={Uri.EscapeDataString(identity.AgentToken)}";
+            var response = await http.GetAsync(url);
+            if (!response.IsSuccessStatusCode) return;
+
+            var profile = await response.Content.ReadFromJsonAsync<AgentSecurityProfileResponse>();
+            if (profile is null) return;
+
+            _uiContext?.Post(_ =>
+            {
+                _securityProfile = profile;
+                ApplyBranding();
+                if (_notifyIcon != null)
+                {
+                    _notifyIcon.ContextMenuStrip = BuildContextMenu();
+                }
+            }, null);
+        }
+        catch
+        {
+            // Sessizce geç — profil bilgisi al(a)mazsak varsayılan (kısıtlamasız) davranışla devam edilir.
+        }
+    }
+
+    /// <summary>NotifyIcon metnini/ikonunu güvenlik profilindeki branding'e göre günceller.</summary>
+    private void ApplyBranding()
+    {
+        if (_notifyIcon is null) return;
+
+        var displayName = string.IsNullOrWhiteSpace(_securityProfile?.AgentDisplayName)
+            ? "NexMote Agent"
+            : _securityProfile!.AgentDisplayName!;
+        var text = $"{displayName} v{_versionStr}";
+        _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
+
+        var previousCustomIcon = _customTrayIcon;
+        if (!string.IsNullOrWhiteSpace(_securityProfile?.IconBase64))
+        {
+            var decoded = DecodeIconFromBase64(_securityProfile!.IconBase64!);
+            if (decoded is not null)
+            {
+                _customTrayIcon = decoded;
+                _notifyIcon.Icon = decoded;
+                previousCustomIcon?.Dispose();
+                return;
+            }
+        }
+
+        _notifyIcon.Icon = IconHelper.GetAppIcon();
+        _customTrayIcon = null;
+        previousCustomIcon?.Dispose();
+    }
+
+    private static Icon? DecodeIconFromBase64(string base64)
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(base64);
+            using var ms = new MemoryStream(bytes);
+            try
+            {
+                return new Icon(ms);
+            }
+            catch
+            {
+                // .ico değil (örn. PNG) — Bitmap üzerinden Icon'a çevir
+                ms.Position = 0;
+                using var bmp = new Bitmap(ms);
+                return Icon.FromHandle(bmp.GetHicon());
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Durum Paneli, profil şifre istiyorsa önce sunucuda doğrulanmadan açılmaz.</summary>
+    private async void ShowDashboardGated()
+    {
+        if (_securityProfile?.RequireDashboardPassword == true)
+        {
+            if (!await VerifyActionPasswordAsync("dashboard", "Durum Paneli", "Durum Panelini açmak için şifre girin:"))
+            {
+                return;
+            }
+        }
+
+        ShowDashboard();
+    }
+
+    /// <summary>Ajanı kapatma (tray'den çıkış), profil şifre istiyorsa önce sunucuda doğrulanmadan yapılmaz.</summary>
+    private async void RequestExit()
+    {
+        if (_securityProfile?.RequireExitPassword == true)
+        {
+            if (!await VerifyActionPasswordAsync("exit", "Ajanı Kapat", "Ajanı kapatmak için şifre girin:"))
+            {
+                return;
+            }
+        }
+
+        ExitThread();
+    }
+
+    /// <summary>
+    /// Kullanıcıdan şifre ister, sunucuda doğrular (<c>/api/agents/{id}/security/verify</c>). Yanlış şifrede
+    /// tekrar sorar; ağ/sunucu hatasında veya kullanıcı iptal ederse false döner (fail-closed).
+    /// </summary>
+    private async Task<bool> VerifyActionPasswordAsync(string action, string title, string message)
+    {
+        var identity = DeviceIdentityFile.Load();
+        if (identity is null)
+        {
+            MessageBox.Show("Cihaz kimliği bulunamadı, işlem yapılamıyor.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+
+        while (true)
+        {
+            var password = PromptForPassword(title, message);
+            if (password is null) return false;
+
+            try
+            {
+                using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
+                var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security/verify";
+                var response = await http.PostAsJsonAsync(url, new SecurityVerifyRequest(identity.AgentToken, action, password));
+                if (response.IsSuccessStatusCode)
+                {
+                    var result = await response.Content.ReadFromJsonAsync<SecurityVerifyResponse>();
+                    if (result?.Ok == true)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                MessageBox.Show("Sunucuya bağlanılamadı, işlem yapılamıyor.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
+            MessageBox.Show("Şifre hatalı.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private string? PromptForPassword(string title, string message)
+    {
+        using var form = new Form
+        {
+            Text = title,
+            Width = 380,
+            Height = 170,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            Icon = IconHelper.GetAppIcon(),
+            TopMost = true
+        };
+
+        var label = new Label { Text = message, Left = 16, Top = 16, Width = 336, Height = 40 };
+        var textBox = new TextBox { Left = 16, Top = 58, Width = 336, PasswordChar = '●' };
+        var okButton = new Button { Text = "Tamam", Left = 196, Top = 92, Width = 75, DialogResult = DialogResult.OK };
+        var cancelButton = new Button { Text = "İptal", Left = 277, Top = 92, Width = 75, DialogResult = DialogResult.Cancel };
+
+        form.Controls.Add(label);
+        form.Controls.Add(textBox);
+        form.Controls.Add(okButton);
+        form.Controls.Add(cancelButton);
+        form.AcceptButton = okButton;
+        form.CancelButton = cancelButton;
+
+        return form.ShowDialog() == DialogResult.OK ? textBox.Text : null;
     }
 
     private async Task SendHeartbeatAsync()

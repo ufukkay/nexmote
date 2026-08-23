@@ -12,4 +12,8 @@
   <ItemGroup>
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NexMote.Shared\NexMote.Shared.csproj" />
+  </ItemGroup>
 </Project>

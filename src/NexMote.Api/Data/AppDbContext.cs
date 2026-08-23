@@ -58,6 +58,11 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<UserInviteEntity> UserInvites => Set<UserInviteEntity>();
 
+    /// <summary>
+    /// Kurumsal ajan güvenlik profilleri (branding, kısıtlı tray menüsü, şifre korumaları) tablosu.
+    /// </summary>
+    public DbSet<SecurityProfileEntity> SecurityProfiles => Set<SecurityProfileEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -126,6 +131,12 @@ public sealed class AppDbContext : DbContext
             entity.HasKey(i => i.Id);
             entity.HasIndex(i => i.TokenHash).IsUnique();
             entity.HasIndex(i => i.UserId);
+        });
+
+        // Güvenlik profili birincil anahtar
+        modelBuilder.Entity<SecurityProfileEntity>(entity =>
+        {
+            entity.HasKey(p => p.Id);
         });
     }
 }
@@ -210,6 +221,9 @@ public sealed class DeviceEntity
 
     /// <summary>Cihazın anakart, BIOS, işlemci, RAM modülleri ve fiziksel disklerine ait seri numaraları ve donanım envanter detayları (JSON).</summary>
     public string? HardwareDetailsJson { get; set; }
+
+    /// <summary>Cihaza atanmış kurumsal güvenlik profili (branding/şifre korumaları) — null ise kısıtlama yok.</summary>
+    public Guid? SecurityProfileId { get; set; }
 }
 
 /// <summary>
@@ -500,4 +514,42 @@ public sealed class UserInviteEntity
 
     /// <summary>Daveti gönderen admin kullanıcının kimliği.</summary>
     public Guid InvitedByUserId { get; set; }
+}
+
+/// <summary>
+/// Kurumsal ajan güvenlik profili: branding (görünen ad/ikon), kısıtlı tray menüsü ve Durum Paneli/
+/// Çıkış/Kaldırma işlemleri için sunucu tarafında doğrulanan şifre korumaları. Cihazlara atanır
+/// (<see cref="DeviceEntity.SecurityProfileId"/>); atanmamış cihazlarda hiçbir kısıtlama uygulanmaz.
+/// </summary>
+public sealed class SecurityProfileEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    [Required]
+    [MaxLength(128)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Boşsa ajan tepsisinde/panelinde varsayılan "NexMote Agent" adı kullanılır.</summary>
+    [MaxLength(64)]
+    public string? AgentDisplayName { get; set; }
+
+    /// <summary>Küçük bir PNG/ICO'nun base64 kodlaması — tray ikonunda kullanılır (boşsa varsayılan kalkan ikonu).</summary>
+    public string? IconBase64 { get; set; }
+
+    /// <summary>true ise tray sağ tık menüsü sadece "Durum Panelini Görüntüle" ve "Çıkış" içerir.</summary>
+    public bool RestrictTrayMenu { get; set; }
+
+    public bool RequireDashboardPassword { get; set; }
+    public string? DashboardPasswordHash { get; set; }
+
+    public bool RequireExitPassword { get; set; }
+    public string? ExitPasswordHash { get; set; }
+
+    public bool RequireUninstallPassword { get; set; }
+    public string? UninstallPasswordHash { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

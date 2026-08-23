@@ -57,9 +57,11 @@ builder.Services.AddAuthorizationBuilder()
     .AddPolicy("Admin", p => p.RequireAuthenticatedUser().RequireRole(UserRoles.Admin));
 
 builder.Services.AddSingleton<IPasswordHasher<UserEntity>, PasswordHasher<UserEntity>>();
+builder.Services.AddSingleton<IPasswordHasher<SecurityProfileEntity>, PasswordHasher<SecurityProfileEntity>>();
 builder.Services.AddSingleton<TotpService>();
 builder.Services.AddSingleton<UserAuthService>();
 builder.Services.AddSingleton<EmailService>();
+builder.Services.AddSingleton<SecurityProfileService>();
 
 // Web ön yüzü ve teknisyen istemcisi için CORS politikası
 builder.Services.AddCors(options =>
@@ -219,9 +221,27 @@ using (var scope = app.Services.CreateScope())
             );
             CREATE UNIQUE INDEX IF NOT EXISTS ""IX_UserInvites_TokenHash"" ON ""UserInvites"" (""TokenHash"");
             CREATE INDEX IF NOT EXISTS ""IX_UserInvites_UserId"" ON ""UserInvites"" (""UserId"");
+
+            CREATE TABLE IF NOT EXISTS ""SecurityProfiles"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_SecurityProfiles"" PRIMARY KEY,
+                ""Name"" TEXT NOT NULL,
+                ""AgentDisplayName"" TEXT NULL,
+                ""IconBase64"" TEXT NULL,
+                ""RestrictTrayMenu"" INTEGER NOT NULL,
+                ""RequireDashboardPassword"" INTEGER NOT NULL,
+                ""DashboardPasswordHash"" TEXT NULL,
+                ""RequireExitPassword"" INTEGER NOT NULL,
+                ""ExitPasswordHash"" TEXT NULL,
+                ""RequireUninstallPassword"" INTEGER NOT NULL,
+                ""UninstallPasswordHash"" TEXT NULL,
+                ""CreatedAt"" TEXT NOT NULL,
+                ""UpdatedAt"" TEXT NOT NULL
+            );
         ");
     }
     catch { }
+
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""Devices"" ADD COLUMN ""SecurityProfileId"" TEXT;"); } catch { }
 
     // SMTP ayar kolonları — ServerSettings tablosu EnsureCreated() ile daha önce oluşturulmuş bir
     // veritabanında bu kolonlar yok, DeletedDevices/Users ile aynı ALTER TABLE deseni.
@@ -454,6 +474,39 @@ admin.MapGet("/admin/audit-log", (int? page, int? pageSize, Guid? userId, string
     return Results.Ok(new { items, total });
 });
 
+/// <summary>Güvenlik profillerini listeler (Admin Yetkisi Gerekir).</summary>
+admin.MapGet("/admin/security-profiles", (SecurityProfileService profiles) => Results.Ok(profiles.List()));
+
+/// <summary>Yeni güvenlik profili oluşturur (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/security-profiles", (SecurityProfileRequest request, ClaimsPrincipal actor, SecurityProfileService profiles) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = profiles.Create(request, actingUserId);
+    return result is null ? Results.BadRequest(new { message = "Ad boş olamaz veya zorunlu bir şifre eksik." }) : Results.Ok(result);
+});
+
+/// <summary>Güvenlik profilini günceller (Admin Yetkisi Gerekir).</summary>
+admin.MapPut("/admin/security-profiles/{id:guid}", (Guid id, SecurityProfileRequest request, ClaimsPrincipal actor, SecurityProfileService profiles) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = profiles.Update(id, request, actingUserId);
+    return result is null ? Results.BadRequest(new { message = "Profil bulunamadı, ad boş olamaz veya zorunlu bir şifre eksik." }) : Results.Ok(result);
+});
+
+/// <summary>Güvenlik profilini siler — atanmış cihazlar önce kısıtlamasız hale getirilir (Admin Yetkisi Gerekir).</summary>
+admin.MapDelete("/admin/security-profiles/{id:guid}", (Guid id, ClaimsPrincipal actor, SecurityProfileService profiles) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return profiles.Delete(id, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
+/// <summary>Bir cihaza güvenlik profili atar/kaldırır (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/devices/{id:guid}/security-profile", (Guid id, AssignSecurityProfileRequest request, ClaimsPrincipal actor, SecurityProfileService profiles) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return profiles.AssignToDevice(id, request.SecurityProfileId, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
 /// <summary>
 /// Yeni Windows Agent istemcisinin sunucuya ilk kaydı (Enrollment).
 /// </summary>
@@ -490,6 +543,25 @@ app.MapPost("/api/agents/{deviceId:guid}/heartbeat", (Guid deviceId, DeviceHeart
     return devices.Heartbeat(deviceId, request)
         ? Results.NoContent()
         : Results.NotFound(new { message = "Cihaz bulunamadı veya güvenlik token'ı geçersiz." });
+}).RequireRateLimiting("agent");
+
+/// <summary>
+/// Ajanın (Tray/Cleaner) kendi güvenlik profilini (branding + hangi işlemlerin şifre istediği) sorgulaması.
+/// AgentToken ile korunur, insan auth'una girmez; şifre hash'i kesinlikle dönmez.
+/// </summary>
+app.MapGet("/api/agents/{deviceId:guid}/security-profile", (Guid deviceId, string agentToken, SecurityProfileService profiles) =>
+{
+    var result = profiles.GetAgentProfile(deviceId, agentToken);
+    return result is null ? Results.Unauthorized() : Results.Ok(result);
+}).RequireRateLimiting("agent");
+
+/// <summary>
+/// Ajanın, kullanıcının girdiği Durum Paneli/Çıkış/Kaldırma şifresini sunucuda doğrulatması. AgentToken ile korunur.
+/// </summary>
+app.MapPost("/api/agents/{deviceId:guid}/security/verify", (Guid deviceId, SecurityVerifyRequest request, SecurityProfileService profiles) =>
+{
+    var ok = profiles.VerifyPassword(deviceId, request.AgentToken, request.Action, request.Password);
+    return Results.Ok(new SecurityVerifyResponse(ok));
 }).RequireRateLimiting("agent");
 
 /// <summary>

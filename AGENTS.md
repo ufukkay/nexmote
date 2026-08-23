@@ -236,6 +236,10 @@ Yeni kullanıcı oluştururken artık iki seçenek var: eski "tek seferlik geçi
 | `GET` | `/api/auth/me` | **Bearer** | Giriş yapmış kullanıcının kimlik/rol/MFA durumu |
 | `POST` | `/api/account/password` \| `/mfa/setup` \| `/mfa/enable` \| `/mfa/disable` | **Bearer** | Kendi şifre/MFA yönetimi (herkes) |
 | `GET`/`POST` | `/api/admin/users*`, `GET /api/admin/audit-log` | **Bearer (Admin)** | Kullanıcı yönetimi ve denetim logu |
+| `GET`/`POST`/`PUT`/`DELETE` | `/api/admin/security-profiles*` | **Bearer (Admin)** | Güvenlik profili CRUD |
+| `POST` | `/api/devices/{id}/security-profile` | **Bearer (Admin)** | Cihaza güvenlik profili atar/kaldırır |
+| `GET` | `/api/agents/{id}/security-profile` | AgentToken | Ajanın branding + şifre-gerektirir bayrakları (hash asla dönmez) |
+| `POST` | `/api/agents/{id}/security/verify` | AgentToken | Panel/Çıkış/Kaldırma şifresini sunucuda doğrular |
 | `POST` | `/api/admin/users/invite` | **Bearer (Admin)** | E-posta ile davet gönderir (geçici şifre yerine) |
 | `POST` | `/api/admin/settings/smtp/test` | **Bearer (Admin)** | Kayıtlı SMTP config'iyle test e-postası gönderir |
 | `GET` | `/api/invite/{token}` | — | Davet önizlemesi (davet kabul ekranı için) |
@@ -298,6 +302,20 @@ Her üç client projesinin (`NexMote.Agent.Windows`, `NexMote.Agent.Tray`, `NexM
 
 ### MSI dağıtım notu
 Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/www/nexmote/wwwroot/downloads`) — `DownloadCatalog` hangisini kullanacağını dosya varlığına göre seçer, ama statik dosya sunumu (nginx/Kestrel `UseStaticFiles`) her zaman `wwwroot/downloads`'ı önceliklendirir. **MSI güncellemesi yaparken ikisine de kopyalamak gerekir**, yoksa `/api/downloads` metadata'sı ile gerçek indirilen dosya boyutu tutarsız olur.
+
+---
+
+## 🔒 Kurumsal Ajan Güvenlik Profilleri (Branding + Kısıtlı Tray Menüsü + Şifre Korumaları)
+
+Web konsolundan yönetilen, cihazlara atanabilen **Güvenlik Profilleri** (`SecurityProfiles` tablosu, `SecurityProfileService`) ile ajanın davranışı kurumsal ihtiyaca göre kilitlenebilir:
+
+- **Branding:** Profildeki `AgentDisplayName`/`IconBase64` doluysa Tray'in `NotifyIcon` metni/ikonu bunu kullanır (boşsa varsayılan "NexMote Agent" + kalkan ikonu).
+- **Kısıtlı tray menüsü:** `RestrictTrayMenu=true` ise sağ tık menüsü sadece **"🛡️ Durum Panelini Görüntüle"** ve **"Çıkış"** içerir — Sunucu Ayarları, Güncelleme Kontrolü, Durumu Yenile kaldırılır.
+- **Şifre korumaları (Durum Paneli / Çıkış / Kaldırma):** Ayrı ayrı açılabilir, her biri sunucuda hash'lenmiş bir şifre ister. **Doğrulama her zaman sunucu üzerinden yapılır** — ajan hiçbir zaman şifre veya hash saklamaz (`POST /api/agents/{id}/security/verify`, `AgentToken` ile korunur). Bağlantı yoksa korumalı işlem **fail-closed** durur (bağlantıyı kesip korumayı atlatamazsınız).
+- **Dağıtım mekanizması:** Tray, 60 saniyede bir `GET /api/agents/{id}/security-profile?agentToken=...`'ı sorgular (branding + boolean flag'ler döner, **şifre hash'i asla dönmez**) ve menü/ikon'u buna göre yeniden kurar (`TrayApplicationContext.RefreshSecurityProfileAsync`/`BuildContextMenu`, `src/NexMote.Agent.Tray/Program.cs`).
+- **Kaldırma koruması sadece `NexMote.Cleaner`'ı korur** (`Main`, elevation kontrolünden hemen sonra) — Windows'un kendi "Program Kaldır"/`msiexec /x` akışı kapsam dışı, zaten yerel yönetici yetkisi gerektiriyor. Silent modda `--password=<şifre>` argümanıyla script'li/yetkili kaldırma desteklenir.
+- **Bir profil atanmamış cihazda hiçbir kısıtlama yoktur** — geriye dönük tamamen uyumlu, mevcut davranış aynen korunur.
+- **Bu özellik Agent MSI'ının yeniden paketlenip dağıtılmasını gerektirir** (Tray/Cleaner binary'leri değişti) — sadece API/Web deploy'u mevcut cihazlardaki ajanlara yansımaz, `scripts\package-windows.ps1` ile yeni bir MSI üretilip `/api/agents/{id}/update` veya elle dağıtılmalı.
 
 ---
 

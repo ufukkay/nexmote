@@ -54,13 +54,16 @@ import QRCode from "qrcode";
 import {
   acceptInvite,
   ActivityLogEntry as AuditLogEntry,
+  assignSecurityProfile,
   changePassword,
   checkUpdates,
   clearStoredAdminToken,
   createRemoteSession,
+  createSecurityProfile,
   createUser,
   CurrentUser,
   deleteDevice,
+  deleteSecurityProfile,
   disableMfa,
   disableUser,
   DeviceSummary,
@@ -78,10 +81,13 @@ import {
   inviteUser,
   listDevices,
   listDownloads,
+  listSecurityProfiles,
   listUsers,
   login,
   logout as apiLogout,
   resetUserMfa,
+  SecurityProfile,
+  SecurityProfileInput,
   ServerMetrics,
   ServerSettings,
   setStoredAdminToken,
@@ -91,12 +97,13 @@ import {
   triggerAgentUpdate,
   uninstallApp,
   updateServerSettings,
+  updateSecurityProfile,
   UserSummary,
   verifyMfa,
   WindowsUpdateInfo
 } from "./api";
 
-type View = "devices" | "device-detail" | "downloads" | "settings" | "users" | "audit-log";
+type View = "devices" | "device-detail" | "downloads" | "settings" | "users" | "audit-log" | "security-profiles";
 type StatusFilter = "all" | "online" | "offline" | "warning";
 type DetailTab = "overview" | "specs" | "performance" | "network" | "applications" | "updates" | "terminal" | "activity";
 type SortField = "deviceName" | "status" | "activeUser" | "ipAddress" | "cpu" | "agentVersion" | "lastSeen";
@@ -328,6 +335,24 @@ export function App() {
   const [auditPage, setAuditPage] = useState(1);
   const [auditLoading, setAuditLoading] = useState(false);
   const auditPageSize = 50;
+
+  // Güvenlik Profilleri (Admin) state
+  const emptySecurityProfileForm: SecurityProfileInput = {
+    name: "",
+    agentDisplayName: "",
+    iconBase64: "",
+    restrictTrayMenu: false,
+    requireDashboardPassword: false,
+    dashboardPassword: "",
+    requireExitPassword: false,
+    exitPassword: "",
+    requireUninstallPassword: false,
+    uninstallPassword: ""
+  };
+  const [securityProfiles, setSecurityProfiles] = useState<SecurityProfile[]>([]);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [profileForm, setProfileForm] = useState<SecurityProfileInput>(emptySecurityProfileForm);
+  const [savingProfile, setSavingProfile] = useState(false);
 
   // Live Activity Event Logs
   const [activityLogs, setActivityLogs] = useState<{ id: string; text: string; time: string; level: "info" | "success" | "warn" }[]>([]);
@@ -742,6 +767,90 @@ export function App() {
     }
   }
 
+  async function refreshSecurityProfiles() {
+    try {
+      setSecurityProfiles(await listSecurityProfiles());
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Güvenlik profilleri alınamadı.");
+    }
+  }
+
+  function handleEditProfile(profile: SecurityProfile) {
+    setEditingProfileId(profile.id);
+    setProfileForm({
+      name: profile.name,
+      agentDisplayName: profile.agentDisplayName ?? "",
+      iconBase64: profile.iconBase64 ?? "",
+      restrictTrayMenu: profile.restrictTrayMenu,
+      requireDashboardPassword: profile.requireDashboardPassword,
+      dashboardPassword: "",
+      requireExitPassword: profile.requireExitPassword,
+      exitPassword: "",
+      requireUninstallPassword: profile.requireUninstallPassword,
+      uninstallPassword: ""
+    });
+  }
+
+  function handleCancelEditProfile() {
+    setEditingProfileId(null);
+    setProfileForm(emptySecurityProfileForm);
+  }
+
+  function handleIconFileChange(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // "data:image/png;base64,XXXX" -> sadece base64 kısmını sakla
+      const base64 = result.split(",")[1] ?? "";
+      setProfileForm((prev) => ({ ...prev, iconBase64: base64 }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function handleSaveProfile(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingProfile(true);
+    try {
+      if (editingProfileId) {
+        await updateSecurityProfile(editingProfileId, profileForm);
+        addActivityLog(`Güvenlik profili güncellendi: ${profileForm.name}`, "success");
+      } else {
+        await createSecurityProfile(profileForm);
+        addActivityLog(`Güvenlik profili oluşturuldu: ${profileForm.name}`, "success");
+      }
+      handleCancelEditProfile();
+      await refreshSecurityProfiles();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Profil kaydedilemedi.");
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function handleDeleteProfile(profile: SecurityProfile) {
+    try {
+      await deleteSecurityProfile(profile.id);
+      if (editingProfileId === profile.id) {
+        handleCancelEditProfile();
+      }
+      await refreshSecurityProfiles();
+      addActivityLog(`Güvenlik profili silindi: ${profile.name}`, "warn");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Profil silinemedi.");
+    }
+  }
+
+  async function handleAssignSecurityProfile(deviceId: string, securityProfileId: string) {
+    try {
+      await assignSecurityProfile(deviceId, securityProfileId || null);
+      setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, securityProfileId: securityProfileId || null } : d)));
+      showToast("Güvenlik profili güncellendi.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Güvenlik profili atanamadı.");
+    }
+  }
+
   function addActivityLog(text: string, level: "info" | "success" | "warn" = "info") {
     const time = new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     setActivityLogs(prev => [{ id: Math.random().toString(36).substring(2, 9), text, time, level }, ...prev.slice(0, 49)]);
@@ -828,6 +937,7 @@ export function App() {
         refreshServerMetrics();
         if (me.role === "Admin") {
           refreshSettings();
+          refreshSecurityProfiles();
         }
       } catch {
         if (!cancelled) handleLogout();
@@ -850,6 +960,7 @@ export function App() {
     if (!isAuthenticated || currentUser?.role !== "Admin") return;
     if (view === "users") refreshUsers();
     if (view === "audit-log") refreshAuditLog(1);
+    if (view === "security-profiles") refreshSecurityProfiles();
   }, [isAuthenticated, currentUser?.role, view]);
 
   function showToast(message: string) {
@@ -1381,6 +1492,14 @@ export function App() {
                 title="Denetim Logu"
               >
                 <ScrollText size={18} />
+              </button>
+
+              <button
+                className={`rail-btn ${view === "security-profiles" ? "active" : ""}`}
+                onClick={() => setView("security-profiles")}
+                title="Güvenlik Profilleri"
+              >
+                <Lock size={18} />
               </button>
             </>
           )}
@@ -1960,6 +2079,21 @@ export function App() {
                           <span className="shield-tag">🛡️ LocalSystem Destekli</span>
                         </span>
                       </div>
+                      {currentUser?.role === "Admin" && (
+                        <div className="bento-spec-item">
+                          <span className="bento-spec-label">Güvenlik Profili</span>
+                          <select
+                            className="form-input"
+                            value={selectedDevice.securityProfileId ?? ""}
+                            onChange={(e) => handleAssignSecurityProfile(selectedDevice.id, e.target.value)}
+                          >
+                            <option value="">Yok (kısıtlama yok)</option>
+                            {securityProfiles.map((p) => (
+                              <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -3592,6 +3726,193 @@ export function App() {
                 <button className="btn-secondary" disabled={auditLoading || auditPage * auditPageSize >= auditTotal} onClick={() => refreshAuditLog(auditPage + 1)}>
                   Sonraki
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* View 6: Güvenlik Profilleri (Admin) */}
+        {view === "security-profiles" && currentUser?.role === "Admin" && (
+          <div className="content-pane">
+            <div className="content-card">
+              <h2 className="content-card-title">{editingProfileId ? "Profili düzenle" : "Yeni güvenlik profili"}</h2>
+              <p className="content-card-copy">
+                Ajanın görünen adı/ikonu ve Durum Paneli/Çıkış/Kaldırma işlemleri için şifre korumaları. Bir cihaza
+                profil atandığında, "Tray menüsünü kısıtla" açıksa sağ tık menüsü sadece Durum Paneli ve Çıkış'ı gösterir.
+              </p>
+
+              <form onSubmit={handleSaveProfile} className="settings-form">
+                <div className="form-group">
+                  <label className="form-label">Profil adı</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={profileForm.name}
+                    onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Ajan görünen adı</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="NexMote Agent (varsayılan)"
+                    value={profileForm.agentDisplayName}
+                    onChange={(e) => setProfileForm({ ...profileForm, agentDisplayName: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Ajan ikonu</label>
+                  <input
+                    type="file"
+                    accept="image/png,image/x-icon,image/vnd.microsoft.icon"
+                    className="form-input"
+                    onChange={(e) => handleIconFileChange(e.target.files?.[0] ?? null)}
+                  />
+                  {profileForm.iconBase64 && (
+                    <img
+                      src={`data:image/png;base64,${profileForm.iconBase64}`}
+                      alt="İkon önizleme"
+                      style={{ width: 32, height: 32, marginTop: 8, borderRadius: 6 }}
+                    />
+                  )}
+                </div>
+
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.restrictTrayMenu}
+                      onChange={(e) => setProfileForm({ ...profileForm, restrictTrayMenu: e.target.checked })}
+                    />
+                    Tray menüsünü kısıtla (sadece Durum Paneli + Çıkış)
+                  </label>
+                </div>
+
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.requireDashboardPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, requireDashboardPassword: e.target.checked })}
+                    />
+                    Durum Panelini açmak şifre istesin
+                  </label>
+                </div>
+                {profileForm.requireDashboardPassword && (
+                  <div className="form-group">
+                    <label className="form-label">Durum Paneli şifresi</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
+                      value={profileForm.dashboardPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, dashboardPassword: e.target.value })}
+                    />
+                  </div>
+                )}
+
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.requireExitPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, requireExitPassword: e.target.checked })}
+                    />
+                    Ajanı kapatmak (Çıkış) şifre istesin
+                  </label>
+                </div>
+                {profileForm.requireExitPassword && (
+                  <div className="form-group">
+                    <label className="form-label">Çıkış şifresi</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
+                      value={profileForm.exitPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, exitPassword: e.target.value })}
+                    />
+                  </div>
+                )}
+
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.requireUninstallPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, requireUninstallPassword: e.target.checked })}
+                    />
+                    Ajanı kaldırmak şifre istesin
+                  </label>
+                </div>
+                {profileForm.requireUninstallPassword && (
+                  <div className="form-group">
+                    <label className="form-label">Kaldırma şifresi</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
+                      value={profileForm.uninstallPassword}
+                      onChange={(e) => setProfileForm({ ...profileForm, uninstallPassword: e.target.value })}
+                    />
+                  </div>
+                )}
+
+                <div className="row-action-group">
+                  <button type="submit" className="btn-primary" data-width="fixed" disabled={savingProfile}>
+                    <Lock size={14} />
+                    {savingProfile ? "Kaydediliyor..." : editingProfileId ? "Profili Güncelle" : "Profil Oluştur"}
+                  </button>
+                  {editingProfileId && (
+                    <button type="button" className="btn-secondary" onClick={handleCancelEditProfile}>
+                      İptal
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className="content-card">
+              <h2 className="content-card-title">Profiller ({securityProfiles.length})</h2>
+              <div className="op-table-container">
+                <table className="op-table">
+                  <thead>
+                    <tr>
+                      <th>Ad</th>
+                      <th>Ajan adı</th>
+                      <th>Tray kısıtlı</th>
+                      <th>Şifreler</th>
+                      <th>Aksiyonlar</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {securityProfiles.map((profile) => (
+                      <tr key={profile.id}>
+                        <td>{profile.name}</td>
+                        <td>{profile.agentDisplayName || "—"}</td>
+                        <td>{profile.restrictTrayMenu ? "Evet" : "Hayır"}</td>
+                        <td>
+                          {[
+                            profile.requireDashboardPassword && "Panel",
+                            profile.requireExitPassword && "Çıkış",
+                            profile.requireUninstallPassword && "Kaldırma"
+                          ].filter(Boolean).join(", ") || "—"}
+                        </td>
+                        <td>
+                          <div className="row-action-group">
+                            <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditProfile(profile)}>
+                              <KeyRound size={14} />
+                            </button>
+                            <button className="icon-action-btn" title="Sil" onClick={() => handleDeleteProfile(profile)}>
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>

@@ -154,7 +154,8 @@ public sealed record DeviceSummary(
     List<InstalledAppInfo>? InstalledApps = null,
     List<WindowsUpdateInfo>? WindowsUpdates = null,
     string? SerialNumber = null,
-    HardwareInventoryInfo? HardwareDetails = null);
+    HardwareInventoryInfo? HardwareDetails = null,
+    Guid? SecurityProfileId = null);
 
 /// <summary>
 /// İstemci üzerinde çalıştırılan uzak komutların (CMD/PowerShell) denetim (audit) kaydı kontratı.

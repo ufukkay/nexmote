@@ -1,7 +1,12 @@
 using System.Diagnostics;
+using System.Net.Http.Json;
 using System.Security.Principal;
 using System.ServiceProcess;
+using System.Text.Json;
 using Microsoft.Win32;
+using NexMote.Shared.Contracts;
+using NexMote.Shared.Identity;
+using NexMote.Shared.Network;
 
 namespace NexMote.Cleaner;
 
@@ -15,6 +20,11 @@ internal static class Program
         var isSilent = args.Any(a => a.Equals("--silent", StringComparison.OrdinalIgnoreCase) ||
                                      a.Equals("/quiet", StringComparison.OrdinalIgnoreCase) ||
                                      a.Equals("/qn", StringComparison.OrdinalIgnoreCase));
+
+        // Script'li/yetkili kaldırma için: --password=<sifre> (silent modda etkileşimli soru sorulamaz)
+        var passwordArg = args
+            .Select(a => a.StartsWith("--password=", StringComparison.OrdinalIgnoreCase) ? a["--password=".Length..] : null)
+            .FirstOrDefault(v => v is not null);
 
         var fromTemp = args.Any(a => a.Equals("--from-temp", StringComparison.OrdinalIgnoreCase));
 
@@ -62,6 +72,21 @@ internal static class Program
                     Process.Start(psi);
                 }
                 catch { }
+            }
+            return;
+        }
+
+        // 2.5 Kurumsal Kaldırma Koruması: cihaza atanmış bir güvenlik profili varsa ve kaldırma şifresi
+        // istiyorsa, sunucuda doğrulanmadan devam edilmez (fail-closed — ağ/sunucu erişilemezse de durur).
+        if (!VerifyUninstallProtectionAsync(passwordArg, isSilent).GetAwaiter().GetResult())
+        {
+            if (!isSilent)
+            {
+                MessageBox.Show(
+                    "Kaldırma işlemi iptal edildi: şifre doğrulanamadı veya sunucuya ulaşılamadı.",
+                    "NexMote Tam Kaldırıcı & Derin Temizleyici",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
             return;
         }
@@ -122,6 +147,144 @@ internal static class Program
 
         // 7. Masaüstü ve Başlat Menüsü Kısayollarını Temizle
         CleanShortcuts();
+    }
+
+    /// <summary>
+    /// Cihaza atanmış bir güvenlik profili "kaldırma şifresi" istiyorsa, kullanıcıdan (veya <c>--password=</c>
+    /// argümanından) alınan şifreyi sunucuda doğrular. Profil yoksa/kısıtlama kapalıysa true (izinli) döner.
+    /// Doğrulanamazsa (yanlış şifre, ağ/sunucu erişilemez, kimlik dosyası yok) false döner — fail-closed.
+    /// </summary>
+    private static async Task<bool> VerifyUninstallProtectionAsync(string? passwordArg, bool isSilent)
+    {
+        DeviceIdentity? identity;
+        try
+        {
+            identity = new DeviceIdentityStore().Load();
+        }
+        catch
+        {
+            identity = null;
+        }
+
+        // Ajan hiç kaydolmamış/kimliği bulunamıyorsa koruyacak bir profil de yok demektir — engellemeye gerek yok.
+        if (identity is null)
+        {
+            return true;
+        }
+
+        var serverUrl = LoadServerUrl();
+
+        AgentSecurityProfileResponse? profile;
+        try
+        {
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
+            var url = $"{serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security-profile?agentToken={Uri.EscapeDataString(identity.AgentToken)}";
+            var response = await http.GetAsync(url);
+            profile = response.IsSuccessStatusCode ? await response.Content.ReadFromJsonAsync<AgentSecurityProfileResponse>() : null;
+        }
+        catch
+        {
+            // Sunucuya ulaşılamıyor — koruma gerektirip gerektirmediğini bilemeyiz, güvenli taraf: devam etme.
+            return false;
+        }
+
+        if (profile?.RequireUninstallPassword != true)
+        {
+            return true;
+        }
+
+        if (isSilent)
+        {
+            // Silent modda etkileşimli soru sorulamaz — sadece --password= argümanıyla geçilebilir.
+            return !string.IsNullOrEmpty(passwordArg) && await VerifyPasswordAsync(serverUrl, identity, passwordArg);
+        }
+
+        if (!string.IsNullOrEmpty(passwordArg) && await VerifyPasswordAsync(serverUrl, identity, passwordArg))
+        {
+            return true;
+        }
+
+        while (true)
+        {
+            var password = PromptForPassword();
+            if (password is null) return false; // kullanıcı iptal etti
+
+            if (await VerifyPasswordAsync(serverUrl, identity, password))
+            {
+                return true;
+            }
+
+            MessageBox.Show("Şifre hatalı.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private static async Task<bool> VerifyPasswordAsync(string serverUrl, DeviceIdentity identity, string password)
+    {
+        try
+        {
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
+            var url = $"{serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security/verify";
+            var response = await http.PostAsJsonAsync(url, new SecurityVerifyRequest(identity.AgentToken, "uninstall", password));
+            if (!response.IsSuccessStatusCode) return false;
+            var result = await response.Content.ReadFromJsonAsync<SecurityVerifyResponse>();
+            return result?.Ok == true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? PromptForPassword()
+    {
+        using var form = new Form
+        {
+            Text = "Ajanı Kaldır",
+            Width = 380,
+            Height = 170,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            TopMost = true
+        };
+
+        var label = new Label { Text = "Ajanı kaldırmak için şifre girin:", Left = 16, Top = 16, Width = 336, Height = 40 };
+        var textBox = new TextBox { Left = 16, Top = 58, Width = 336, PasswordChar = '●' };
+        var okButton = new Button { Text = "Tamam", Left = 196, Top = 92, Width = 75, DialogResult = DialogResult.OK };
+        var cancelButton = new Button { Text = "İptal", Left = 277, Top = 92, Width = 75, DialogResult = DialogResult.Cancel };
+
+        form.Controls.Add(label);
+        form.Controls.Add(textBox);
+        form.Controls.Add(okButton);
+        form.Controls.Add(cancelButton);
+        form.AcceptButton = okButton;
+        form.CancelButton = cancelButton;
+
+        return form.ShowDialog() == DialogResult.OK ? textBox.Text : null;
+    }
+
+    /// <summary>Windows Servisi/Tray ile aynı kaynaktan (%ProgramData%\NexMote\Agent\appsettings.json) sunucu URL'ini okur.</summary>
+    private static string LoadServerUrl()
+    {
+        try
+        {
+            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var path = Path.Combine(programData, "NexMote", "Agent", "appsettings.json");
+            if (File.Exists(path))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (doc.RootElement.TryGetProperty("Agent", out var agent) &&
+                    agent.TryGetProperty("ServerUrl", out var prop) &&
+                    prop.GetString() is { Length: > 0 } url)
+                {
+                    return NexMoteHttp.EnforceProductionUrl(url);
+                }
+            }
+        }
+        catch { }
+
+        return "https://nexmote.com";
     }
 
     private static bool IsAdministrator()
