@@ -53,6 +53,11 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<ActivityLogEntity> ActivityLogs => Set<ActivityLogEntity>();
 
+    /// <summary>
+    /// E-posta ile gönderilen kullanıcı davetleri (kabul edilene kadar geçerli, tek kullanımlık token'lar).
+    /// </summary>
+    public DbSet<UserInviteEntity> UserInvites => Set<UserInviteEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -113,6 +118,14 @@ public sealed class AppDbContext : DbContext
             entity.HasKey(a => a.Id);
             entity.HasIndex(a => a.UserId);
             entity.HasIndex(a => a.CreatedAt);
+        });
+
+        // Kullanıcı daveti token hash ve kullanıcı indeksleri
+        modelBuilder.Entity<UserInviteEntity>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+            entity.HasIndex(i => i.TokenHash).IsUnique();
+            entity.HasIndex(i => i.UserId);
         });
     }
 }
@@ -251,6 +264,28 @@ public sealed class ServerSettingEntity
 
     /// <summary>Son ayar güncelleme zamanı.</summary>
     public DateTimeOffset UpdatedAt { get; set; }
+
+    /// <summary>SMTP sunucu adresi (örn. smtp.hostinger.com) — davet/test e-postaları için.</summary>
+    [MaxLength(256)]
+    public string? SmtpHost { get; set; }
+
+    /// <summary>SMTP port (varsayılan 465 — implicit SSL).</summary>
+    public int SmtpPort { get; set; } = 465;
+
+    /// <summary>SMTP kullanıcı adı (genelde gönderen e-posta adresiyle aynı).</summary>
+    [MaxLength(256)]
+    public string? SmtpUsername { get; set; }
+
+    /// <summary>Data Protection ile şifrelenmiş SMTP şifresi — düz metin asla saklanmaz.</summary>
+    public string? SmtpPasswordEncrypted { get; set; }
+
+    /// <summary>Giden e-postalarda "Kimden" adresi.</summary>
+    [MaxLength(256)]
+    public string? SmtpFromAddress { get; set; }
+
+    /// <summary>Giden e-postalarda görünen gönderen adı.</summary>
+    [MaxLength(128)]
+    public string? SmtpFromName { get; set; }
 }
 
 /// <summary>
@@ -437,4 +472,32 @@ public sealed class ActivityLogEntity
     public bool Success { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// E-posta ile gönderilen bir kullanıcı davetinin (Admin veya Teknisyen) kabul edilene kadar geçerli
+/// tek kullanımlık token'ı. Kabul edilince hesabın gerçek şifresi ayarlanır ve davet "kullanılmış" sayılır.
+/// </summary>
+public sealed class UserInviteEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    /// <summary>Davet edilen (rastgele/kullanılamaz şifre hash'iyle önceden oluşturulmuş) kullanıcı.</summary>
+    public Guid UserId { get; set; }
+
+    /// <summary>Token'ın SHA-256 hash'i — düz metin token asla veritabanına yazılmaz.</summary>
+    [Required]
+    [MaxLength(128)]
+    public string TokenHash { get; set; } = string.Empty;
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>Dolu ise davet kabul edilmiş, kullanıcı kendi şifresini belirlemiştir.</summary>
+    public DateTimeOffset? AcceptedAt { get; set; }
+
+    /// <summary>Daveti gönderen admin kullanıcının kimliği.</summary>
+    public Guid InvitedByUserId { get; set; }
 }

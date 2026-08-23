@@ -59,6 +59,18 @@ public sealed record UserSummary(
 /// <summary>Kullanıcının rolünü değiştirme isteği.</summary>
 public sealed record SetRoleRequest(string Role);
 
+/// <summary>Admin tarafından yeni kullanıcıyı e-posta ile davet etme isteği.</summary>
+public sealed record InviteUserRequest(string Email, string DisplayName, string Role);
+
+/// <summary>Davet kabul ekranının göstereceği önizleme bilgisi.</summary>
+public sealed record InvitePreviewResponse(string Email, string DisplayName, string Role);
+
+/// <summary>Davet edilen kişinin kendi şifresini belirleyip daveti kabul etme isteği.</summary>
+public sealed record AcceptInviteRequest(string Password);
+
+/// <summary>SMTP test e-postası gönderme isteği.</summary>
+public sealed record SmtpTestRequest(string ToEmail);
+
 /// <summary>Denetim logu (Audit Log) tekil kaydı.</summary>
 public sealed record ActivityLogEntry(
     Guid Id,
@@ -80,9 +92,21 @@ public sealed record ActivityLogEntry(
 /// <param name="HeartbeatSeconds">Heartbeat gönderim periyodu (Saniye).</param>
 /// <param name="DefaultLocationCode">Yeni kaydolan cihazlara atanacak varsayılan lokasyon kodu.</param>
 /// <param name="TechnicianKey">Teknisyen anahtarı (opsiyonel/geriye uyumluluk).</param>
+/// <param name="SmtpHost">SMTP sunucu adresi (örn. smtp.hostinger.com).</param>
+/// <param name="SmtpPort">SMTP port (varsayılan 465).</param>
+/// <param name="SmtpUsername">SMTP kullanıcı adı.</param>
+/// <param name="SmtpPassword">SMTP şifresi — write-only: GET yanıtında her zaman boş döner, POST'ta boş bırakılırsa mevcut şifre korunur.</param>
+/// <param name="SmtpFromAddress">Giden e-postalarda "Kimden" adresi.</param>
+/// <param name="SmtpFromName">Giden e-postalarda görünen gönderen adı.</param>
 public sealed record ServerSettingsContract(
     string ServerUrl,
     string EnrollmentKey,
     int HeartbeatSeconds,
     string DefaultLocationCode,
-    string TechnicianKey = "");
+    string TechnicianKey = "",
+    string? SmtpHost = null,
+    int SmtpPort = 465,
+    string? SmtpUsername = null,
+    string? SmtpPassword = null,
+    string? SmtpFromAddress = null,
+    string? SmtpFromName = null);

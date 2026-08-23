@@ -52,6 +52,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import {
+  acceptInvite,
   ActivityLogEntry as AuditLogEntry,
   changePassword,
   checkUpdates,
@@ -69,10 +70,12 @@ import {
   executeDeviceCommand,
   getAuditLog,
   getCurrentUser,
+  getInvitePreview,
   getServerMetrics,
   getServerSettings,
   getStoredAdminToken,
   InstalledAppInfo,
+  inviteUser,
   listDevices,
   listDownloads,
   listUsers,
@@ -84,6 +87,7 @@ import {
   setStoredAdminToken,
   setupMfa,
   setUserRole,
+  testSmtp,
   triggerAgentUpdate,
   uninstallApp,
   updateServerSettings,
@@ -239,8 +243,11 @@ export function App() {
     serverUrl: "https://nexmote.com",
     enrollmentKey: "dev-enrollment-key",
     heartbeatSeconds: 20,
-    defaultLocationCode: "OFFICE"
+    defaultLocationCode: "OFFICE",
+    smtpPort: 465
   });
+  const [smtpTestEmail, setSmtpTestEmail] = useState("");
+  const [testingSmtp, setTestingSmtp] = useState(false);
 
   // Server Performance Metrics State
   const [serverMetrics, setServerMetrics] = useState<ServerMetrics | null>(null);
@@ -297,8 +304,23 @@ export function App() {
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserDisplayName, setNewUserDisplayName] = useState("");
   const [newUserRole, setNewUserRole] = useState<"Admin" | "Technician">("Technician");
+  const [newUserMode, setNewUserMode] = useState<"password" | "invite">("invite");
   const [creatingUser, setCreatingUser] = useState(false);
   const [createdUserCredentials, setCreatedUserCredentials] = useState<{ email: string; temporaryPassword: string } | null>(null);
+  const [invitedEmail, setInvitedEmail] = useState<string | null>(null);
+
+  // Davet Kabul ekranı state (public — URL'de /invite/{token} ile tetiklenir)
+  const inviteToken = useMemo(() => {
+    const match = window.location.pathname.match(/^\/invite\/([^/]+)/);
+    return match ? match[1] : null;
+  }, []);
+  const [inviteAccepted, setInviteAccepted] = useState(false);
+  const [invitePreview, setInvitePreview] = useState<{ email: string; displayName: string; role: "Admin" | "Technician" } | null>(null);
+  const [invitePreviewError, setInvitePreviewError] = useState("");
+  const [invitePassword, setInvitePassword] = useState("");
+  const [inviteConfirmPassword, setInviteConfirmPassword] = useState("");
+  const [inviteSubmitting, setInviteSubmitting] = useState(false);
+  const [inviteError, setInviteError] = useState("");
 
   // Denetim Logu (Admin) state
   const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([]);
@@ -598,18 +620,76 @@ export function App() {
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
     setCreatingUser(true);
+    setCreatedUserCredentials(null);
+    setInvitedEmail(null);
     try {
-      const result = await createUser(newUserEmail.trim(), newUserDisplayName.trim(), newUserRole);
-      setCreatedUserCredentials({ email: result.email, temporaryPassword: result.temporaryPassword });
+      if (newUserMode === "invite") {
+        const result = await inviteUser(newUserEmail.trim(), newUserDisplayName.trim(), newUserRole);
+        setInvitedEmail(result.email);
+        addActivityLog(`Davet gönderildi: ${result.email}`, "success");
+      } else {
+        const result = await createUser(newUserEmail.trim(), newUserDisplayName.trim(), newUserRole);
+        setCreatedUserCredentials({ email: result.email, temporaryPassword: result.temporaryPassword });
+        addActivityLog(`Yeni kullanıcı oluşturuldu: ${result.email}`, "success");
+      }
       setNewUserEmail("");
       setNewUserDisplayName("");
       setNewUserRole("Technician");
       await refreshUsers();
-      addActivityLog(`Yeni kullanıcı oluşturuldu: ${result.email}`, "success");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Kullanıcı oluşturulamadı.");
+      showToast(error instanceof Error ? error.message : "İşlem başarısız oldu.");
     } finally {
       setCreatingUser(false);
+    }
+  }
+
+  async function handleTestSmtp() {
+    if (!smtpTestEmail.trim()) {
+      showToast("Test e-postası için bir adres girin.");
+      return;
+    }
+    setTestingSmtp(true);
+    try {
+      await testSmtp(smtpTestEmail.trim());
+      showToast("Test e-postası gönderildi.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Test e-postası gönderilemedi.");
+    } finally {
+      setTestingSmtp(false);
+    }
+  }
+
+  async function handleAcceptInvite(e: React.FormEvent) {
+    e.preventDefault();
+    if (!inviteToken) return;
+    setInviteError("");
+
+    if (invitePassword.length < 8) {
+      setInviteError("Şifre en az 8 karakter olmalıdır.");
+      return;
+    }
+    if (invitePassword !== inviteConfirmPassword) {
+      setInviteError("Şifreler eşleşmiyor.");
+      return;
+    }
+
+    setInviteSubmitting(true);
+    try {
+      const result = await acceptInvite(inviteToken, invitePassword);
+      if (result.token) {
+        setStoredAdminToken(result.token, true);
+        window.history.replaceState(null, "", "/");
+        // isAuthenticated zaten true olabilir (aynı tarayıcıda eski bir oturum varsa) — bu durumda state
+        // değişmediği için kimlik yenileme effect'i tetiklenmez, o yüzden burada elle tazeliyoruz.
+        const me = await getCurrentUser();
+        setCurrentUser(me);
+        setInviteAccepted(true);
+        setIsAuthenticated(true);
+      }
+    } catch (error) {
+      setInviteError(error instanceof Error ? error.message : "Davet kabul edilemedi.");
+    } finally {
+      setInviteSubmitting(false);
     }
   }
 
@@ -724,6 +804,13 @@ export function App() {
       }
     } catch { }
   }
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    getInvitePreview(inviteToken)
+      .then(setInvitePreview)
+      .catch((error) => setInvitePreviewError(error instanceof Error ? error.message : "Davet geçersiz veya süresi dolmuş."));
+  }, [inviteToken]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -1012,6 +1099,88 @@ export function App() {
       else next.add(id);
       return next;
     });
+  }
+
+  // --- DAVET KABUL EKRANI (public, /invite/{token}) ---
+  if (inviteToken && !inviteAccepted) {
+    return (
+      <div className="login-container">
+        <div className="login-trust-panel">
+          <div className="login-trust-logo">
+            <div className="login-brand-mark">
+              <ShieldCheck size={20} color="#fff" />
+            </div>
+            <span>NexMote</span>
+          </div>
+          <div className="login-trust-info">
+            <h2 className="login-trust-heading">Hesabınızı etkinleştirin.</h2>
+            {invitePreview && (
+              <div className="login-trust-item">
+                <Shield size={14} color="#94a3b8" />
+                <span>{invitePreview.email} · {invitePreview.role === "Admin" ? "Yönetici" : "Teknisyen"}</span>
+              </div>
+            )}
+          </div>
+          <div className="login-footnote">© 2026 NexMote · Tüm oturumlar denetim günlüğüne kaydedilir.</div>
+        </div>
+
+        <div className="login-form-panel">
+          <div className="login-box">
+            {invitePreviewError ? (
+              <>
+                <h1 className="login-title">Davet geçersiz</h1>
+                <p className="login-subtitle">{invitePreviewError}</p>
+              </>
+            ) : !invitePreview ? (
+              <p className="login-subtitle">Davet doğrulanıyor...</p>
+            ) : (
+              <>
+                <div>
+                  <h1 className="login-title">Hoş geldiniz</h1>
+                  <p className="login-subtitle">{invitePreview.displayName}, devam etmek için bir şifre belirleyin.</p>
+                </div>
+
+                <form onSubmit={handleAcceptInvite} className="login-form">
+                  {inviteError && <div className="login-error-text">{inviteError}</div>}
+
+                  <div className="form-group">
+                    <label className="form-label">Yeni şifre</label>
+                    <div className="form-input-wrapper">
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={invitePassword}
+                        onChange={(e) => setInvitePassword(e.target.value)}
+                        minLength={8}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Şifreyi doğrulayın</label>
+                    <div className="form-input-wrapper">
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={inviteConfirmPassword}
+                        onChange={(e) => setInviteConfirmPassword(e.target.value)}
+                        minLength={8}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <button type="submit" className="btn-primary" data-size="lg" disabled={inviteSubmitting}>
+                    {inviteSubmitting ? "İşleniyor..." : "Hesabı Etkinleştir ve Giriş Yap"}
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // --- LOGIN VIEW ---
@@ -3045,6 +3214,98 @@ export function App() {
             </div>
             )}
 
+            {currentUser?.role === "Admin" && (
+            <div className="content-card">
+              <h2 className="content-card-title">E-posta (SMTP) ayarları</h2>
+              <p className="content-card-copy">
+                Kullanıcı davet e-postaları ve test e-postaları bu sunucu üzerinden gönderilir.
+              </p>
+
+              <form onSubmit={handleSaveSettings} className="settings-form">
+                <div className="form-group">
+                  <label className="form-label">SMTP sunucu adresi</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="smtp.hostinger.com"
+                    value={settings.smtpHost ?? ""}
+                    onChange={(e) => setSettings({ ...settings, smtpHost: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Port</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={settings.smtpPort ?? 465}
+                    onChange={(e) => setSettings({ ...settings, smtpPort: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Kullanıcı adı</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="admin@nexmote.com"
+                    value={settings.smtpUsername ?? ""}
+                    onChange={(e) => setSettings({ ...settings, smtpUsername: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Şifre</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    placeholder="Değiştirmek için doldurun, aksi halde boş bırakın"
+                    value={settings.smtpPassword ?? ""}
+                    onChange={(e) => setSettings({ ...settings, smtpPassword: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Gönderen adresi</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    placeholder="admin@nexmote.com"
+                    value={settings.smtpFromAddress ?? ""}
+                    onChange={(e) => setSettings({ ...settings, smtpFromAddress: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Gönderen adı</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="NexMote"
+                    value={settings.smtpFromName ?? ""}
+                    onChange={(e) => setSettings({ ...settings, smtpFromName: e.target.value })}
+                  />
+                </div>
+
+                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={savingSettings}>
+                  <Save size={14} />
+                  {savingSettings ? "Kaydediliyor..." : "SMTP Ayarlarını Kaydet"}
+                </button>
+              </form>
+
+              <div className="settings-form" style={{ marginTop: "var(--space-4)" }}>
+                <div className="form-group">
+                  <label className="form-label">Test e-postası gönder</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    placeholder="test@ornek.com"
+                    value={smtpTestEmail}
+                    onChange={(e) => setSmtpTestEmail(e.target.value)}
+                  />
+                </div>
+                <button type="button" className="btn-secondary" onClick={handleTestSmtp} disabled={testingSmtp}>
+                  {testingSmtp ? "Gönderiliyor..." : "Test E-postası Gönder"}
+                </button>
+              </div>
+            </div>
+            )}
+
             {/* Hesap Ayarları — herkes için (Admin + Teknisyen) */}
             <div className="content-card">
               <h2 className="content-card-title">Hesap ayarları</h2>
@@ -3155,13 +3416,37 @@ export function App() {
           <div className="content-pane">
             <div className="content-card">
               <h2 className="content-card-title">Yeni kullanıcı oluştur</h2>
-              <p className="content-card-copy">Yeni bir Admin veya Teknisyen hesabı için tek seferlik geçici şifre üretilir.</p>
+              <p className="content-card-copy">
+                {newUserMode === "invite"
+                  ? "Yeni bir Admin veya Teknisyen hesabına, kendi şifresini belirleyebilecekleri bir davet e-postası gönderilir."
+                  : "Yeni bir Admin veya Teknisyen hesabı için tek seferlik geçici şifre üretilir."}
+              </p>
+
+              <div className="login-options-row" style={{ marginBottom: "var(--space-3)" }}>
+                <label className="remember-label">
+                  <input type="radio" checked={newUserMode === "invite"} onChange={() => setNewUserMode("invite")} />
+                  E-posta ile davet et
+                </label>
+                <label className="remember-label">
+                  <input type="radio" checked={newUserMode === "password"} onChange={() => setNewUserMode("password")} />
+                  Geçici şifre oluştur
+                </label>
+              </div>
 
               {createdUserCredentials && (
                 <div className="stale-data-notice">
                   <AlertCircle size={14} />
                   <span>
                     <strong>{createdUserCredentials.email}</strong> için geçici şifre: <code>{createdUserCredentials.temporaryPassword}</code> — bu şifreyi güvenli bir kanaldan kullanıcıya iletin, bir daha gösterilmeyecek.
+                  </span>
+                </div>
+              )}
+
+              {invitedEmail && (
+                <div className="stale-data-notice">
+                  <AlertCircle size={14} />
+                  <span>
+                    <strong>{invitedEmail}</strong> adresine davet e-postası gönderildi.
                   </span>
                 </div>
               )}
@@ -3199,7 +3484,7 @@ export function App() {
                 </div>
                 <button type="submit" className="btn-primary" data-width="fixed" disabled={creatingUser}>
                   <UsersIcon size={14} />
-                  {creatingUser ? "Oluşturuluyor..." : "Kullanıcı Oluştur"}
+                  {creatingUser ? "İşleniyor..." : newUserMode === "invite" ? "Davet Gönder" : "Kullanıcı Oluştur"}
                 </button>
               </form>
             </div>

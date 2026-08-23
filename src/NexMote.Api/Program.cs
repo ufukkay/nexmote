@@ -59,6 +59,7 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services.AddSingleton<IPasswordHasher<UserEntity>, PasswordHasher<UserEntity>>();
 builder.Services.AddSingleton<TotpService>();
 builder.Services.AddSingleton<UserAuthService>();
+builder.Services.AddSingleton<EmailService>();
 
 // Web ön yüzü ve teknisyen istemcisi için CORS politikası
 builder.Services.AddCors(options =>
@@ -206,9 +207,30 @@ using (var scope = app.Services.CreateScope())
             );
             CREATE INDEX IF NOT EXISTS ""IX_ActivityLogs_UserId"" ON ""ActivityLogs"" (""UserId"");
             CREATE INDEX IF NOT EXISTS ""IX_ActivityLogs_CreatedAt"" ON ""ActivityLogs"" (""CreatedAt"");
+
+            CREATE TABLE IF NOT EXISTS ""UserInvites"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_UserInvites"" PRIMARY KEY,
+                ""UserId"" TEXT NOT NULL,
+                ""TokenHash"" TEXT NOT NULL,
+                ""CreatedAt"" TEXT NOT NULL,
+                ""ExpiresAt"" TEXT NOT NULL,
+                ""AcceptedAt"" TEXT NULL,
+                ""InvitedByUserId"" TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS ""IX_UserInvites_TokenHash"" ON ""UserInvites"" (""TokenHash"");
+            CREATE INDEX IF NOT EXISTS ""IX_UserInvites_UserId"" ON ""UserInvites"" (""UserId"");
         ");
     }
     catch { }
+
+    // SMTP ayar kolonları — ServerSettings tablosu EnsureCreated() ile daha önce oluşturulmuş bir
+    // veritabanında bu kolonlar yok, DeletedDevices/Users ile aynı ALTER TABLE deseni.
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpHost"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpPort"" INTEGER NOT NULL DEFAULT 465;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpUsername"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpPasswordEncrypted"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromAddress"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromName"" TEXT;"); } catch { }
 
     if (!db.ServerSettings.Any())
     {
@@ -265,6 +287,25 @@ app.MapPost("/api/auth/mfa/verify", (MfaVerifyRequest request, bool? rememberMe,
     var ip = http.Connection.RemoteIpAddress?.ToString();
     var response = auth.VerifyMfaStep2(request.ChallengeToken, request.Code, rememberMe ?? false, ip, http.Request.Headers.UserAgent.ToString());
     return response is null ? Results.Unauthorized() : Results.Ok(response);
+}).RequireRateLimiting("login");
+
+/// <summary>Davet önizlemesi (e-posta/rol) — davet kabul ekranı bu endpoint'i kullanır (public).</summary>
+app.MapGet("/api/invite/{token}", (string token, UserAuthService auth) =>
+{
+    var preview = auth.GetInvitePreview(token);
+    return preview is null
+        ? Results.NotFound(new { message = "Davet geçersiz, süresi dolmuş veya zaten kullanılmış." })
+        : Results.Ok(new InvitePreviewResponse(preview.Value.Email, preview.Value.DisplayName, preview.Value.Role));
+}).RequireRateLimiting("login");
+
+/// <summary>Daveti kabul eder: şifre belirlenir, hesap etkinleşir, otomatik oturum açılır (public).</summary>
+app.MapPost("/api/invite/{token}/accept", (string token, AcceptInviteRequest request, HttpContext http, UserAuthService auth) =>
+{
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+    var response = auth.AcceptInvite(token, request.Password, ip, http.Request.Headers.UserAgent.ToString());
+    return response is null
+        ? Results.BadRequest(new { message = "Davet geçersiz, süresi dolmuş veya zaten kullanılmış." })
+        : Results.Ok(response);
 }).RequireRateLimiting("login");
 
 /// <summary>
@@ -341,6 +382,37 @@ admin.MapPost("/admin/users", (CreateUserRequest request, ClaimsPrincipal actor,
     var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
     var result = auth.CreateUser(request.Email, request.DisplayName, request.Role, actingUserId);
     return result is null ? Results.BadRequest(new { message = "E-posta zaten kayıtlı veya rol geçersiz." }) : Results.Ok(result);
+});
+
+/// <summary>Yeni bir kullanıcıyı e-posta ile davet eder — geçici şifre göstermek yerine bir davet linki gönderir (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users/invite", async (InviteUserRequest request, ClaimsPrincipal actor, UserAuthService auth, EmailService email, IConfiguration config) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = auth.InviteUser(request.Email, request.DisplayName, request.Role, actingUserId);
+    if (result is null)
+    {
+        return Results.BadRequest(new { message = "E-posta zaten kayıtlı (ve daveti kabul edilmiş) ya da rol geçersiz." });
+    }
+
+    var baseUrl = config["PublicUrl"] ?? "https://nexmote.com";
+    var inviteUrl = $"{baseUrl.TrimEnd('/')}/invite/{result.Value.Token}";
+    var roleLabel = result.Value.Role == UserRoles.Admin ? "Admin" : "Teknisyen";
+    var (success, error) = await email.SendAsync(
+        result.Value.Email,
+        "NexMote'a Davet Edildiniz",
+        $"""
+        <p>Merhaba {System.Net.WebUtility.HtmlEncode(result.Value.DisplayName)},</p>
+        <p>NexMote uzaktan yönetim konsoluna <strong>{roleLabel}</strong> yetkisiyle davet edildiniz.</p>
+        <p>Hesabınızı etkinleştirmek ve kendi şifrenizi belirlemek için aşağıdaki bağlantıya tıklayın (7 gün geçerlidir):</p>
+        <p><a href="{inviteUrl}">{inviteUrl}</a></p>
+        """);
+
+    if (!success)
+    {
+        return Results.BadRequest(new { message = error });
+    }
+
+    return Results.Ok(new { message = "Davet e-postası gönderildi.", email = result.Value.Email });
 });
 
 /// <summary>Kullanıcının rolünü değiştirir (Admin Yetkisi Gerekir).</summary>
@@ -456,13 +528,17 @@ admin.MapGet("/settings", (IDbContextFactory<AppDbContext> dbFactory) =>
 {
     using var db = dbFactory.CreateDbContext();
     var setting = db.ServerSettings.AsNoTracking().First();
-    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode));
+    return Results.Ok(new ServerSettingsContract(
+        setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
+        SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
+        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName));
 });
 
 /// <summary>
-/// Sunucu genel ayarlarını güncelleme (Admin Yetkisi Gerekir).
+/// Sunucu genel ayarlarını güncelleme (Admin Yetkisi Gerekir). SmtpPassword boş bırakılırsa mevcut
+/// (şifreli) SMTP şifresi korunur — GET yanıtı asla düz metin şifreyi içermediği için "değiştirme" varsayılan davranıştır.
 /// </summary>
-admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<AppDbContext> dbFactory) =>
+admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<AppDbContext> dbFactory, EmailService email) =>
 {
     using var db = dbFactory.CreateDbContext();
     var setting = db.ServerSettings.First();
@@ -470,10 +546,32 @@ admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<Ap
     setting.EnrollmentKey = request.EnrollmentKey;
     setting.HeartbeatSeconds = Math.Max(5, request.HeartbeatSeconds);
     setting.DefaultLocationCode = request.DefaultLocationCode;
+    setting.SmtpHost = request.SmtpHost;
+    setting.SmtpPort = request.SmtpPort <= 0 ? 465 : request.SmtpPort;
+    setting.SmtpUsername = request.SmtpUsername;
+    setting.SmtpFromAddress = request.SmtpFromAddress;
+    setting.SmtpFromName = request.SmtpFromName;
+    if (!string.IsNullOrWhiteSpace(request.SmtpPassword))
+    {
+        setting.SmtpPasswordEncrypted = email.EncryptPassword(request.SmtpPassword);
+    }
     setting.UpdatedAt = DateTimeOffset.UtcNow;
 
     db.SaveChanges();
-    return Results.Ok(new ServerSettingsContract(setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode));
+    return Results.Ok(new ServerSettingsContract(
+        setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
+        SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
+        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName));
+});
+
+/// <summary>SMTP ayarlarını (kayıtlı olan) test etmek için verilen adrese bir test e-postası gönderir (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/settings/smtp/test", async (SmtpTestRequest request, EmailService email) =>
+{
+    var (success, error) = await email.SendAsync(
+        request.ToEmail,
+        "NexMote - Test E-postası",
+        "<p>Bu, NexMote sunucunuzun SMTP yapılandırmasını doğrulamak için gönderilen bir test e-postasıdır.</p>");
+    return success ? Results.Ok(new { message = "Test e-postası gönderildi." }) : Results.BadRequest(new { message = error });
 });
 
 /// <summary>

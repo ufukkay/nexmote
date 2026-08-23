@@ -209,6 +209,19 @@ SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 - Herkese açık kalanlar: `GET /health`, `GET /api/downloads`, `GET /downloads/{file}`, `GET /api/updates/check` (agent/technician self-update akışı bunlara auth olmadan erişebilmeli).
 - **Sırlar asla repoya işlenmez.** `Enrollment:Key` ve bootstrap `Admin:Password`, sunucuda `/etc/systemd/system/nexmote.service.d/override.conf` içinde `Environment=` satırları olarak tutulur (bkz. `docs/server-credentials.md`). `Admin:ApiKey` **artık kullanılmıyor**, config'ten kaldırıldı.
 - **EF Core / SQLite tuzağı:** SQLite provider'ı `DateTimeOffset` kolonlarını ne `ORDER BY`'da ne de bazı bileşik `WHERE` ifadelerinde SQL'e çeviremiyor ("could not be translated" / "does not support expressions of type 'DateTimeOffset' in ORDER BY"). Bu yüzden oturum token doğrulaması önce `TokenHash` ile tek satır çekip geri kalan koşulları (`ExpiresAt`, `RevokedAt` vb.) C# tarafında kontrol ediyor; denetim logu sıralaması da `DeviceRegistry.List()` ile aynı desende önce `.ToList()` sonra client-side `OrderByDescending` yapıyor. Yeni bir DateTimeOffset alanına göre filtre/sıralama eklerken bu deseni takip edin, yoksa runtime'da 500 alırsınız.
+- **Kendi kendini kilitleme koruması:** `UserAuthService.SetActive`/`SetRole`, bir kullanıcının **kendi hesabını** devre dışı bırakmasını veya kendi rolünü Admin'den düşürmesini sunucu tarafında engeller (web UI'da da ilgili satırın kontrolleri devre dışı bırakılır). 2026-08-23'te canlıda gerçekten yaşanan bir kilitlenme olayından sonra eklendi — Kullanıcı Yönetimi tablosunda kendi satırı için ayırt edici bir koruma yoktu.
+
+---
+
+## 📧 SMTP E-posta Gönderimi ve E-posta ile Kullanıcı Daveti
+
+Yeni kullanıcı oluştururken artık iki seçenek var: eski "tek seferlik geçici şifre" akışı (`POST /api/admin/users`) hâlâ duruyor, yanında **e-posta ile davet** akışı eklendi (`POST /api/admin/users/invite`) — davet edilen kişi kendi şifresini belirliyor, admin şifre iletmek zorunda kalmıyor.
+
+- **SMTP config (`ServerSettings` tablosu):** Host/Port/Username/FromAddress/FromName + Data Protection ile şifrelenmiş `SmtpPasswordEncrypted` (MFA secret'larıyla aynı desen, ayrı bir `IDataProtector` purpose string'i: `"NexMote.Api.SmtpPassword.v1"`). `GET /api/settings` yanıtında şifre **asla** dönmez (write-only) — web formunda "boş bırakılırsa mevcut şifre korunur" davranışı bu yüzden var.
+- **Gönderim:** `EmailService` (`Services/EmailService.cs`), `MailKit` (`SecureSocketOptions.Auto` — hem 465/implicit-SSL hem 587/STARTTLS'i otomatik halleder; eski `System.Net.Mail.SmtpClient` 465'te güvenilir değil, bu yüzden tercih edilmedi).
+- **Davet mekanizması:** Davet edilen kullanıcı **hemen** `Users` tablosuna eklenir (`IsActive=true`) ama `PasswordHash`'i 32-byte kriptografik rastgele bir değerin hash'idir — kimse bilmez/tahmin edemez, davet kabul edilene kadar hesap fiilen "kilitli"dir. Ayrı bir `UserInvites` tablosu (token hash, 7 gün geçerlilik, `AcceptedAt`) davet durumunu izler. Aynı (henüz kabul edilmemiş) e-postaya tekrar davet göndermek eski token'ı geçersiz kılıp yenisini üretir (yeniden gönderim).
+- **Kabul akışı:** `GET /api/invite/{token}` (public, önizleme) → `POST /api/invite/{token}/accept` (public, `{password}`) → şifreyi ayarlar, daveti "kullanılmış" işaretler, **otomatik oturum açar** (davet kabul eden kişi doğrudan uygulamaya girmiş olur). Web tarafında `App.tsx`, mount olduğunda `window.location.pathname`'in `/invite/` ile başlayıp başlamadığına bakıp ayrı bir "Hesabınızı Etkinleştirin" ekranı gösterir — bu kontrol bir kez hesaplanıp saklanır (`useMemo`), bu yüzden kabul başarılı olduktan sonra normal uygulamaya geçiş ayrı bir `inviteAccepted` state'i ile tetiklenir (URL'i `history.replaceState` ile temizlemek tek başına yetmez, React state'i de elle güncellemek gerekir).
+- **Test e-postası:** `POST /api/admin/settings/smtp/test` — her zaman **kayıtlı** SMTP config'ini kullanır (önce Ayarlar'dan Kaydet, sonra Test).
 
 ---
 
@@ -223,6 +236,10 @@ SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 | `GET` | `/api/auth/me` | **Bearer** | Giriş yapmış kullanıcının kimlik/rol/MFA durumu |
 | `POST` | `/api/account/password` \| `/mfa/setup` \| `/mfa/enable` \| `/mfa/disable` | **Bearer** | Kendi şifre/MFA yönetimi (herkes) |
 | `GET`/`POST` | `/api/admin/users*`, `GET /api/admin/audit-log` | **Bearer (Admin)** | Kullanıcı yönetimi ve denetim logu |
+| `POST` | `/api/admin/users/invite` | **Bearer (Admin)** | E-posta ile davet gönderir (geçici şifre yerine) |
+| `POST` | `/api/admin/settings/smtp/test` | **Bearer (Admin)** | Kayıtlı SMTP config'iyle test e-postası gönderir |
+| `GET` | `/api/invite/{token}` | — | Davet önizlemesi (davet kabul ekranı için) |
+| `POST` | `/api/invite/{token}/accept` | — | Daveti kabul eder, şifre belirler, otomatik oturum açar |
 | `POST` | `/api/agents/enroll` | EnrollmentKey | Yeni Windows Agent kayıt işlemi |
 | `POST` | `/api/agents/{id}/heartbeat` | AgentToken | Agent periyodik telemetri (gerçek CPU/RAM/Disk/AgentVersion dahil) |
 | `GET` | `/api/downloads` | — | MSI paket indirme kataloğunu döner |

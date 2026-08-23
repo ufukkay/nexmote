@@ -141,6 +141,12 @@ export type ServerSettings = {
   enrollmentKey: string;
   heartbeatSeconds: number;
   defaultLocationCode: string;
+  smtpHost?: string | null;
+  smtpPort?: number;
+  smtpUsername?: string | null;
+  smtpPassword?: string | null;
+  smtpFromAddress?: string | null;
+  smtpFromName?: string | null;
 };
 
 /**
@@ -372,6 +378,58 @@ export async function createUser(email: string, displayName: string, role: "Admi
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
     throw new Error(detail?.message ?? "Kullanıcı oluşturulamadı.");
+  }
+  return response.json();
+}
+
+/** Yeni kullanıcıyı e-posta ile davet eder — geçici şifre yerine bir davet linki gönderir (Admin). */
+export async function inviteUser(email: string, displayName: string, role: "Admin" | "Technician"): Promise<{ message: string; email: string }> {
+  const response = await fetch("/api/admin/users/invite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ email, displayName, role })
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Davet gönderilemedi.");
+  }
+  return response.json();
+}
+
+/** Kayıtlı SMTP ayarlarıyla verilen adrese test e-postası gönderir (Admin). */
+export async function testSmtp(toEmail: string): Promise<{ message: string }> {
+  const response = await fetch("/api/admin/settings/smtp/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ toEmail })
+  });
+  const detail = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(detail?.message ?? "Test e-postası gönderilemedi.");
+  }
+  return detail;
+}
+
+/** Davet önizlemesini getirir (public — davet kabul ekranı için). */
+export async function getInvitePreview(token: string): Promise<{ email: string; displayName: string; role: "Admin" | "Technician" }> {
+  const response = await fetch(`/api/invite/${token}`);
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Davet geçersiz veya süresi dolmuş.");
+  }
+  return response.json();
+}
+
+/** Daveti kabul eder — şifre belirler, hesabı etkinleştirir, oturum token'ı döner (public). */
+export async function acceptInvite(token: string, password: string): Promise<LoginResult> {
+  const response = await fetch(`/api/invite/${token}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password })
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Davet kabul edilemedi.");
   }
   return response.json();
 }

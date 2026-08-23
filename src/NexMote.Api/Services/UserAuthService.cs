@@ -303,6 +303,127 @@ public sealed class UserAuthService
         return new CreateUserResponse(user.Id, user.Email, tempPassword);
     }
 
+    /// <summary>
+    /// Yeni bir kullanıcı için (yoksa oluşturarak) e-posta davet token'ı üretir. E-posta göndermez —
+    /// çağıran (endpoint) döndürülen token'ı <see cref="EmailService"/> ile göndermelidir.
+    /// Aynı e-postaya daha önce kabul edilmemiş bir davet varsa, eskisi geçersiz kılınıp yenisi üretilir
+    /// (yeniden gönderim). E-posta zaten gerçek (kabul edilmiş veya şifre-ile-oluşturulmuş) bir hesaba
+    /// aitse null döner.
+    /// </summary>
+    public (Guid UserId, string Email, string DisplayName, string Role, string Token)? InviteUser(string email, string displayName, string role, Guid actingUserId)
+    {
+        if (role != UserRoles.Admin && role != UserRoles.Technician)
+        {
+            return null;
+        }
+
+        using var db = _dbFactory.CreateDbContext();
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var existing = db.Users.FirstOrDefault(u => u.Email == normalizedEmail);
+
+        UserEntity user;
+        if (existing is null)
+        {
+            user = new UserEntity
+            {
+                Id = Guid.NewGuid(),
+                Email = normalizedEmail,
+                DisplayName = string.IsNullOrWhiteSpace(displayName) ? normalizedEmail : displayName.Trim(),
+                Role = role,
+                IsActive = true,
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+            // Kabul edilene kadar tahmin edilemez, kullanılamaz bir şifre hash'i (nullable kolon gerektirmez)
+            user.PasswordHash = _passwordHasher.HashPassword(user, SessionTokens.Generate());
+            db.Users.Add(user);
+        }
+        else
+        {
+            var hasAnyInvite = db.UserInvites.Any(i => i.UserId == existing.Id);
+            var hasAcceptedInvite = db.UserInvites.Any(i => i.UserId == existing.Id && i.AcceptedAt != null);
+            if (!hasAnyInvite || hasAcceptedInvite)
+            {
+                // Şifreyle doğrudan oluşturulmuş ya da daveti zaten kabul edilmiş gerçek bir hesap — üzerine yazılmaz.
+                return null;
+            }
+
+            user = existing;
+            user.Role = role;
+            if (!string.IsNullOrWhiteSpace(displayName))
+            {
+                user.DisplayName = displayName.Trim();
+            }
+        }
+
+        // Bu kullanıcı için bekleyen (kabul edilmemiş) eski davetleri geçersiz kıl — yeniden gönderim senaryosu
+        var now = DateTimeOffset.UtcNow;
+        foreach (var old in db.UserInvites.Where(i => i.UserId == user.Id && i.AcceptedAt == null))
+        {
+            old.ExpiresAt = now;
+        }
+
+        var token = SessionTokens.Generate();
+        db.UserInvites.Add(new UserInviteEntity
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            TokenHash = SessionTokens.Hash(token),
+            CreatedAt = now,
+            ExpiresAt = now.AddDays(7),
+            InvitedByUserId = actingUserId
+        });
+
+        LogActivity(db, actingUserId, null, "user.invite", "User", user.Id.ToString(), $"role={role}", null, success: true);
+        db.SaveChanges();
+        return (user.Id, user.Email, user.DisplayName, user.Role, token);
+    }
+
+    /// <summary>Geçerli (süresi dolmamış, kabul edilmemiş) bir davetin önizleme bilgisini döner.</summary>
+    public (string Email, string DisplayName, string Role)? GetInvitePreview(string token)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var hash = SessionTokens.Hash(token);
+        var invite = db.UserInvites.FirstOrDefault(i => i.TokenHash == hash);
+        if (invite is null || invite.AcceptedAt != null || invite.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            return null;
+        }
+
+        var user = db.Users.FirstOrDefault(u => u.Id == invite.UserId);
+        return user is null ? null : (user.Email, user.DisplayName, user.Role);
+    }
+
+    /// <summary>
+    /// Daveti kabul eder: kullanıcının gerçek şifresini ayarlar, daveti "kullanılmış" işaretler
+    /// ve otomatik olarak bir oturum açar (kabul eden kişi doğrudan uygulamaya giriş yapmış olur).
+    /// </summary>
+    public LoginResponse? AcceptInvite(string token, string password, string? ip, string? userAgent)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var now = DateTimeOffset.UtcNow;
+        var hash = SessionTokens.Hash(token);
+        var invite = db.UserInvites.FirstOrDefault(i => i.TokenHash == hash);
+        if (invite is null || invite.AcceptedAt != null || invite.ExpiresAt <= now)
+        {
+            return null;
+        }
+
+        var user = db.Users.FirstOrDefault(u => u.Id == invite.UserId);
+        if (user is null || !user.IsActive)
+        {
+            return null;
+        }
+
+        user.PasswordHash = _passwordHasher.HashPassword(user, password);
+        user.LastLoginAt = now;
+        invite.AcceptedAt = now;
+
+        var sessionToken = IssueSession(db, user, rememberMe: true, ip, userAgent);
+        LogActivity(db, user.Id, user.Email, "user.invite_accepted", null, null, null, ip, success: true);
+        db.SaveChanges();
+        return new LoginResponse(RequiresMfa: false, Token: sessionToken, ChallengeToken: null);
+    }
+
     public bool SetRole(Guid userId, string role, Guid actingUserId)
     {
         if (role != UserRoles.Admin && role != UserRoles.Technician)
