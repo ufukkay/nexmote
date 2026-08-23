@@ -38,38 +38,61 @@ import {
   Terminal,
   Trash2,
   User,
+  Users as UsersIcon,
   Wifi,
   X,
   Zap,
   Database,
-  ExternalLink
+  ExternalLink,
+  KeyRound,
+  ScrollText,
+  Ban,
+  RotateCcw
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import QRCode from "qrcode";
 import {
+  ActivityLogEntry as AuditLogEntry,
+  changePassword,
   checkUpdates,
   clearStoredAdminToken,
   createRemoteSession,
+  createUser,
+  CurrentUser,
   deleteDevice,
+  disableMfa,
+  disableUser,
   DeviceSummary,
   DownloadPackage,
+  enableMfa,
+  enableUser,
   executeDeviceCommand,
+  getAuditLog,
+  getCurrentUser,
   getServerMetrics,
   getServerSettings,
   getStoredAdminToken,
   InstalledAppInfo,
   listDevices,
   listDownloads,
+  listUsers,
   login,
+  logout as apiLogout,
+  resetUserMfa,
   ServerMetrics,
   ServerSettings,
   setStoredAdminToken,
+  setupMfa,
+  setUserRole,
   triggerAgentUpdate,
   uninstallApp,
   updateServerSettings,
+  UserSummary,
+  verifyMfa,
   WindowsUpdateInfo
 } from "./api";
 
-type View = "devices" | "device-detail" | "downloads" | "settings";
+type View = "devices" | "device-detail" | "downloads" | "settings" | "users" | "audit-log";
 type StatusFilter = "all" | "online" | "offline" | "warning";
 type DetailTab = "overview" | "specs" | "performance" | "network" | "applications" | "updates" | "terminal" | "activity";
 type SortField = "deviceName" | "status" | "activeUser" | "ipAddress" | "cpu" | "agentVersion" | "lastSeen";
@@ -245,12 +268,44 @@ export function App() {
 
   // Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => Boolean(getStoredAdminToken()));
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [authError, setAuthError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  // MFA giriş adım 2 (challenge) state
+  const [mfaChallengeToken, setMfaChallengeToken] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaError, setMfaError] = useState("");
+  const [mfaVerifying, setMfaVerifying] = useState(false);
+
+  // Hesap Ayarları: şifre değiştirme + MFA kurulum state
+  const [accountCurrentPassword, setAccountCurrentPassword] = useState("");
+  const [accountNewPassword, setAccountNewPassword] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [mfaSetupQr, setMfaSetupQr] = useState<string | null>(null);
+  const [mfaSetupSecret, setMfaSetupSecret] = useState<string | null>(null);
+  const [mfaEnableCode, setMfaEnableCode] = useState("");
+  const [mfaRecoveryCodes, setMfaRecoveryCodes] = useState<string[] | null>(null);
+  const [mfaDisablePassword, setMfaDisablePassword] = useState("");
+
+  // Kullanıcı Yönetimi (Admin) state
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserDisplayName, setNewUserDisplayName] = useState("");
+  const [newUserRole, setNewUserRole] = useState<"Admin" | "Technician">("Technician");
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [createdUserCredentials, setCreatedUserCredentials] = useState<{ email: string; temporaryPassword: string } | null>(null);
+
+  // Denetim Logu (Admin) state
+  const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const auditPageSize = 50;
 
   // Live Activity Event Logs
   const [activityLogs, setActivityLogs] = useState<{ id: string; text: string; time: string; level: "info" | "success" | "warn" }[]>([]);
@@ -412,10 +467,16 @@ export function App() {
     setIsLoggingIn(true);
 
     try {
-      const token = await login(loginEmail.trim(), loginPassword);
-      setStoredAdminToken(token, rememberMe);
-      setIsAuthenticated(true);
-      addActivityLog("Yönetici oturumu açıldı", "success");
+      const result = await login(loginEmail.trim(), loginPassword, rememberMe);
+      if (result.requiresMfa && result.challengeToken) {
+        setMfaChallengeToken(result.challengeToken);
+        setMfaCode("");
+        setMfaError("");
+      } else if (result.token) {
+        setStoredAdminToken(result.token, rememberMe);
+        setIsAuthenticated(true);
+        addActivityLog("Oturum açıldı", "success");
+      }
     } catch {
       setAuthError("E-posta veya parola hatalı.");
     } finally {
@@ -423,9 +484,182 @@ export function App() {
     }
   }
 
+  async function handleVerifyMfa(e: React.FormEvent) {
+    e.preventDefault();
+    if (!mfaChallengeToken) return;
+    setMfaError("");
+    setMfaVerifying(true);
+
+    try {
+      const result = await verifyMfa(mfaChallengeToken, mfaCode.trim(), rememberMe);
+      if (result.token) {
+        setStoredAdminToken(result.token, rememberMe);
+        setIsAuthenticated(true);
+        setMfaChallengeToken(null);
+        setMfaCode("");
+        addActivityLog("Oturum açıldı (MFA doğrulandı)", "success");
+      }
+    } catch {
+      setMfaError("Kod hatalı veya süresi dolmuş.");
+    } finally {
+      setMfaVerifying(false);
+    }
+  }
+
+  function handleCancelMfaChallenge() {
+    setMfaChallengeToken(null);
+    setMfaCode("");
+    setMfaError("");
+  }
+
   function handleLogout() {
+    apiLogout();
     clearStoredAdminToken();
     setIsAuthenticated(false);
+    setCurrentUser(null);
+    setMfaChallengeToken(null);
+  }
+
+  async function handleChangePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setAccountBusy(true);
+    try {
+      await changePassword(accountCurrentPassword, accountNewPassword);
+      setAccountCurrentPassword("");
+      setAccountNewPassword("");
+      showToast("Şifreniz güncellendi.");
+      addActivityLog("Şifre değiştirildi", "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Şifre değiştirilemedi.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleStartMfaSetup() {
+    setAccountBusy(true);
+    try {
+      const { secret, provisioningUri } = await setupMfa();
+      setMfaSetupSecret(secret);
+      setMfaSetupQr(await QRCode.toDataURL(provisioningUri, { width: 220, margin: 1 }));
+      setMfaEnableCode("");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "MFA kurulumu başlatılamadı.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleEnableMfa(e: React.FormEvent) {
+    e.preventDefault();
+    setAccountBusy(true);
+    try {
+      const { recoveryCodes } = await enableMfa(mfaEnableCode.trim());
+      setMfaRecoveryCodes(recoveryCodes);
+      setMfaSetupQr(null);
+      setMfaSetupSecret(null);
+      setMfaEnableCode("");
+      const me = await getCurrentUser();
+      setCurrentUser(me);
+      showToast("MFA etkinleştirildi.");
+      addActivityLog("MFA etkinleştirildi", "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kod doğrulanamadı.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleDisableMfa(e: React.FormEvent) {
+    e.preventDefault();
+    setAccountBusy(true);
+    try {
+      await disableMfa(mfaDisablePassword);
+      setMfaDisablePassword("");
+      const me = await getCurrentUser();
+      setCurrentUser(me);
+      showToast("MFA kapatıldı.");
+      addActivityLog("MFA kapatıldı", "warn");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Şifre hatalı.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function refreshUsers() {
+    try {
+      setUsers(await listUsers());
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kullanıcı listesi alınamadı.");
+    }
+  }
+
+  async function handleCreateUser(e: React.FormEvent) {
+    e.preventDefault();
+    setCreatingUser(true);
+    try {
+      const result = await createUser(newUserEmail.trim(), newUserDisplayName.trim(), newUserRole);
+      setCreatedUserCredentials({ email: result.email, temporaryPassword: result.temporaryPassword });
+      setNewUserEmail("");
+      setNewUserDisplayName("");
+      setNewUserRole("Technician");
+      await refreshUsers();
+      addActivityLog(`Yeni kullanıcı oluşturuldu: ${result.email}`, "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kullanıcı oluşturulamadı.");
+    } finally {
+      setCreatingUser(false);
+    }
+  }
+
+  async function handleSetUserRole(userId: string, role: "Admin" | "Technician") {
+    try {
+      await setUserRole(userId, role);
+      await refreshUsers();
+      showToast("Rol güncellendi.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Rol değiştirilemedi.");
+    }
+  }
+
+  async function handleToggleUserActive(user: UserSummary) {
+    try {
+      if (user.isActive) {
+        await disableUser(user.id);
+        addActivityLog(`Kullanıcı devre dışı bırakıldı: ${user.email}`, "warn");
+      } else {
+        await enableUser(user.id);
+        addActivityLog(`Kullanıcı etkinleştirildi: ${user.email}`, "success");
+      }
+      await refreshUsers();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "İşlem başarısız oldu.");
+    }
+  }
+
+  async function handleResetUserMfa(user: UserSummary) {
+    try {
+      await resetUserMfa(user.id);
+      await refreshUsers();
+      showToast(`${user.email} için MFA sıfırlandı.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "MFA sıfırlanamadı.");
+    }
+  }
+
+  async function refreshAuditLog(page: number = auditPage) {
+    setAuditLoading(true);
+    try {
+      const result = await getAuditLog(page, auditPageSize);
+      setAuditEntries(result.items);
+      setAuditTotal(result.total);
+      setAuditPage(page);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Denetim logu alınamadı.");
+    } finally {
+      setAuditLoading(false);
+    }
   }
 
   function addActivityLog(text: string, level: "info" | "success" | "warn" = "info") {
@@ -493,11 +727,25 @@ export function App() {
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    refresh();
-    refreshDownloads();
-    refreshSettings();
-    refreshLatestVersion();
-    refreshServerMetrics();
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const me = await getCurrentUser();
+        if (cancelled) return;
+        setCurrentUser(me);
+
+        refresh();
+        refreshDownloads();
+        refreshLatestVersion();
+        refreshServerMetrics();
+        if (me.role === "Admin") {
+          refreshSettings();
+        }
+      } catch {
+        if (!cancelled) handleLogout();
+      }
+    })();
 
     const interval = setInterval(() => {
       refresh(false);
@@ -505,8 +753,17 @@ export function App() {
         refreshServerMetrics(false);
       }
     }, 3000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [isAuthenticated, view]);
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUser?.role !== "Admin") return;
+    if (view === "users") refreshUsers();
+    if (view === "audit-log") refreshAuditLog(1);
+  }, [isAuthenticated, currentUser?.role, view]);
 
   function showToast(message: string) {
     setStatus(message);
@@ -734,8 +991,9 @@ export function App() {
     );
   }, [selectedDevice?.windowsUpdates, updateSearchQuery]);
 
-  const userInitial = (loginEmail || "N").charAt(0).toUpperCase();
-  const userDisplayName = loginEmail ? loginEmail.split("@")[0] : "Yönetici";
+  const userInitial = (currentUser?.displayName || currentUser?.email || "N").charAt(0).toUpperCase();
+  const userDisplayName = currentUser?.displayName || currentUser?.email?.split("@")[0] || "Kullanıcı";
+  const roleLabel = currentUser?.role === "Admin" ? "Yönetici" : "Teknisyen";
   const onlineCount = devices.filter((d) => d.isOnline).length;
   const warningCount = devices.filter((d) => isVersionOlder(d.agentVersion, latestAgentVersion)).length;
 
@@ -792,77 +1050,113 @@ export function App() {
 
         {/* Right Form Panel */}
         <div className="login-form-panel">
-          <div className="login-box">
-            <div>
-              <h1 className="login-title">Oturum Açın</h1>
-              <p className="login-subtitle">Yönetici kimlik bilgilerinizle konsola bağlanın.</p>
+          {mfaChallengeToken ? (
+            <div className="login-box">
+              <div>
+                <h1 className="login-title">Doğrulama Kodu</h1>
+                <p className="login-subtitle">Authenticator uygulamanızdaki 6 haneli kodu (veya bir kurtarma kodunu) girin.</p>
+              </div>
+
+              <form onSubmit={handleVerifyMfa} className="login-form">
+                {mfaError && <div className="login-error-text">{mfaError}</div>}
+
+                <div className="form-group">
+                  <label className="form-label">Kod</label>
+                  <div className="form-input-wrapper">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoFocus
+                      className="form-input"
+                      placeholder="123456"
+                      value={mfaCode}
+                      onChange={(e) => setMfaCode(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <button type="submit" className="btn-primary" data-size="lg" disabled={mfaVerifying}>
+                  {mfaVerifying ? "Doğrulanıyor..." : "Doğrula ve Giriş Yap"}
+                </button>
+                <button type="button" className="btn-secondary" onClick={handleCancelMfaChallenge}>
+                  Geri Dön
+                </button>
+              </form>
             </div>
-
-            <form onSubmit={handleLogin} className="login-form">
-              {authError && (
-                <div className="login-error-text">
-                  {authError}
-                </div>
-              )}
-
-              <div className="form-group">
-                <label className="form-label">E-posta adresi</label>
-                <div className="form-input-wrapper">
-                  <input
-                    type="email"
-                    className="form-input"
-                    placeholder="ornek@nexmote.com"
-                    value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
-                    required
-                  />
-                </div>
+          ) : (
+            <div className="login-box">
+              <div>
+                <h1 className="login-title">Oturum Açın</h1>
+                <p className="login-subtitle">Kullanıcı kimlik bilgilerinizle konsola bağlanın.</p>
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Parola</label>
-                <div className="form-input-wrapper">
-                  <input
-                    type={showLoginPassword ? "text" : "password"}
-                    className="form-input"
-                    placeholder="Parolanız"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="password-toggle-btn"
-                    onClick={() => setShowLoginPassword(!showLoginPassword)}
-                    title={showLoginPassword ? "Gizle" : "Göster"}
-                    aria-label={showLoginPassword ? "Parolayı gizle" : "Parolayı göster"}
-                  >
-                    {showLoginPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
+              <form onSubmit={handleLogin} className="login-form">
+                {authError && (
+                  <div className="login-error-text">
+                    {authError}
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label className="form-label">E-posta adresi</label>
+                  <div className="form-input-wrapper">
+                    <input
+                      type="email"
+                      className="form-input"
+                      placeholder="ornek@nexmote.com"
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      required
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div className="login-options-row">
-                <label className="remember-label">
-                  <input
-                    type="checkbox"
-                    checked={rememberMe}
-                    onChange={(e) => setRememberMe(e.target.checked)}
-                  />
-                  Bu cihazda oturumu açık tut
-                </label>
-              </div>
+                <div className="form-group">
+                  <label className="form-label">Parola</label>
+                  <div className="form-input-wrapper">
+                    <input
+                      type={showLoginPassword ? "text" : "password"}
+                      className="form-input"
+                      placeholder="Parolanız"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="password-toggle-btn"
+                      onClick={() => setShowLoginPassword(!showLoginPassword)}
+                      title={showLoginPassword ? "Gizle" : "Göster"}
+                      aria-label={showLoginPassword ? "Parolayı gizle" : "Parolayı göster"}
+                    >
+                      {showLoginPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
 
-              <button
-                type="submit"
-                className="btn-primary"
-                data-size="lg"
-                disabled={isLoggingIn}
-              >
-                {isLoggingIn ? "Doğrulanıyor..." : "Giriş Yap"}
-              </button>
-            </form>
-          </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                    />
+                    Bu cihazda oturumu açık tut
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  data-size="lg"
+                  disabled={isLoggingIn}
+                >
+                  {isLoggingIn ? "Doğrulanıyor..." : "Giriş Yap"}
+                </button>
+              </form>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -897,10 +1191,30 @@ export function App() {
           <button
             className={`rail-btn ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
-            title="Sunucu Ayarları"
+            title="Ayarlar"
           >
             <Settings size={18} />
           </button>
+
+          {currentUser?.role === "Admin" && (
+            <>
+              <button
+                className={`rail-btn ${view === "users" ? "active" : ""}`}
+                onClick={() => setView("users")}
+                title="Kullanıcı Yönetimi"
+              >
+                <UsersIcon size={18} />
+              </button>
+
+              <button
+                className={`rail-btn ${view === "audit-log" ? "active" : ""}`}
+                onClick={() => setView("audit-log")}
+                title="Denetim Logu"
+              >
+                <ScrollText size={18} />
+              </button>
+            </>
+          )}
         </div>
       </aside>
 
@@ -951,9 +1265,10 @@ export function App() {
               {activityLogs.length > 0 && <span className="notification-badge-dot" />}
             </button>
 
-            <div className="user-profile-badge" title={`${loginEmail || userDisplayName} (Yönetici)`}>
+            <div className="user-profile-badge" title={`${currentUser?.email || userDisplayName} (${roleLabel})`}>
               <div className="user-avatar-mini">{userInitial}</div>
               <span className="user-name">{userDisplayName}</span>
+              <span className="user-role-badge">{roleLabel}</span>
               <button
                 className="user-logout-mini-btn"
                 onClick={handleLogout}
@@ -2661,6 +2976,7 @@ export function App() {
         {/* View 3: Server Settings */}
         {view === "settings" && (
           <div className="content-pane">
+            {currentUser?.role === "Admin" && (
             <div className="content-card">
               <h2 className="content-card-title">Sunucu ve kayıt yapılandırması</h2>
               <p className="content-card-copy">
@@ -2726,6 +3042,265 @@ export function App() {
                   {savingSettings ? "Kaydediliyor..." : "Ayarları Kaydet"}
                 </button>
               </form>
+            </div>
+            )}
+
+            {/* Hesap Ayarları — herkes için (Admin + Teknisyen) */}
+            <div className="content-card">
+              <h2 className="content-card-title">Hesap ayarları</h2>
+              <p className="content-card-copy">Şifrenizi değiştirin ve iki faktörlü doğrulamayı (MFA) yönetin.</p>
+
+              <form onSubmit={handleChangePassword} className="settings-form">
+                <div className="form-group">
+                  <label className="form-label">Mevcut şifre</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    value={accountCurrentPassword}
+                    onChange={(e) => setAccountCurrentPassword(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Yeni şifre</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    value={accountNewPassword}
+                    onChange={(e) => setAccountNewPassword(e.target.value)}
+                    minLength={8}
+                    required
+                  />
+                </div>
+                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={accountBusy}>
+                  <KeyRound size={14} />
+                  {accountBusy ? "Kaydediliyor..." : "Şifreyi Değiştir"}
+                </button>
+              </form>
+            </div>
+
+            <div className="content-card">
+              <h2 className="content-card-title">İki faktörlü doğrulama (MFA)</h2>
+              <p className="content-card-copy">
+                {currentUser?.mfaEnabled
+                  ? "MFA hesabınızda etkin. Her girişte authenticator kodunuz istenir."
+                  : "MFA isteğe bağlıdır. Etkinleştirmek için bir authenticator uygulamasıyla (Google/Microsoft Authenticator) QR kodu okutun."}
+              </p>
+
+              {mfaRecoveryCodes && (
+                <div className="stale-data-notice">
+                  <AlertCircle size={14} />
+                  <div>
+                    <p style={{ margin: "0 0 6px" }}>
+                      <strong>Kurtarma kodlarınız (bir kereliğine gösteriliyor, kaydedin):</strong>
+                    </p>
+                    <div className="recovery-codes-grid">
+                      {mfaRecoveryCodes.map((code) => (
+                        <code key={code}>{code}</code>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {currentUser?.mfaEnabled ? (
+                <form onSubmit={handleDisableMfa} className="settings-form">
+                  <div className="form-group">
+                    <label className="form-label">MFA'yı kapatmak için şifrenizi girin</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      value={mfaDisablePassword}
+                      onChange={(e) => setMfaDisablePassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <button type="submit" className="btn-secondary" disabled={accountBusy}>
+                    {accountBusy ? "İşleniyor..." : "MFA'yı Kapat"}
+                  </button>
+                </form>
+              ) : mfaSetupQr ? (
+                <form onSubmit={handleEnableMfa} className="settings-form">
+                  <img src={mfaSetupQr} alt="MFA QR kodu" style={{ width: 220, height: 220, borderRadius: 8 }} />
+                  {mfaSetupSecret && (
+                    <p className="form-help">Manuel giriş secret'ı: <code>{mfaSetupSecret}</code></p>
+                  )}
+                  <div className="form-group">
+                    <label className="form-label">Authenticator uygulamasındaki 6 haneli kod</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      className="form-input"
+                      value={mfaEnableCode}
+                      onChange={(e) => setMfaEnableCode(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <button type="submit" className="btn-primary" data-width="fixed" disabled={accountBusy}>
+                    {accountBusy ? "Doğrulanıyor..." : "MFA'yı Etkinleştir"}
+                  </button>
+                </form>
+              ) : (
+                <button className="btn-primary" data-width="fixed" onClick={handleStartMfaSetup} disabled={accountBusy}>
+                  <Shield size={14} />
+                  MFA Kurulumunu Başlat
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* View 4: Kullanıcı Yönetimi (Admin) */}
+        {view === "users" && currentUser?.role === "Admin" && (
+          <div className="content-pane">
+            <div className="content-card">
+              <h2 className="content-card-title">Yeni kullanıcı oluştur</h2>
+              <p className="content-card-copy">Yeni bir Admin veya Teknisyen hesabı için tek seferlik geçici şifre üretilir.</p>
+
+              {createdUserCredentials && (
+                <div className="stale-data-notice">
+                  <AlertCircle size={14} />
+                  <span>
+                    <strong>{createdUserCredentials.email}</strong> için geçici şifre: <code>{createdUserCredentials.temporaryPassword}</code> — bu şifreyi güvenli bir kanaldan kullanıcıya iletin, bir daha gösterilmeyecek.
+                  </span>
+                </div>
+              )}
+
+              <form onSubmit={handleCreateUser} className="settings-form">
+                <div className="form-group">
+                  <label className="form-label">E-posta</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    value={newUserEmail}
+                    onChange={(e) => setNewUserEmail(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Görünen ad</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={newUserDisplayName}
+                    onChange={(e) => setNewUserDisplayName(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Rol</label>
+                  <select
+                    className="form-input"
+                    value={newUserRole}
+                    onChange={(e) => setNewUserRole(e.target.value as "Admin" | "Technician")}
+                  >
+                    <option value="Technician">Teknisyen</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                </div>
+                <button type="submit" className="btn-primary" data-width="fixed" disabled={creatingUser}>
+                  <UsersIcon size={14} />
+                  {creatingUser ? "Oluşturuluyor..." : "Kullanıcı Oluştur"}
+                </button>
+              </form>
+            </div>
+
+            <div className="content-card">
+              <h2 className="content-card-title">Kullanıcılar ({users.length})</h2>
+              <div className="op-table-container">
+                <table className="op-table">
+                  <thead>
+                    <tr>
+                      <th>E-posta</th>
+                      <th>Ad</th>
+                      <th>Rol</th>
+                      <th>MFA</th>
+                      <th>Durum</th>
+                      <th>Son giriş</th>
+                      <th>Aksiyonlar</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((u) => (
+                      <tr key={u.id}>
+                        <td>{u.email}</td>
+                        <td>{u.displayName}</td>
+                        <td>
+                          <select
+                            className="form-input"
+                            value={u.role}
+                            onChange={(e) => handleSetUserRole(u.id, e.target.value as "Admin" | "Technician")}
+                          >
+                            <option value="Technician">Teknisyen</option>
+                            <option value="Admin">Admin</option>
+                          </select>
+                        </td>
+                        <td>{u.mfaEnabled ? "Açık" : "Kapalı"}</td>
+                        <td>{u.isActive ? "Aktif" : "Devre dışı"}</td>
+                        <td>{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString("tr-TR") : "—"}</td>
+                        <td>
+                          <div className="row-action-group">
+                            <button className="icon-action-btn" title={u.isActive ? "Devre dışı bırak" : "Etkinleştir"} onClick={() => handleToggleUserActive(u)}>
+                              {u.isActive ? <Ban size={14} /> : <RotateCcw size={14} />}
+                            </button>
+                            {u.mfaEnabled && (
+                              <button className="icon-action-btn" title="MFA'yı sıfırla" onClick={() => handleResetUserMfa(u)}>
+                                <Shield size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* View 5: Denetim Logu (Admin) */}
+        {view === "audit-log" && currentUser?.role === "Admin" && (
+          <div className="content-pane">
+            <div className="content-card">
+              <h2 className="content-card-title">Denetim logu ({auditTotal})</h2>
+              <p className="content-card-copy">Giriş/çıkış ve yönetimsel eylemlerin denetim kaydı.</p>
+
+              <div className="op-table-container">
+                <table className="op-table">
+                  <thead>
+                    <tr>
+                      <th>Zaman</th>
+                      <th>Kullanıcı</th>
+                      <th>Eylem</th>
+                      <th>Hedef</th>
+                      <th>IP</th>
+                      <th>Sonuç</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditEntries.map((entry) => (
+                      <tr key={entry.id}>
+                        <td>{new Date(entry.createdAt).toLocaleString("tr-TR")}</td>
+                        <td>{entry.userEmail ?? "—"}</td>
+                        <td>{entry.action}</td>
+                        <td>{entry.targetType ? `${entry.targetType}:${entry.targetId}` : "—"}</td>
+                        <td>{entry.ipAddress ?? "—"}</td>
+                        <td>{entry.success ? "Başarılı" : "Başarısız"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="pagination-row">
+                <button className="btn-secondary" disabled={auditLoading || auditPage <= 1} onClick={() => refreshAuditLog(auditPage - 1)}>
+                  Önceki
+                </button>
+                <span>Sayfa {auditPage} / {Math.max(1, Math.ceil(auditTotal / auditPageSize))}</span>
+                <button className="btn-secondary" disabled={auditLoading || auditPage * auditPageSize >= auditTotal} onClick={() => refreshAuditLog(auditPage + 1)}>
+                  Sonraki
+                </button>
+              </div>
             </div>
           </div>
         )}

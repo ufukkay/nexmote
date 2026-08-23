@@ -218,11 +218,52 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** İki adımlı giriş akışının adım 1 (e-posta/şifre) yanıtı. */
+export type LoginResult = {
+  requiresMfa: boolean;
+  token: string | null;
+  challengeToken: string | null;
+};
+
+/** Giriş yapmış kullanıcının kimlik/rol bilgisi (/api/auth/me). */
+export type CurrentUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "Admin" | "Technician";
+  mfaEnabled: boolean;
+};
+
+export type UserSummary = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "Admin" | "Technician";
+  isActive: boolean;
+  mfaEnabled: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+};
+
+export type ActivityLogEntry = {
+  id: string;
+  userId: string | null;
+  userEmail: string | null;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  detailsJson: string | null;
+  ipAddress: string | null;
+  success: boolean;
+  createdAt: string;
+};
+
 /**
- * Admin e-posta ve şifresiyle sunucuya giriş yapar (/api/auth/login).
+ * Giriş adım 1: e-posta ve şifreyi doğrular (/api/auth/login). MFA kapalıysa doğrudan oturum
+ * token'ı, açıksa bir MFA challenge token'ı döner — asıl oturum için verifyMfa() çağrılmalıdır.
  */
-export async function login(email: string, password: string): Promise<string> {
-  const response = await fetch("/api/auth/login", {
+export async function login(email: string, password: string, rememberMe = false): Promise<LoginResult> {
+  const response = await fetch(`/api/auth/login?rememberMe=${rememberMe}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password })
@@ -232,8 +273,154 @@ export async function login(email: string, password: string): Promise<string> {
     throw new Error("Hatalı e-posta veya parola.");
   }
 
-  const data: { token: string } = await response.json();
-  return data.token;
+  return response.json();
+}
+
+/**
+ * Giriş adım 2: MFA challenge token'ı + authenticator kodunu (veya kurtarma kodunu) doğrular, oturum token'ı döner.
+ */
+export async function verifyMfa(challengeToken: string, code: string, rememberMe = false): Promise<LoginResult> {
+  const response = await fetch(`/api/auth/mfa/verify?rememberMe=${rememberMe}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challengeToken, code })
+  });
+
+  if (!response.ok) {
+    throw new Error("Kod hatalı veya süresi dolmuş.");
+  }
+
+  return response.json();
+}
+
+/** Mevcut oturumu sunucuda iptal eder. */
+export async function logout(): Promise<void> {
+  await fetch("/api/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
+}
+
+/** Giriş yapmış kullanıcının kimlik/rol bilgisini döner. */
+export async function getCurrentUser(): Promise<CurrentUser> {
+  const response = await fetch("/api/auth/me", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Kullanıcı bilgisi alınamadı.");
+  }
+  return response.json();
+}
+
+/** Kendi şifresini değiştirir. */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const response = await fetch("/api/account/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ currentPassword, newPassword })
+  });
+  if (!response.ok) {
+    throw new Error("Mevcut şifre hatalı.");
+  }
+}
+
+/** MFA kurulumunu başlatır — QR'nin üretileceği otpauth:// URI ve secret döner. */
+export async function setupMfa(): Promise<{ secret: string; provisioningUri: string }> {
+  const response = await fetch("/api/account/mfa/setup", { method: "POST", headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("MFA kurulumu başlatılamadı.");
+  }
+  return response.json();
+}
+
+/** MFA kurulumunu ilk 6 haneli kodla onaylar, kurtarma kodlarını bir kereliğine döner. */
+export async function enableMfa(code: string): Promise<{ recoveryCodes: string[] }> {
+  const response = await fetch("/api/account/mfa/enable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ code })
+  });
+  if (!response.ok) {
+    throw new Error("Kod doğrulanamadı.");
+  }
+  return response.json();
+}
+
+/** MFA'yı kapatır (mevcut şifre doğrulaması gerektirir). */
+export async function disableMfa(currentPassword: string): Promise<void> {
+  const response = await fetch("/api/account/mfa/disable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ currentPassword })
+  });
+  if (!response.ok) {
+    throw new Error("Şifre hatalı.");
+  }
+}
+
+/** Kullanıcı listesini döner (Admin). */
+export async function listUsers(): Promise<UserSummary[]> {
+  const response = await fetch("/api/admin/users", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Kullanıcı listesi alınamadı.");
+  }
+  return response.json();
+}
+
+/** Yeni Admin veya Teknisyen hesabı oluşturur, tek seferlik geçici şifre döner (Admin). */
+export async function createUser(email: string, displayName: string, role: "Admin" | "Technician"): Promise<{ id: string; email: string; temporaryPassword: string }> {
+  const response = await fetch("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ email, displayName, role })
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message ?? "Kullanıcı oluşturulamadı.");
+  }
+  return response.json();
+}
+
+/** Kullanıcının rolünü değiştirir (Admin). */
+export async function setUserRole(userId: string, role: "Admin" | "Technician"): Promise<void> {
+  const response = await fetch(`/api/admin/users/${userId}/role`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ role })
+  });
+  if (!response.ok) {
+    throw new Error("Rol değiştirilemedi.");
+  }
+}
+
+/** Kullanıcı hesabını devre dışı bırakır (Admin). */
+export async function disableUser(userId: string): Promise<void> {
+  const response = await fetch(`/api/admin/users/${userId}/disable`, { method: "POST", headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Kullanıcı devre dışı bırakılamadı.");
+  }
+}
+
+/** Devre dışı bırakılmış kullanıcı hesabını yeniden etkinleştirir (Admin). */
+export async function enableUser(userId: string): Promise<void> {
+  const response = await fetch(`/api/admin/users/${userId}/enable`, { method: "POST", headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Kullanıcı etkinleştirilemedi.");
+  }
+}
+
+/** Kilitlenmiş bir kullanıcının MFA'sını admin zorla kapatır. */
+export async function resetUserMfa(userId: string): Promise<void> {
+  const response = await fetch(`/api/admin/users/${userId}/mfa/reset`, { method: "POST", headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("MFA sıfırlanamadı.");
+  }
+}
+
+/** Sayfalanmış, filtrelenebilir denetim (activity) logu (Admin). */
+export async function getAuditLog(page = 1, pageSize = 50, userId?: string): Promise<{ items: ActivityLogEntry[]; total: number }> {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  if (userId) params.set("userId", userId);
+  const response = await fetch(`/api/admin/audit-log?${params.toString()}`, { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Denetim logu alınamadı.");
+  }
+  return response.json();
 }
 
 /**

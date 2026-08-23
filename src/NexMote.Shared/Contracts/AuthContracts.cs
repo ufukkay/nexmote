@@ -1,17 +1,76 @@
 namespace NexMote.Shared.Contracts;
 
 /// <summary>
-/// Web konsolu ve Teknisyen masaüstü uygulamasından sunucuya admin girişi yapmak için kullanılan istek kontratı.
+/// Web konsolu ve Teknisyen masaüstü uygulamasından sunucuya giriş yapmak için kullanılan istek kontratı (adım 1: e-posta/şifre).
 /// </summary>
-/// <param name="Email">Admin kullanıcı e-posta adresi.</param>
-/// <param name="Password">Admin kullanıcı parolası.</param>
+/// <param name="Email">Kullanıcı e-posta adresi.</param>
+/// <param name="Password">Kullanıcı parolası.</param>
 public sealed record AdminLoginRequest(string Email, string Password);
 
 /// <summary>
-/// Başarılı admin girişi sonrasında sunucunun döndürdüğü kimlik doğrulama yanıtı.
+/// Adım 1 (e-posta/şifre) sonrasında sunucunun döndürdüğü yanıt. Kullanıcının MFA'sı kapalıysa
+/// <see cref="Token"/> dolu döner (giriş tamamlanmıştır); açıksa <see cref="RequiresMfa"/> true ve
+/// <see cref="ChallengeToken"/> dolu döner — asıl oturum token'ı ancak <c>/api/auth/mfa/verify</c> ile alınır.
 /// </summary>
-/// <param name="Token">Korumalı admin API isteklerinde "Authorization: Bearer [Token]" olarak kullanılacak anahtar.</param>
-public sealed record AdminLoginResponse(string Token);
+public sealed record LoginResponse(bool RequiresMfa, string? Token, string? ChallengeToken);
+
+/// <summary>
+/// Adım 2: MFA challenge token'ı ve authenticator uygulamasından okunan 6 haneli kod (veya bir kurtarma kodu).
+/// </summary>
+public sealed record MfaVerifyRequest(string ChallengeToken, string Code);
+
+/// <summary>
+/// Giriş yapmış kullanıcının kimlik/rol bilgisi (<c>/api/auth/me</c>).
+/// </summary>
+public sealed record CurrentUserResponse(Guid Id, string Email, string DisplayName, string Role, bool MfaEnabled);
+
+/// <summary>Kendi şifresini değiştirme isteği.</summary>
+public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+
+/// <summary>MFA kurulum başlangıcı yanıtı — QR kodu client-side bu <see cref="ProvisioningUri"/>'den üretilir.</summary>
+public sealed record MfaSetupResponse(string Secret, string ProvisioningUri);
+
+/// <summary>MFA kurulumunu ilk 6 haneli kodla onaylama isteği.</summary>
+public sealed record MfaEnableRequest(string Code);
+
+/// <summary>MFA etkinleştirildiğinde bir kereliğine düz metin dönen kurtarma kodları.</summary>
+public sealed record MfaEnableResponse(IReadOnlyList<string> RecoveryCodes);
+
+/// <summary>MFA'yı kapatma isteği — mevcut şifre doğrulaması gerektirir.</summary>
+public sealed record MfaDisableRequest(string CurrentPassword);
+
+/// <summary>Admin tarafından yeni kullanıcı (Admin veya Teknisyen) oluşturma isteği.</summary>
+public sealed record CreateUserRequest(string Email, string DisplayName, string Role);
+
+/// <summary>Yeni oluşturulan kullanıcı için üretilen tek seferlik geçici şifreyi içeren yanıt.</summary>
+public sealed record CreateUserResponse(Guid Id, string Email, string TemporaryPassword);
+
+/// <summary>Kullanıcı yönetimi listesinde gösterilen özet bilgi.</summary>
+public sealed record UserSummary(
+    Guid Id,
+    string Email,
+    string DisplayName,
+    string Role,
+    bool IsActive,
+    bool MfaEnabled,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? LastLoginAt);
+
+/// <summary>Kullanıcının rolünü değiştirme isteği.</summary>
+public sealed record SetRoleRequest(string Role);
+
+/// <summary>Denetim logu (Audit Log) tekil kaydı.</summary>
+public sealed record ActivityLogEntry(
+    Guid Id,
+    Guid? UserId,
+    string? UserEmail,
+    string Action,
+    string? TargetType,
+    string? TargetId,
+    string? DetailsJson,
+    string? IpAddress,
+    bool Success,
+    DateTimeOffset CreatedAt);
 
 /// <summary>
 /// Sunucu genel konfigürasyon ayarları (URL, ortak kayıt anahtarı, heartbeat sıklığı, varsayılan lokasyon) kontratı.

@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -35,8 +36,8 @@ public partial class MainWindow : Window
 
     private readonly HttpClient _http = NexMoteHttp.CreateClient();
     private string _serverUrl = "https://nexmote.com";
-    private string _loginEmail = "admin@nexmote.com";
-    private string _loginPassword = "admin123";
+    private string _loginEmail = string.Empty;
+    private string _displayName = string.Empty;
     private string _selectedShell = "cmd";
     private string? _pendingCommandRequestId;
     private HubConnection? _connection;
@@ -69,7 +70,6 @@ public partial class MainWindow : Window
     private System.Windows.Threading.DispatcherTimer? _pingTimer;
     private long _pingSentTimestamp;
 
-    public bool CredentialsReady { get; private set; } = true;
     private bool _isIslandCollapsed = false;
     private Guid _currentConnectedDeviceId = Guid.Empty;
     private bool _isAwaitingReboot = false;
@@ -92,32 +92,26 @@ public partial class MainWindow : Window
         var launchedSession = ParseLaunchArguments();
         if (!launchedSession)
         {
-            if (!EnsureServerCredentials())
-            {
-                CredentialsReady = false;
-                return;
-            }
-
             SwitchToDeviceList();
             _ = InitializeDeviceListAsync();
         }
         else
         {
-            // Even when launched via deep-link, ensure background admin token is ready for later
-            _ = EnsureAdminTokenAsync();
+            // Deep-link ile başlatılsa bile, cihaz listesine daha sonra dönülebilmesi için
+            // arka planda sessizce (varsa) saklı oturumu doğrula — prompt göstermez.
+            _ = EnsureSessionAsync(forcePrompt: false);
         }
     }
 
     private async Task InitializeDeviceListAsync()
     {
-        if (!await EnsureAdminTokenAsync())
+        if (!await EnsureSessionAsync(forcePrompt: false))
         {
-            // Silent auto-login with stored/default credentials failed (e.g. admin password
-            // was changed on the server). Fall back to prompting once instead of hammering
-            // a protected endpoint with an invalid or missing token.
-            if (!EnsureServerCredentials(forcePrompt: true) || !await EnsureAdminTokenAsync())
+            // Saklı oturum yok/süresi dolmuş — gerçek bir login penceresi göster.
+            if (!await EnsureSessionAsync(forcePrompt: true))
             {
                 StatusText.Text = "Sunucuya giriş yapılamadı.";
+                Close();
                 return;
             }
         }
@@ -130,73 +124,82 @@ public partial class MainWindow : Window
         });
     }
 
-    private bool EnsureServerCredentials(bool forcePrompt = false)
+    /// <summary>
+    /// Geçerli bir oturum sağlar: önce diskte DPAPI ile şifreli saklı token'ı dener
+    /// (<c>/api/auth/me</c> ile geçerliliğini doğrulayarak), geçersizse veya <paramref name="forcePrompt"/>
+    /// true ise gerçek bir login penceresi (<see cref="ServerLoginWindow"/>, e-posta/şifre + gerekirse MFA) gösterir.
+    /// Şifre hiçbir zaman diske yazılmaz — sadece üretilen oturum token'ı (DPAPI şifreli) saklanır.
+    /// </summary>
+    private async Task<bool> EnsureSessionAsync(bool forcePrompt)
     {
-        var (storedUrl, storedEmail, storedPassword, storedToken) = TechnicianAppSettings.Load();
+        var (storedUrl, storedEmail, storedToken) = TechnicianAppSettings.Load();
 
         if (string.IsNullOrWhiteSpace(storedUrl) || storedUrl.Contains("192.168") || storedUrl.Contains("127.0.0.1") || storedUrl.Contains("localhost") || storedUrl.StartsWith("http://"))
         {
             storedUrl = "https://nexmote.com";
-            TechnicianAppSettings.Save(storedUrl, storedEmail ?? "admin@nexmote.com", storedPassword ?? "admin123", storedToken);
         }
 
         _serverUrl = NexMoteHttp.NormalizeUrl(storedUrl);
-        _loginEmail = storedEmail ?? "admin@nexmote.com";
-        _loginPassword = storedPassword ?? "admin123";
+        _loginEmail = storedEmail ?? string.Empty;
         UpdateHeaderIdentity();
 
-        if (!string.IsNullOrWhiteSpace(storedToken))
+        if (!forcePrompt && !string.IsNullOrWhiteSpace(storedToken))
         {
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", storedToken);
+            if (await TryLoadCurrentUserAsync())
+            {
+                return true;
+            }
+
+            // Token geçersiz/süresi dolmuş — temizle, aşağıda forcePrompt=false ise sessizce başarısız dön.
+            _http.DefaultRequestHeaders.Authorization = null;
+            TechnicianAppSettings.Save(_serverUrl, storedEmail, null);
         }
 
-        // Requirement 1 & 2: Start directly without login prompt & use https://nexmote.com
         if (!forcePrompt)
         {
-            return true;
+            return false;
         }
 
-        var prompt = new ServerLoginWindow(_serverUrl, storedEmail ?? "admin@nexmote.com");
+        var prompt = new ServerLoginWindow(_serverUrl, _loginEmail);
         if (prompt.ShowDialog() != true)
         {
             return false;
         }
 
         _serverUrl = prompt.ServerUrl;
-        _loginEmail = prompt.Email;
-        _loginPassword = prompt.Password;
-        UpdateHeaderIdentity();
-        if (prompt.RememberMe)
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", prompt.Token);
+
+        if (!await TryLoadCurrentUserAsync())
         {
-            TechnicianAppSettings.Save(_serverUrl, prompt.Email, prompt.Password);
+            _http.DefaultRequestHeaders.Authorization = null;
+            return false;
         }
+
+        TechnicianAppSettings.Save(_serverUrl, _loginEmail, prompt.RememberMe ? prompt.Token : null);
         return true;
     }
 
-    private async Task<bool> EnsureAdminTokenAsync()
+    /// <summary>Mevcut Authorization header'ındaki token'la <c>/api/auth/me</c>'yi sorgular, kimlik/rol bilgisini önbelleğe alır.</summary>
+    private async Task<bool> TryLoadCurrentUserAsync()
     {
         try
         {
-            if (_http.DefaultRequestHeaders.Authorization != null)
-            {
-                return true;
-            }
-
-            var url = $"{_serverUrl.TrimEnd('/')}/api/auth/login";
-            var response = await _http.PostAsJsonAsync(url, new AdminLoginRequest(_loginEmail, _loginPassword));
+            var response = await _http.GetAsync($"{_serverUrl.TrimEnd('/')}/api/auth/me");
             if (!response.IsSuccessStatusCode)
             {
                 return false;
             }
 
-            var body = await response.Content.ReadFromJsonAsync<AdminLoginResponse>();
-            if (body is null || string.IsNullOrWhiteSpace(body.Token))
+            var me = await response.Content.ReadFromJsonAsync<CurrentUserResponse>();
+            if (me is null)
             {
                 return false;
             }
 
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", body.Token);
-            TechnicianAppSettings.Save(_serverUrl, _loginEmail, _loginPassword, body.Token);
+            _loginEmail = me.Email;
+            _displayName = me.DisplayName;
+            UpdateHeaderIdentity();
             return true;
         }
         catch
@@ -207,9 +210,15 @@ public partial class MainWindow : Window
 
     private async void LogoutBtn_Click(object sender, RoutedEventArgs e)
     {
+        try
+        {
+            await _http.PostAsync($"{_serverUrl.TrimEnd('/')}/api/auth/logout", null);
+        }
+        catch { }
+
         TechnicianAppSettings.Clear();
         _http.DefaultRequestHeaders.Authorization = null;
-        if (EnsureServerCredentials(forcePrompt: true) && await EnsureAdminTokenAsync())
+        if (await EnsureSessionAsync(forcePrompt: true))
         {
             SwitchToDeviceList();
             _ = LoadDevicesAsync();
@@ -284,7 +293,8 @@ public partial class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(serverUrl))
             {
                 _serverUrl = serverUrl;
-                TechnicianAppSettings.Save(_serverUrl, _loginEmail, _loginPassword);
+                var (_, storedEmail, storedToken) = TechnicianAppSettings.Load();
+                TechnicianAppSettings.Save(_serverUrl, storedEmail, storedToken);
                 UpdateHeaderIdentity();
             }
 
@@ -315,7 +325,7 @@ public partial class MainWindow : Window
         {
             if (_http.DefaultRequestHeaders.Authorization is null)
             {
-                await EnsureAdminTokenAsync();
+                await EnsureSessionAsync(forcePrompt: false);
             }
 
             StatusText.Text = "Cihazlar getiriliyor...";
@@ -335,7 +345,7 @@ public partial class MainWindow : Window
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
         {
             _http.DefaultRequestHeaders.Authorization = null;
-            if (await EnsureAdminTokenAsync())
+            if (await EnsureSessionAsync(forcePrompt: false))
             {
                 var devices = await _http.GetFromJsonAsync<List<DeviceModel>>($"{_serverUrl.TrimEnd('/')}/api/devices");
                 if (devices is not null)
@@ -352,9 +362,9 @@ public partial class MainWindow : Window
                 }
             }
 
-            StatusText.Text = "Teknisyen erişim anahtarı geçersiz. Lütfen tekrar girin.";
+            StatusText.Text = "Oturum geçersiz. Lütfen tekrar giriş yapın.";
             TechnicianAppSettings.Clear();
-            if (EnsureServerCredentials(forcePrompt: true) && await EnsureAdminTokenAsync())
+            if (await EnsureSessionAsync(forcePrompt: true))
             {
                 await LoadDevicesAsync();
             }
@@ -401,7 +411,9 @@ public partial class MainWindow : Window
 
         if (HeaderUserText is not null)
         {
-            HeaderUserText.Text = string.IsNullOrWhiteSpace(_loginEmail) ? "Yönetici" : _loginEmail;
+            HeaderUserText.Text = !string.IsNullOrWhiteSpace(_displayName)
+                ? _displayName
+                : (string.IsNullOrWhiteSpace(_loginEmail) ? "Teknisyen" : _loginEmail);
         }
     }
 
@@ -1966,20 +1978,26 @@ public sealed class DeviceModel
 }
 
 /// <summary>
-/// Teknisyen uygulamasının sunucu URL'ini ve e-posta ayarlarını (%AppData%\NexMote\TechnicianApp\settings.json) saklayan statik sınıf.
+/// Teknisyen uygulamasının sunucu URL'ini, kullanıcı e-postasını ve oturum token'ını
+/// (%AppData%\NexMote\TechnicianApp\settings.json) saklayan statik sınıf.
+/// Parola HİÇBİR ZAMAN diske yazılmaz — sadece login sonrası üretilen opak oturum token'ı,
+/// Windows DPAPI (DataProtectionScope.CurrentUser) ile şifrelenmiş olarak saklanır; bu sayede
+/// dosya başka bir kullanıcı hesabına veya makineye kopyalansa bile çözülemez.
 /// </summary>
 internal static class TechnicianAppSettings
 {
     private static string SettingsPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NexMote", "TechnicianApp", "settings.json");
 
-    public static (string? ServerUrl, string? Email, string? Password, string? Token) Load()
+    private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("NexMote.TechnicianApp.Session.v1");
+
+    public static (string? ServerUrl, string? Email, string? Token) Load()
     {
         try
         {
             if (!File.Exists(SettingsPath))
             {
-                return ("https://nexmote.com", "admin@nexmote.com", "admin123", null);
+                return ("https://nexmote.com", null, null);
             }
 
             var data = JsonSerializer.Deserialize<StoredSettings>(File.ReadAllText(SettingsPath));
@@ -1987,18 +2005,17 @@ internal static class TechnicianAppSettings
             if (string.IsNullOrWhiteSpace(url) || url.Contains("192.168.0") || url.Contains("127.0.0.1") || url.Contains("localhost") || url.StartsWith("http://"))
             {
                 url = "https://nexmote.com";
-                Save(url, data?.Email ?? "admin@nexmote.com", data?.Password ?? "admin123", data?.Token);
             }
 
-            return (url, data?.Email ?? "admin@nexmote.com", data?.Password ?? "admin123", data?.Token);
+            return (url, data?.Email, DecryptToken(data?.EncryptedToken));
         }
         catch
         {
-            return ("https://nexmote.com", "admin@nexmote.com", "admin123", null);
+            return ("https://nexmote.com", null, null);
         }
     }
 
-    public static void Save(string serverUrl, string email = "admin@nexmote.com", string password = "admin123", string? token = null)
+    public static void Save(string serverUrl, string? email, string? token)
     {
         try
         {
@@ -2008,7 +2025,7 @@ internal static class TechnicianAppSettings
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new StoredSettings(serverUrl, email, password, token)));
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new StoredSettings(serverUrl, email, EncryptToken(token))));
         }
         catch
         {
@@ -2030,5 +2047,42 @@ internal static class TechnicianAppSettings
         }
     }
 
-    private sealed record StoredSettings(string ServerUrl, string Email, string? Password = "admin123", string? Token = null);
+    private static string? EncryptToken(string? token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return null;
+        }
+
+        try
+        {
+            var cipher = ProtectedData.Protect(Encoding.UTF8.GetBytes(token), DpapiEntropy, DataProtectionScope.CurrentUser);
+            return Convert.ToBase64String(cipher);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static string? DecryptToken(string? encryptedToken)
+    {
+        if (string.IsNullOrEmpty(encryptedToken))
+        {
+            return null;
+        }
+
+        try
+        {
+            var plain = ProtectedData.Unprotect(Convert.FromBase64String(encryptedToken), DpapiEntropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch
+        {
+            // Blob bozuk, başka bir kullanıcıya/makineye ait ya da süresi dolmuş — yeniden login tetiklenir.
+            return null;
+        }
+    }
+
+    private sealed record StoredSettings(string ServerUrl, string? Email, string? EncryptedToken);
 }

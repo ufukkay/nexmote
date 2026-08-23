@@ -38,6 +38,21 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<DeletedDeviceEntity> DeletedDevices => Set<DeletedDeviceEntity>();
 
+    /// <summary>
+    /// Web konsoluna ve Teknisyen uygulamasına giriş yapabilen insan kullanıcılar (Admin/Teknisyen) tablosu.
+    /// </summary>
+    public DbSet<UserEntity> Users => Set<UserEntity>();
+
+    /// <summary>
+    /// Kullanıcı oturum token'ları (opak, DB'de sadece hash tutulur) ve bekleyen MFA challenge'ları tablosu.
+    /// </summary>
+    public DbSet<UserSessionEntity> UserSessions => Set<UserSessionEntity>();
+
+    /// <summary>
+    /// İnsan kullanıcıların giriş/çıkış ve yönetimsel eylemlerinin denetim logu tablosu.
+    /// </summary>
+    public DbSet<ActivityLogEntity> ActivityLogs => Set<ActivityLogEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -75,6 +90,29 @@ public sealed class AppDbContext : DbContext
             entity.HasKey(c => c.Id);
             entity.HasIndex(c => c.DeviceId);
             entity.HasIndex(c => c.ExecutedAt);
+        });
+
+        // Kullanıcı e-posta benzersizlik indeksi
+        modelBuilder.Entity<UserEntity>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.HasIndex(u => u.Email).IsUnique();
+        });
+
+        // Kullanıcı oturumu token hash ve kullanıcı indeksleri
+        modelBuilder.Entity<UserSessionEntity>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.TokenHash).IsUnique();
+            entity.HasIndex(s => s.UserId);
+        });
+
+        // Denetim logu kullanıcı ve zaman indeksleri
+        modelBuilder.Entity<ActivityLogEntity>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => a.UserId);
+            entity.HasIndex(a => a.CreatedAt);
         });
     }
 }
@@ -275,4 +313,128 @@ public sealed class DeletedDeviceEntity
     public string DomainName { get; set; } = string.Empty;
 
     public DateTimeOffset DeletedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Roller. Admin: tam yetki (kullanıcı yönetimi, ayarlar, cihaz silme, denetim logu).
+/// Technician: cihazları görüntüleme, uzaktan oturum açma, komut çalıştırma; yönetimsel ekranlara erişemez.
+/// </summary>
+public static class UserRoles
+{
+    public const string Admin = "Admin";
+    public const string Technician = "Technician";
+}
+
+/// <summary>
+/// Web konsoluna ve Teknisyen uygulamasına giriş yapabilen bir insan kullanıcıyı temsil eden veritabanı varlığı.
+/// </summary>
+public sealed class UserEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    /// <summary>Giriş e-postası (benzersiz).</summary>
+    [Required]
+    [MaxLength(256)]
+    public string Email { get; set; } = string.Empty;
+
+    /// <summary>Arayüzde gösterilecek görünen ad.</summary>
+    [Required]
+    [MaxLength(128)]
+    public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary><see cref="Microsoft.AspNetCore.Identity.PasswordHasher{TUser}"/> ile üretilmiş PBKDF2 şifre hash'i.</summary>
+    [Required]
+    [MaxLength(512)]
+    public string PasswordHash { get; set; } = string.Empty;
+
+    /// <summary><see cref="UserRoles"/> içindeki rollerden biri.</summary>
+    [Required]
+    [MaxLength(32)]
+    public string Role { get; set; } = UserRoles.Technician;
+
+    /// <summary>false ise hesap devre dışıdır, giriş yapamaz (silinmez — denetim logu bütünlüğü için).</summary>
+    public bool IsActive { get; set; } = true;
+
+    /// <summary>Kullanıcı TOTP tabanlı MFA'yı etkinleştirdi mi.</summary>
+    public bool MfaEnabled { get; set; }
+
+    /// <summary>AES ile şifrelenmiş base32 TOTP secret'ı (MFA etkin değilse null).</summary>
+    public string? MfaSecretEncrypted { get; set; }
+
+    /// <summary>Tek kullanımlık kurtarma kodlarının hash'lerini içeren JSON dizisi.</summary>
+    public string? MfaRecoveryCodesHashJson { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset? LastLoginAt { get; set; }
+}
+
+/// <summary>
+/// Opak kullanıcı oturum token'ı (sadece hash'i DB'de tutulur) ve bekleyen MFA challenge kayıtları.
+/// </summary>
+public sealed class UserSessionEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    public Guid UserId { get; set; }
+
+    /// <summary>Token'ın SHA-256 hash'i — düz metin token asla veritabanına yazılmaz.</summary>
+    [Required]
+    [MaxLength(128)]
+    public string TokenHash { get; set; } = string.Empty;
+
+    /// <summary>true ise bu kayıt henüz MFA doğrulaması bekleyen bir login adım-1 challenge'ıdır, gerçek oturum değildir.</summary>
+    public bool IsMfaPending { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>Dolu ise oturum manuel (logout) veya idari olarak iptal edilmiştir.</summary>
+    public DateTimeOffset? RevokedAt { get; set; }
+
+    [MaxLength(64)]
+    public string? IpAddress { get; set; }
+
+    [MaxLength(256)]
+    public string? UserAgent { get; set; }
+}
+
+/// <summary>
+/// İnsan kullanıcıların giriş/çıkış ve yönetimsel eylemlerinin denetim (audit) kaydı.
+/// </summary>
+public sealed class ActivityLogEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    /// <summary>Eylemi yapan kullanıcı (başarısız login denemesinde null olabilir).</summary>
+    public Guid? UserId { get; set; }
+
+    /// <summary>Kullanıcı silinmiş/değişmiş olsa bile logun anlamlı kalması için e-posta anlık görüntüsü.</summary>
+    [MaxLength(256)]
+    public string? UserEmailSnapshot { get; set; }
+
+    /// <summary>Örn. "login.success", "login.failed", "user.create", "user.role_change", "settings.update".</summary>
+    [Required]
+    [MaxLength(64)]
+    public string Action { get; set; } = string.Empty;
+
+    [MaxLength(32)]
+    public string? TargetType { get; set; }
+
+    [MaxLength(128)]
+    public string? TargetId { get; set; }
+
+    /// <summary>Eylemle ilgili ek bağlam (JSON).</summary>
+    public string? DetailsJson { get; set; }
+
+    [MaxLength(64)]
+    public string? IpAddress { get; set; }
+
+    public bool Success { get; set; } = true;
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

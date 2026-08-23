@@ -1,3 +1,7 @@
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
@@ -6,6 +10,7 @@ using NexMote.Api.Data;
 using NexMote.Api.Hubs;
 using NexMote.Api.Services;
 using NexMote.Shared.Contracts;
+using System.Security.Claims;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,14 +19,11 @@ var builder = WebApplication.CreateBuilder(args);
 if (builder.Environment.IsProduction())
 {
     var adminPassword = builder.Configuration["Admin:Password"];
-    var adminApiKey = builder.Configuration["Admin:ApiKey"];
     var enrollmentKey = builder.Configuration["Enrollment:Key"];
 
     var errors = new List<string>();
     if (string.IsNullOrWhiteSpace(adminPassword))
-        errors.Add("Admin:Password production ortamında ayarlanmalıdır.");
-    if (string.IsNullOrWhiteSpace(adminApiKey))
-        errors.Add("Admin:ApiKey production ortamında ayarlanmalıdır.");
+        errors.Add("Admin:Password production ortamında ayarlanmalıdır (ilk Admin kullanıcısının bootstrap şifresi).");
     if (string.IsNullOrWhiteSpace(enrollmentKey))
         errors.Add("Enrollment:Key production ortamında ayarlanmalıdır.");
 
@@ -40,6 +42,23 @@ if (builder.Environment.IsProduction())
 var dbPath = Path.Combine(AppContext.BaseDirectory, "nexmote.db");
 builder.Services.AddDbContextFactory<AppDbContext>(options =>
     options.UseSqlite($"Data Source={dbPath}"));
+
+// Data Protection anahtarları diske kalıcı yazılır — aksi halde her servis restart'ında
+// anahtarlar sıfırlanır ve tüm kullanıcıların MFA secret'ları kalıcı olarak çözülemez hale gelir.
+builder.Services.AddDataProtection()
+    .SetApplicationName("NexMote")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(AppContext.BaseDirectory, "dpkeys")));
+
+// Kullanıcı kimlik doğrulama: opak Bearer oturum token'ı (SessionTokenAuthHandler), statik AdminAuthFilter'ın yerini alır
+builder.Services.AddAuthentication(SessionTokenAuthHandler.SchemeName)
+    .AddScheme<AuthenticationSchemeOptions, SessionTokenAuthHandler>(SessionTokenAuthHandler.SchemeName, _ => { });
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("AnyUser", p => p.RequireAuthenticatedUser())
+    .AddPolicy("Admin", p => p.RequireAuthenticatedUser().RequireRole(UserRoles.Admin));
+
+builder.Services.AddSingleton<IPasswordHasher<UserEntity>, PasswordHasher<UserEntity>>();
+builder.Services.AddSingleton<TotpService>();
+builder.Services.AddSingleton<UserAuthService>();
 
 // Web ön yüzü ve teknisyen istemcisi için CORS politikası
 builder.Services.AddCors(options =>
@@ -138,6 +157,59 @@ using (var scope = app.Services.CreateScope())
     }
     catch { }
 
+    // Çoklu kullanıcı (Admin/Teknisyen), MFA ve denetim logu tabloları — EnsureCreated() zaten var olan bir
+    // veritabanı dosyasına yeni tablo eklemediği için (yalnızca sıfırdan oluştururken şemayı uygular),
+    // mevcut production/dev veritabanlarına bu tablolar burada elle eklenir (aynı DeletedDevices deseni).
+    try
+    {
+        db.Database.ExecuteSqlRaw(@"
+            CREATE TABLE IF NOT EXISTS ""Users"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_Users"" PRIMARY KEY,
+                ""Email"" TEXT NOT NULL,
+                ""DisplayName"" TEXT NOT NULL,
+                ""PasswordHash"" TEXT NOT NULL,
+                ""Role"" TEXT NOT NULL,
+                ""IsActive"" INTEGER NOT NULL,
+                ""MfaEnabled"" INTEGER NOT NULL,
+                ""MfaSecretEncrypted"" TEXT NULL,
+                ""MfaRecoveryCodesHashJson"" TEXT NULL,
+                ""CreatedAt"" TEXT NOT NULL,
+                ""LastLoginAt"" TEXT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS ""IX_Users_Email"" ON ""Users"" (""Email"");
+
+            CREATE TABLE IF NOT EXISTS ""UserSessions"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_UserSessions"" PRIMARY KEY,
+                ""UserId"" TEXT NOT NULL,
+                ""TokenHash"" TEXT NOT NULL,
+                ""IsMfaPending"" INTEGER NOT NULL,
+                ""CreatedAt"" TEXT NOT NULL,
+                ""ExpiresAt"" TEXT NOT NULL,
+                ""RevokedAt"" TEXT NULL,
+                ""IpAddress"" TEXT NULL,
+                ""UserAgent"" TEXT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS ""IX_UserSessions_TokenHash"" ON ""UserSessions"" (""TokenHash"");
+            CREATE INDEX IF NOT EXISTS ""IX_UserSessions_UserId"" ON ""UserSessions"" (""UserId"");
+
+            CREATE TABLE IF NOT EXISTS ""ActivityLogs"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_ActivityLogs"" PRIMARY KEY,
+                ""UserId"" TEXT NULL,
+                ""UserEmailSnapshot"" TEXT NULL,
+                ""Action"" TEXT NOT NULL,
+                ""TargetType"" TEXT NULL,
+                ""TargetId"" TEXT NULL,
+                ""DetailsJson"" TEXT NULL,
+                ""IpAddress"" TEXT NULL,
+                ""Success"" INTEGER NOT NULL,
+                ""CreatedAt"" TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ""IX_ActivityLogs_UserId"" ON ""ActivityLogs"" (""UserId"");
+            CREATE INDEX IF NOT EXISTS ""IX_ActivityLogs_CreatedAt"" ON ""ActivityLogs"" (""CreatedAt"");
+        ");
+    }
+    catch { }
+
     if (!db.ServerSettings.Any())
     {
         var bootstrapUrl = builder.Configuration["PublicUrl"] ?? "https://nexmote.com";
@@ -152,10 +224,19 @@ using (var scope = app.Services.CreateScope())
         db.ServerSettings.Add(bootstrapSetting);
         db.SaveChanges();
     }
+
+    // İlk açılışta Users tablosu boşsa, eski tekil admin konfigürasyonundan (Admin:Email/Password)
+    // gerçek bir Admin kullanıcısı seed edilir — production sunucusu koptan geçiş yapmasın diye.
+    var passwordHasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher<UserEntity>>();
+    var bootstrapEmail = builder.Configuration["Admin:Email"] ?? "admin@nexmote.com";
+    var bootstrapPassword = builder.Configuration["Admin:Password"] ?? "admin123";
+    UserAuthService.EnsureBootstrapAdmin(db, passwordHasher, bootstrapEmail, bootstrapPassword);
 }
 
 app.UseCors("web");
 app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 
 // Statik dosyaların ve React web konsolunun (wwwroot) sunulması
 app.UseDefaultFiles();
@@ -167,27 +248,135 @@ app.UseStaticFiles();
 app.MapGet("/health", () => Results.Ok(new { product = "NexMote", status = "ok", at = DateTimeOffset.UtcNow }));
 
 /// <summary>
-/// Admin e-posta ve şifresini doğrulayarak korumalı API istekleri için Bearer ApiKey token'ı döner.
+/// Giriş adım 1: e-posta/şifre doğrular. MFA kapalıysa doğrudan oturum token'ı, açıksa bir MFA challenge token'ı döner.
 /// </summary>
-app.MapPost("/api/auth/login", (AdminLoginRequest request, IConfiguration config) =>
+app.MapPost("/api/auth/login", (AdminLoginRequest request, bool? rememberMe, HttpContext http, UserAuthService auth) =>
 {
-    var expectedEmail = config["Admin:Email"] ?? "admin@nexmote.com";
-    var expectedPassword = config["Admin:Password"] ?? "admin123";
-    var apiKey = config["Admin:ApiKey"];
-
-    var isValid = string.Equals(request.Email, expectedEmail, StringComparison.OrdinalIgnoreCase) &&
-                  string.Equals(request.Password, expectedPassword, StringComparison.Ordinal);
-
-    if (!isValid || string.IsNullOrEmpty(apiKey))
-    {
-        return Results.Unauthorized();
-    }
-
-    return Results.Ok(new AdminLoginResponse(apiKey));
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+    var response = auth.LoginStep1(request.Email, request.Password, rememberMe ?? false, ip, http.Request.Headers.UserAgent.ToString());
+    return response is null ? Results.Unauthorized() : Results.Ok(response);
 }).RequireRateLimiting("login");
 
-// Admin ve Teknisyen korumalı rota grubu (AdminAuthFilter ile Bearer token doğrulanır)
-var admin = app.MapGroup("/api").AddEndpointFilter<AdminAuthFilter>();
+/// <summary>
+/// Giriş adım 2: MFA challenge token'ı + authenticator uygulamasından okunan 6 haneli kod (veya kurtarma kodu).
+/// </summary>
+app.MapPost("/api/auth/mfa/verify", (MfaVerifyRequest request, bool? rememberMe, HttpContext http, UserAuthService auth) =>
+{
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+    var response = auth.VerifyMfaStep2(request.ChallengeToken, request.Code, rememberMe ?? false, ip, http.Request.Headers.UserAgent.ToString());
+    return response is null ? Results.Unauthorized() : Results.Ok(response);
+}).RequireRateLimiting("login");
+
+/// <summary>
+/// Mevcut oturumu (Bearer token'ı) iptal eder.
+/// </summary>
+app.MapPost("/api/auth/logout", (HttpContext http, UserAuthService auth) =>
+{
+    var header = http.Request.Headers.Authorization.ToString();
+    if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+    {
+        auth.Logout(header["Bearer ".Length..].Trim(), http.Connection.RemoteIpAddress?.ToString());
+    }
+    return Results.NoContent();
+}).RequireAuthorization("AnyUser");
+
+/// <summary>
+/// Giriş yapmış kullanıcının kimlik/rol bilgisini döner — web/Teknisyen UI'ının rol bazlı render yapması için.
+/// </summary>
+app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
+{
+    return Results.Ok(new CurrentUserResponse(
+        Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!),
+        user.FindFirstValue(ClaimTypes.Email)!,
+        user.FindFirstValue("display_name") ?? user.FindFirstValue(ClaimTypes.Email)!,
+        user.FindFirstValue(ClaimTypes.Role)!,
+        MfaEnabled: user.FindFirstValue("mfa_enabled") == "true"));
+}).RequireAuthorization("AnyUser");
+
+// Herkes (Admin + Teknisyen) giriş yapmış olmalı — cihaz görüntüleme, uzak oturum, komut çalıştırma
+var authed = app.MapGroup("/api").RequireAuthorization("AnyUser");
+
+// Sadece Admin — kullanıcı yönetimi, sunucu ayarları, cihaz silme, denetim logu
+var admin = app.MapGroup("/api").RequireAuthorization("Admin");
+
+/// <summary>Kendi şifresini değiştirme.</summary>
+authed.MapPost("/account/password", (ChangePasswordRequest request, ClaimsPrincipal user, UserAuthService auth) =>
+{
+    var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.ChangePassword(userId, request.CurrentPassword, request.NewPassword)
+        ? Results.NoContent()
+        : Results.BadRequest(new { message = "Mevcut şifre hatalı." });
+});
+
+/// <summary>MFA kurulumu başlatır — QR (otpauth:// URI) ve secret döner.</summary>
+authed.MapPost("/account/mfa/setup", (ClaimsPrincipal user, UserAuthService auth) =>
+{
+    var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return Results.Ok(auth.SetupMfa(userId));
+});
+
+/// <summary>MFA kurulumunu ilk 6 haneli kodla onaylar, kurtarma kodlarını bir kereliğine döner.</summary>
+authed.MapPost("/account/mfa/enable", (MfaEnableRequest request, ClaimsPrincipal user, UserAuthService auth) =>
+{
+    var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = auth.EnableMfa(userId, request.Code);
+    return result is null ? Results.BadRequest(new { message = "Kod doğrulanamadı." }) : Results.Ok(result);
+});
+
+/// <summary>MFA'yı kapatır (mevcut şifre doğrulaması gerektirir).</summary>
+authed.MapPost("/account/mfa/disable", (MfaDisableRequest request, ClaimsPrincipal user, UserAuthService auth) =>
+{
+    var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.DisableMfa(userId, request.CurrentPassword)
+        ? Results.NoContent()
+        : Results.BadRequest(new { message = "Şifre hatalı." });
+});
+
+/// <summary>Kullanıcı listesi (Admin Yetkisi Gerekir).</summary>
+admin.MapGet("/admin/users", (UserAuthService auth) => Results.Ok(auth.ListUsers()));
+
+/// <summary>Yeni Admin veya Teknisyen hesabı oluşturur, tek seferlik geçici şifre döner (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users", (CreateUserRequest request, ClaimsPrincipal actor, UserAuthService auth) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = auth.CreateUser(request.Email, request.DisplayName, request.Role, actingUserId);
+    return result is null ? Results.BadRequest(new { message = "E-posta zaten kayıtlı veya rol geçersiz." }) : Results.Ok(result);
+});
+
+/// <summary>Kullanıcının rolünü değiştirir (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users/{id:guid}/role", (Guid id, SetRoleRequest request, ClaimsPrincipal actor, UserAuthService auth) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.SetRole(id, request.Role, actingUserId) ? Results.NoContent() : Results.BadRequest(new { message = "Rol geçersiz veya kullanıcı bulunamadı." });
+});
+
+/// <summary>Kullanıcı hesabını devre dışı bırakır — tüm aktif oturumları anında iptal eder (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users/{id:guid}/disable", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.SetActive(id, false, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
+/// <summary>Devre dışı bırakılmış kullanıcı hesabını yeniden etkinleştirir (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users/{id:guid}/enable", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.SetActive(id, true, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
+/// <summary>Kilitlenmiş bir kullanıcının MFA'sını admin zorla kapatır (Admin Yetkisi Gerekir).</summary>
+admin.MapPost("/admin/users/{id:guid}/mfa/reset", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    return auth.AdminResetMfa(id, actingUserId) ? Results.NoContent() : Results.NotFound();
+});
+
+/// <summary>Sayfalanmış, filtrelenebilir denetim (activity) logu (Admin Yetkisi Gerekir).</summary>
+admin.MapGet("/admin/audit-log", (int? page, int? pageSize, Guid? userId, string? action, UserAuthService auth) =>
+{
+    var (items, total) = auth.GetAuditLog(page ?? 1, pageSize ?? 50, userId, action);
+    return Results.Ok(new { items, total });
+});
 
 /// <summary>
 /// Yeni Windows Agent istemcisinin sunucuya ilk kaydı (Enrollment).
@@ -228,9 +417,9 @@ app.MapPost("/api/agents/{deviceId:guid}/heartbeat", (Guid deviceId, DeviceHeart
 }).RequireRateLimiting("agent");
 
 /// <summary>
-/// Kayıtlı tüm cihazların ve donanım metriklerinin listesi (Admin Yetkisi Gerekir).
+/// Kayıtlı tüm cihazların ve donanım metriklerinin listesi (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapGet("/devices", (DeviceRegistry devices) => Results.Ok(devices.List()));
+authed.MapGet("/devices", (DeviceRegistry devices) => Results.Ok(devices.List()));
 
 /// <summary>
 /// Kayıtlı cihazı sistemden kalıcı olarak silme endpoint'i (Admin Yetkisi Gerekir).
@@ -285,9 +474,9 @@ admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<Ap
 
 /// <summary>
 /// Sunucu anlık performans ve donanım metriklerini (CPU, RAM, Disk, Anlık Ağ Bant Genişliği Mbps) getirme.
-/// Yalnızca admin token ile erişilebilir.
+/// Admin veya Teknisyen girişi gerekir.
 /// </summary>
-admin.MapGet("/server-metrics", (ServerTelemetryService metrics) => Results.Ok(metrics.GetMetrics()));
+authed.MapGet("/server-metrics", (ServerTelemetryService metrics) => Results.Ok(metrics.GetMetrics()));
 
 /// <summary>
 /// MSI veya kurulum dosyasını doğrudan indirme endpoint'i.
@@ -362,9 +551,9 @@ app.MapPost("/api/agents/{deviceId:guid}/network-test/upload", async (Guid devic
 });
 
 /// <summary>
-/// Seçili çevrimiçi cihaza uzaktan sessiz Agent MSI güncelleme sinyali gönderme (Admin Yetkisi Gerekir).
+/// Seçili çevrimiçi cihaza uzaktan sessiz Agent MSI güncelleme sinyali gönderme (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapPost("/agents/{deviceId:guid}/update", async (Guid deviceId, Microsoft.AspNetCore.SignalR.IHubContext<SignalingHub> hub, DeviceRegistry devices, IConfiguration config) =>
+authed.MapPost("/agents/{deviceId:guid}/update", async (Guid deviceId, Microsoft.AspNetCore.SignalR.IHubContext<SignalingHub> hub, DeviceRegistry devices, IConfiguration config) =>
 {
     var device = devices.Get(deviceId);
     if (device is null)
@@ -385,18 +574,18 @@ admin.MapPost("/agents/{deviceId:guid}/update", async (Guid deviceId, Microsoft.
 });
 
 /// <summary>
-/// Tekil cihaz detayını getirme (Admin Yetkisi Gerekir).
+/// Tekil cihaz detayını getirme (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapGet("/devices/{deviceId:guid}", (Guid deviceId, DeviceRegistry devices) =>
+authed.MapGet("/devices/{deviceId:guid}", (Guid deviceId, DeviceRegistry devices) =>
 {
     var device = devices.Get(deviceId);
     return device is null ? Results.NotFound() : Results.Ok(device);
 });
 
 /// <summary>
-/// Teknisyen için nexmote:// deep-link bağlantı oturumu oluşturma (Admin Yetkisi Gerekir).
+/// Teknisyen için nexmote:// deep-link bağlantı oturumu oluşturma (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapPost("/remote-sessions", (CreateRemoteSessionRequest request, HttpContext http, DeviceRegistry devices, RemoteSessionRegistry sessions, IConfiguration config) =>
+authed.MapPost("/remote-sessions", (CreateRemoteSessionRequest request, HttpContext http, DeviceRegistry devices, RemoteSessionRegistry sessions, IConfiguration config) =>
 {
     var device = devices.Get(request.DeviceId);
     if (device is null)
@@ -419,9 +608,9 @@ admin.MapPost("/remote-sessions", (CreateRemoteSessionRequest request, HttpConte
 });
 
 /// <summary>
-/// Web Konsolundan doğrudan cihaz üzerinde CMD veya PowerShell komutu çalıştırma (Admin Yetkisi Gerekir).
+/// Web Konsolundan doğrudan cihaz üzerinde CMD veya PowerShell komutu çalıştırma (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapPost("/devices/{id:guid}/execute-command", async (
+authed.MapPost("/devices/{id:guid}/execute-command", async (
     Guid id,
     ExecuteCommandApiRequest request,
     Microsoft.AspNetCore.SignalR.IHubContext<SignalingHub> hubContext,
@@ -500,9 +689,9 @@ admin.MapPost("/devices/{id:guid}/execute-command", async (
 });
 
 /// <summary>
-/// Web Konsolundan hedef bilgisayardaki seçili uygulamayı sessizce (silent uninstall) kaldırma (Admin Yetkisi Gerekir).
+/// Web Konsolundan hedef bilgisayardaki seçili uygulamayı sessizce (silent uninstall) kaldırma (Admin veya Teknisyen girişi gerekir).
 /// </summary>
-admin.MapPost("/devices/{id:guid}/uninstall-app", async (
+authed.MapPost("/devices/{id:guid}/uninstall-app", async (
     Guid id,
     UninstallAppApiRequest request,
     Microsoft.AspNetCore.SignalR.IHubContext<SignalingHub> hubContext,

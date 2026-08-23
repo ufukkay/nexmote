@@ -194,16 +194,21 @@ SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 
 ---
 
-## 🔐 Admin Kimlik Doğrulama (Backend API)
+## 🔐 Çoklu Kullanıcı Kimlik Doğrulama, Roller ve MFA (Backend API)
 
-Backend'de daha önce **hiç kimlik doğrulama yoktu** — `/api/devices`, `/api/settings` gibi endpoint'ler herkese açıktı (gerçek cihaz envanteri, enrollment key dahil). Bu kapatıldı:
+**2026-08-23'te köklü değişiklik:** Eskiden tek bir paylaşılan admin kimliği (`Admin:Email`/`Admin:Password`) ve herkese aynı statik `Admin:ApiKey` Bearer token'ı dönen bir model vardı — kim giriş yaptığı, ne zaman, hangi işlemi yaptığı hiç bilinmiyordu. Artık gerçek, kişiye özel çoklu kullanıcı (Admin + Teknisyen rolleri), opak DB-backed oturum token'ları ve TOTP tabanlı MFA var:
 
-- `POST /api/auth/login` — `{email, password}` alır (varsayılan: `admin@nexmote.com` / `admin123`, `Admin:Email`/`Admin:Password` env var ile değiştirilebilir), doğruysa `Admin:ApiKey` değerini token olarak döner.
-- Admin-korumalı route grubu (`AdminAuthFilter`, `Authorization: Bearer <token>` ister): `GET/POST /api/settings`, `GET /api/devices`, `GET /api/devices/{id}`, `POST /api/remote-sessions`, `POST /api/agents/{id}/update`.
-- Agent'a özel route'lar (kendi token mekanizmalarını kullanır, admin auth'a girmez): `POST /api/agents/enroll` (EnrollmentKey), `POST /api/agents/{id}/heartbeat` ve `POST /api/audit/commands` (cihaza özel AgentToken).
+- **Kullanıcılar (`Users` tablosu):** Her kullanıcının kendi e-postası, PBKDF2 şifre hash'i (`PasswordHasher<UserEntity>`, `Microsoft.Extensions.Identity.Core`), rolü (`Admin` | `Technician`), aktif/pasif durumu ve isteğe bağlı MFA'sı vardır. İlk açılışta `Users` tablosu boşsa, eski `Admin:Email`/`Admin:Password` config değerlerinden **tek bir Admin kullanıcısı** seed edilir (`UserAuthService.EnsureBootstrapAdmin`, `Program.cs`) — production geçişi koptan olmaz.
+- **Giriş akışı (2 adım):** `POST /api/auth/login` (email+şifre) → kullanıcının MFA'sı kapalıysa direkt oturum token'ı, açıksa `{requiresMfa:true, challengeToken}` döner. `POST /api/auth/mfa/verify` (challengeToken + 6 haneli TOTP kodu veya kurtarma kodu) → gerçek oturum token'ı.
+- **Oturum token'ları (`UserSessions` tablosu):** JWT değil, opak rastgele token — DB'de sadece SHA-256 hash'i tutulur (`SessionTokens.Hash`), anında iptal edilebilir (örn. bir kullanıcı devre dışı bırakıldığında `UserAuthService.SetActive` tüm aktif oturumlarını `RevokedAt` ile hemen iptal eder). `SessionTokenAuthHandler` (`Auth/`), eski statik `AdminAuthFilter`'ın yerini alan gerçek ASP.NET Core `AuthenticationHandler`'dır; `Bearer <token>` → kullanıcı + rol claim'li `ClaimsPrincipal` üretir.
+- **Yetkilendirme politikaları:** `"AnyUser"` (giriş yapmış herkes — Admin veya Teknisyen: cihaz görüntüleme, uzak oturum, komut çalıştırma, uygulama kaldırma, agent güncelleme, server-metrics) ve `"Admin"` (sadece Admin: `/api/settings`, kullanıcı yönetimi, cihaz silme, denetim logu). `Program.cs`'te `admin`/`authed` iki ayrı `MapGroup("/api").RequireAuthorization(...)` grubu olarak uygulanır.
+- **MFA (TOTP):** `Otp.NET` ile RFC 6238; secret'lar DB'de ASP.NET Core Data Protection (`IDataProtectionProvider`, anahtarlar `dpkeys/` dizininde diske kalıcı — **restart sonrası kaybolmasın diye asla in-memory bırakılmaz**) ile şifreli tutulur. Kurulum: `POST /api/account/mfa/setup` (secret + `otpauth://` URI, QR web'de client-side `qrcode` npm paketiyle render edilir) → `POST /api/account/mfa/enable` (ilk kodla onay, 10 tek kullanımlık kurtarma kodu bir kereliğine döner) → `POST /api/account/mfa/disable`. MFA hiçbir rol için zorunlu değildir, kullanıcı kendi tercihiyle açar.
+- **Kullanıcı yönetimi (Admin-only, `/api/admin/users*`):** listeleme, yeni Admin/Teknisyen oluşturma (geçici şifre üretir), rol değiştirme, devre dışı bırakma/etkinleştirme, kilitlenen bir kullanıcının MFA'sını admin adına zorla sıfırlama.
+- **Denetim logu (`ActivityLogs` tablosu, `GET /api/admin/audit-log`, Admin-only):** login başarı/başarısızlık, MFA challenge/başarısız, kullanıcı oluşturma/rol değişikliği/devre dışı bırakma, MFA aç/kapat gibi tüm insan-kullanıcı eylemlerini kaydeder — mevcut `CommandAudits` (cihazda çalıştırılan komutlar) tablosundan **ayrı** bir tablodur.
+- Agent'a özel route'lar (kendi token mekanizmalarını kullanır, insan kullanıcı auth'una hiç girmez): `POST /api/agents/enroll` (EnrollmentKey), `POST /api/agents/{id}/heartbeat` ve `POST /api/audit/commands` (cihaza özel AgentToken).
 - Herkese açık kalanlar: `GET /health`, `GET /api/downloads`, `GET /downloads/{file}`, `GET /api/updates/check` (agent/technician self-update akışı bunlara auth olmadan erişebilmeli).
-- **Sırlar asla repoya işlenmez.** `Admin:ApiKey` ve `Enrollment:Key`, sunucuda `/etc/systemd/system/nexmote.service.d/override.conf` içinde `Environment=` satırları olarak tutulur; gerçek değerleri görmek için sunucuya bağlanıp o dosyayı okumak gerekir (bkz. `docs/server-credentials.md`).
-- Web konsolu ve Teknisyen uygulaması, girişten sonra bu token'ı saklayıp (`localStorage` / bellek) her korumalı isteğe `Authorization` header'ı olarak ekliyor. Teknisyen uygulaması "login ekranı yok" kuralını korumak için **sessizce** `admin@nexmote.com`/`admin123` ile giriş yapıp token alıyor; başarısız olursa (şifre değişmişse) login ekranını gösteriyor.
+- **Sırlar asla repoya işlenmez.** `Enrollment:Key` ve bootstrap `Admin:Password`, sunucuda `/etc/systemd/system/nexmote.service.d/override.conf` içinde `Environment=` satırları olarak tutulur (bkz. `docs/server-credentials.md`). `Admin:ApiKey` **artık kullanılmıyor**, config'ten kaldırıldı.
+- **EF Core / SQLite tuzağı:** SQLite provider'ı `DateTimeOffset` kolonlarını ne `ORDER BY`'da ne de bazı bileşik `WHERE` ifadelerinde SQL'e çeviremiyor ("could not be translated" / "does not support expressions of type 'DateTimeOffset' in ORDER BY"). Bu yüzden oturum token doğrulaması önce `TokenHash` ile tek satır çekip geri kalan koşulları (`ExpiresAt`, `RevokedAt` vb.) C# tarafında kontrol ediyor; denetim logu sıralaması da `DeviceRegistry.List()` ile aynı desende önce `.ToList()` sonra client-side `OrderByDescending` yapıyor. Yeni bir DateTimeOffset alanına göre filtre/sıralama eklerken bu deseni takip edin, yoksa runtime'da 500 alırsınız.
 
 ---
 
@@ -212,17 +217,23 @@ Backend'de daha önce **hiç kimlik doğrulama yoktu** — `/api/devices`, `/api
 | Yöntem | Endpoint | Auth | Açıklama |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Sunucu durum kontrolü |
-| `POST` | `/api/auth/login` | — | Admin e-posta/şifre doğrulayıp Bearer token döner |
+| `POST` | `/api/auth/login` | — | Adım 1: e-posta/şifre → token veya `requiresMfa` + challengeToken |
+| `POST` | `/api/auth/mfa/verify` | — | Adım 2: challengeToken + TOTP/kurtarma kodu → oturum token'ı |
+| `POST` | `/api/auth/logout` | **Bearer** | Mevcut oturumu iptal eder |
+| `GET` | `/api/auth/me` | **Bearer** | Giriş yapmış kullanıcının kimlik/rol/MFA durumu |
+| `POST` | `/api/account/password` \| `/mfa/setup` \| `/mfa/enable` \| `/mfa/disable` | **Bearer** | Kendi şifre/MFA yönetimi (herkes) |
+| `GET`/`POST` | `/api/admin/users*`, `GET /api/admin/audit-log` | **Bearer (Admin)** | Kullanıcı yönetimi ve denetim logu |
 | `POST` | `/api/agents/enroll` | EnrollmentKey | Yeni Windows Agent kayıt işlemi |
 | `POST` | `/api/agents/{id}/heartbeat` | AgentToken | Agent periyodik telemetri (gerçek CPU/RAM/Disk/AgentVersion dahil) |
 | `GET` | `/api/downloads` | — | MSI paket indirme kataloğunu döner |
 | `GET` | `/downloads/{fileName}` | — | MSI dosyasını indirir |
-| `POST` | `/api/remote-sessions` | **Bearer** | Teknisyen için canlı `nexmote://` deep-link oturumu açar |
-| `GET`/`POST` | `/api/settings` | **Bearer** | Sunucu genel konfigürasyonunu okur/günceller |
-| `GET` | `/api/devices` | **Bearer** | Kayıtlı cihazların özet ve gerçek donanım metriklerini döner |
-| `GET` | `/api/devices/{id}` | **Bearer** | Tekil cihaz detayı |
+| `POST` | `/api/remote-sessions` | **Bearer (AnyUser)** | Teknisyen için canlı `nexmote://` deep-link oturumu açar |
+| `GET`/`POST` | `/api/settings` | **Bearer (Admin)** | Sunucu genel konfigürasyonunu okur/günceller |
+| `GET` | `/api/devices` | **Bearer (AnyUser)** | Kayıtlı cihazların özet ve gerçek donanım metriklerini döner |
+| `GET` | `/api/devices/{id}` | **Bearer (AnyUser)** | Tekil cihaz detayı |
+| `DELETE` | `/api/devices/{id}` | **Bearer (Admin)** | Cihazı kalıcı olarak siler |
 | `GET` | `/api/updates/check` | — | `downloads/versions.json`'dan okunan gerçek Agent/Technician sürüm ve OTA kataloğu |
-| `POST` | `/api/agents/{id}/update` | **Bearer** | Seçili (online) cihaza uzaktan sessiz Agent güncelleme sinyali gönderir |
+| `POST` | `/api/agents/{id}/update` | **Bearer (AnyUser)** | Seçili (online) cihaza uzaktan sessiz Agent güncelleme sinyali gönderir |
 | `POST` | `/api/audit/commands` | AgentToken | Uzak komut çalıştırma denetim kaydı |
 
 > `POST /api/downloads/generate` kaldırıldı — sunucuda (Linux) PowerShell/WiX olmadığı için hiçbir zaman çalışmıyordu; MSI üretimi artık sadece yerel `scripts/package-windows.ps1` ile yapılıp sunucuya elle/scp ile yükleniyor.
@@ -275,7 +286,7 @@ Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/
 
 ## 🖥️ Teknisyen Masaüstü Uygulaması (WPF) Kuralları
 
-1. **Doğrudan Açılış (Login Ekranı Yok):** Uygulama açılırken görünür bir login penceresi sormaz; arka planda sessizce `admin@nexmote.com`/`admin123` ile `/api/auth/login`'e istek atıp admin token alır, `https://nexmote.com`'a bağlanır. Sessiz giriş başarısız olursa (şifre değişmişse) login ekranını gösterir.
+1. **Gerçek Login Ekranı (2026-08-23'te değişti):** Çoklu kullanıcı + MFA mimarisiyle birlikte "sabit admin/admin123 ile sessiz giriş" kuralı kaldırıldı — artık her teknisyen **kendi hesabıyla** giriş yapar. Uygulama açılışta yerelde DPAPI (`DataProtectionScope.CurrentUser`) ile şifreli saklanan bir oturum token'ı varsa `/api/auth/me` ile geçerliliğini sessizce doğrular ve login sormadan devam eder; token yok/süresi dolmuşsa `ServerLoginWindow` gösterilir (e-posta/şifre, ardından hesapta MFA açıksa 6 haneli kod adımı). **Parola hiçbir zaman diske yazılmaz** — sadece üretilen opak oturum token'ı (`MainWindow.TechnicianAppSettings`, `%AppData%\NexMote\TechnicianApp\settings.json`) saklanır.
 2. **Local IP Engelleme:** Sunucu bağlantı adreslerinde `192.168...`, `127.0.0.1` veya `http://` tespiti halinde otomatik `https://nexmote.com` adresine zorlama yapılır.
 3. **Çoklu Ekran Yönetimi (Soldan Sağa Sıralı & Esnek Seçim):** Monitörler `Bounds.Left` değerine göre **kesin olarak soldan sağa** sıralanır. Teknisyen üst bardaki monitör seçiciden `🖥️ Tüm Ekranlar` (yan yana eş zamanlı akış) modunu veya tek tek `🖥️ Ekran 1`, `🖥️ Ekran 2` seçerek o ekranı tam boyutta izlemeyi seçebilir.
 4. **Otomatik Görüntü Kalitesi:** Manuel kalite butonu ve rozetler kaldırıldı. Agent, her karenin SignalR gönderim süresine bakarak JPEG kalitesini (20-80 aralığında) kendiliğinden ayarlar.
@@ -315,8 +326,9 @@ Tray simgesine çift tıklandığında (veya menüden "🛡️ Durum Panelini A�
 3. **Bildirim Davranışı:**
    - Otomatik 10 saniyelik periyodik cihaz yenilemeleri **sessiz (silent)** çalışır; kullanıcıya pop-up toast gösterilmez.
    - Bildirimler sadece kullanıcı manuel **Yenile** butonuna bastığında veya işlem yaptığında sağ üst zil ikonunun hemen altında çıkar.
-4. **Oturum Yönetimi (Login):**
-   - Web arayüzü ve Teknisyen uygulaması tekli teknisyen oturumu içerir (`admin@nexmote.com` / `admin123`), artık backend'de **gerçekten** doğrulanıyor (bkz. Admin Kimlik Doğrulama). Oturum token'ı `localStorage`'da saklanır.
+4. **Oturum Yönetimi (Login), Roller ve MFA:**
+   - Web konsolu ve Teknisyen uygulaması artık **çoklu kullanıcı** (Admin + Teknisyen rolleri) destekler, her kullanıcı kendi e-posta/şifresiyle giriş yapar (bkz. Çoklu Kullanıcı Kimlik Doğrulama, Roller ve MFA). Oturum token'ı web'de `localStorage`/`sessionStorage`'da, Teknisyen uygulamasında DPAPI şifreli olarak diskte saklanır.
+   - **Rol bazlı UI:** Web konsolunda "Kullanıcı Yönetimi" ve "Denetim Logu" sekmeleri ile Sunucu Ayarları kartı sadece `Admin` rolüne görünür; Teknisyen rolü cihaz listesi/uzak oturum/komut çalıştırmayı görebilir ama yönetimsel ekranlara erişemez. Herkes kendi "Hesap Ayarları"ndan şifresini değiştirebilir ve MFA'yı (TOTP, isteğe bağlı) açıp kapatabilir.
 
 ---
 
@@ -340,7 +352,7 @@ cmd /c "npm --prefix web run build"
 ```powershell
 .\.dotnet\dotnet.exe run --project src/NexMote.Api/NexMote.Api.csproj --urls "http://127.0.0.1:5080"
 ```
-Yerel geliştirmede `Admin:ApiKey` = `dev-admin-api-key`, `Enrollment:Key` = `dev-enrollment-key` (appsettings.json'da tanımlı, production'da KULLANILMAZ).
+Yerel geliştirmede bootstrap Admin: `admin@nexmote.com` / `admin123` (`Admin:Email`/`Admin:Password`, appsettings.json'da tanımlı, sadece `Users` tablosu boşken ilk açılışta kullanılır), `Enrollment:Key` = `dev-enrollment-key` (production'da KULLANILMAZ).
 
 ### 4. MSI Paketlerini Yeniden Oluşturma (Agent + Teknisyen)
 ```powershell
@@ -381,6 +393,7 @@ scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi down
 - **Servis Yöneticisi:** `systemd` (`nexmote.service` -> `/var/www/nexmote/NexMote.Api.dll --urls http://127.0.0.1:5080`)
   - Sırlar: `/etc/systemd/system/nexmote.service.d/override.conf` (`Admin__ApiKey`, `Enrollment__Key` — repoya işlenmez)
 - **Veritabanı:** SQLite (`/var/www/nexmote/nexmote.db`)
+- **MFA Data Protection anahtarları:** `/var/www/nexmote/dpkeys/` — kullanıcıların TOTP secret'larını şifreleyen anahtarlar burada kalıcı. `unzip -o` ile yapılan deploy bu dizine dokunmaz (zip içinde yer almaz), ama **elle silinirse tüm kullanıcıların MFA'sı kalıcı olarak çözülemez hale gelir** (şifre girişi etkilenmez, sadece MFA'yı herkesin yeniden kurması gerekir).
 - **Kayıtlı test/demo cihazları:** TAL-01888 (aktif test cihazı), DESKTOP-SIH3FAC (kullanıcının kendi bilgisayarı — 2026-08-22'de doğrulandı, test için kullanılabilir), 36D6735F-A0A6-4, PC-UFUK
 
 ---

@@ -26,12 +26,6 @@ public partial class App : Application
         base.OnStartup(e);
 
         var window = new MainWindow();
-        if (!window.CredentialsReady)
-        {
-            Shutdown();
-            return;
-        }
-
         window.Show();
     }
 }
