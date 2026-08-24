@@ -518,6 +518,9 @@
                             <!-- Command Terminal Drawer -->
                             <Button x:Name="IslandCommandBtn" Style="{StaticResource IslandBtn}" Content="Komut" ToolTip="Uzak CMD / PowerShell komut terminali" Click="CommandPanelToggleBtn_Click"/>
 
+                            <!-- Clipboard Sync -->
+                            <Button x:Name="IslandClipboardBtn" Style="{StaticResource IslandBtn}" Content="📋 Pano" ToolTip="Yerel panodaki metni uzak cihaza gönderir (uzak cihazın panosu da otomatik olarak buraya senkronize olur)" Click="SendClipboardBtn_Click"/>
+
                             <!-- Ctrl+Alt+Del / SAS Action -->
                             <Button x:Name="IslandSasBtn" Style="{StaticResource IslandBtn}" Content="🔑 Kilit Aç" ToolTip="Uzak bilgisayara Ctrl+Alt+Del (SAS) gönderir" Click="SendSasBtn_Click"/>
 

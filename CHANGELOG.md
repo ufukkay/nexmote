@@ -4,7 +4,17 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.6.3] - 2026-08-19 (Güncel Canlı Sürüm)
+## 🏷️ [v0.6.9] - 2026-08-24 (Güncel Canlı Sürüm)
+### 🚀 Yeni Özellikler
+- **Bağlantı Onayı (Consent) ve Granüler Ajan İzinleri:** Güvenlik profillerine, teknisyen bağlanmadan önce hedef kullanıcıdan onay istenmesini sağlayan bir onay modu (`Kısıtsız` / `Her Zaman Sor` / `Kullanıcı Aktifse Sor`, zaman aşımlı onay diyaloğu) ve dört ayrı izin bayrağı (`Sadece İzleme`, `Uzak Terminal`, `Pano`, `Dosya Aktarımı`) eklendi. Onay bekleniyorken hedef ekranda "Teknisyen Bağlı" rozeti (`ShowConnectionBanner`) gösterilir; teknisyen tarafında bekleme/red durumları canlı olarak state olarak yansıtılır.
+### 🛠️ Hata Düzeltmeleri
+- **Ajan Sunucuya Bağlanamıyor Görünüyordu:** Kök neden yanlış anlaşılıyordu — sunucu/ağ sorunu değil, daha önce web panelinden silinmiş bir cihazın (`DeletedDevices` tablosu) otomatik yeniden kaydının kasıtlı olarak engellenmesiydi (`DeviceRegistry.Enroll`). Etkilenen cihaz kaydı üretimde temizlendi.
+- **Web Konsolu Kenar Çubuğunda Bayat Sürüm Etiketi:** `App.tsx`'teki sabitlenmiş `v0.6.3 Pro` metni hiçbir zaman güncellenmiyordu (0.6.4-0.6.8 sürümleri boyunca yanlış gösterim) — artık gerçek sürümü yansıtıyor.
+- **Eksik Veritabanı Kolonu Migration'ı:** `SecurityProfileEntity`'ye eklenen 8 yeni bağlantı onayı/izin kolonu için `Program.cs`'teki manuel `ALTER TABLE` bloğu unutulmuştu — bu haliyle canlıya alınsaydı mevcut `SecurityProfiles` tablosunda "no such column" hatasıyla tüm güvenlik profili sorguları kırılırdı. Aynı `ALTER TABLE ... try/catch` deseniyle tamamlandı.
+
+---
+
+## 🏷️ [v0.6.3] - 2026-08-19
 ### 🚀 Yeni Özellikler
 - **Web Üzerinden Uzaktan Sessiz Ajan Kaldırma (Remote Self-Uninstall):**
   - Web konsolundan bir cihaz veya birden çok cihaz silinirken açılan onay modalında `🛡️ Hedef Bilgisayardaki NexMote Ajanını da Kaldır (Sessiz Uninstall)` seçeneği eklendi (çevrimiçi cihazlar için varsayılan olarak aktif).

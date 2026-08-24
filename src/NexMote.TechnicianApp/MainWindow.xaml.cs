@@ -497,6 +497,39 @@ public partial class MainWindow : Window
                 Dispatcher.Invoke(() => StatusText.Text = "Hedef cihaz bağlandı, canlı ekran akışı bekleniyor...");
             });
 
+            _connection.On<string>("SessionStatusChanged", status =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    if (string.Equals(status, "waiting_consent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StatusText.Text = "⏳ Hedef kullanıcıdan bağlantı onayı bekleniyor...";
+                        PlaceholderTitle.Text = "Kullanıcı Onayı Bekleniyor";
+                        PlaceholderText.Text = "Hedef bilgisayara uzaktan bağlantı onay isteği gönderildi. Kullanıcının kabul etmesi bekleniyor...";
+                        PlaceholderPanel.Visibility = Visibility.Visible;
+                    }
+                    else if (string.Equals(status, "consent_accepted", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StatusText.Text = "✔ Kullanıcı onay verdi, canlı ekran başlatılıyor...";
+                    }
+                    else if (string.Equals(status, "consent_rejected", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StatusText.Text = "✖ Bağlantı isteği kullanıcı tarafından reddedildi.";
+                        PlaceholderTitle.Text = "Bağlantı Reddedildi";
+                        PlaceholderText.Text = "Hedef bilgisayardaki kullanıcı uzaktan bağlantı isteğini reddetti veya zaman aşımına uğradı.";
+                        PlaceholderPanel.Visibility = Visibility.Visible;
+                    }
+                });
+            });
+
+            _connection.On<string>("ConsentRejected", reason =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    MessageBox.Show(reason ?? "Hedef kullanıcı bağlantı isteğini reddetti.", "NexMote - Bağlantı Reddedildi", MessageBoxButton.OK, MessageBoxImage.Warning);
+                });
+            });
+
             _connection.On<string, string>("SignalReceived", (type, payload) =>
             {
                 if (string.Equals(type, "screen-info", StringComparison.OrdinalIgnoreCase))
@@ -532,6 +565,23 @@ public partial class MainWindow : Window
                 if (string.Equals(type, "command-result", StringComparison.OrdinalIgnoreCase))
                 {
                     Dispatcher.Invoke(() => ShowCommandResult(payload));
+                    return;
+                }
+
+                if (string.Equals(type, "clipboard-text", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!string.IsNullOrEmpty(payload))
+                    {
+                        Dispatcher.Invoke(() =>
+                        {
+                            try
+                            {
+                                Clipboard.SetText(payload);
+                                StatusText.Text = "Uzak cihazın pano içeriği alındı.";
+                            }
+                            catch { }
+                        });
+                    }
                 }
             });
 
@@ -1594,6 +1644,31 @@ public partial class MainWindow : Window
             {
                 break;
             }
+        }
+    }
+
+    private async void SendClipboardBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_sessionId is null || _connection?.State != HubConnectionState.Connected) return;
+
+        try
+        {
+            if (Clipboard.ContainsText())
+            {
+                var text = Clipboard.GetText();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    await _connection.InvokeAsync("SendSignal", _sessionId.Value, "clipboard-text", text);
+                    StatusText.Text = "Pano metni uzak cihaza gönderildi.";
+                    return;
+                }
+            }
+
+            StatusText.Text = "Yerel panoda metin bulunamadı.";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Pano aktarım hatası: {ex.Message}";
         }
     }
 

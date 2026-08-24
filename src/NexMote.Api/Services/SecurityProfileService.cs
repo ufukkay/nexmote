@@ -161,10 +161,25 @@ public sealed class SecurityProfileService
         if (profile is null)
         {
             // Profil yok (ne cihazda ne mirasında) — kısıtlama yok, varsayılan davranış.
-            return new AgentSecurityProfileResponse(null, null, false, false);
+            return new AgentSecurityProfileResponse(
+                null, null, false, false,
+                SecurityProfileConstants.ConsentUnattended, 30, SecurityProfileConstants.ActionDeny,
+                false, true, true, true, true);
         }
 
-        return new AgentSecurityProfileResponse(profile.AgentDisplayName, profile.IconBase64, profile.RestrictTrayMenu, profile.RequirePassword);
+        return new AgentSecurityProfileResponse(
+            profile.AgentDisplayName,
+            profile.IconBase64,
+            profile.RestrictTrayMenu,
+            profile.RequirePassword,
+            profile.ConsentMode,
+            profile.ConsentTimeoutSeconds,
+            profile.ConsentDefaultAction,
+            profile.ViewOnlyMode,
+            profile.AllowRemoteTerminal,
+            profile.AllowClipboard,
+            profile.AllowFileTransfer,
+            profile.ShowConnectionBanner);
     }
 
     public bool VerifyPassword(Guid deviceId, string agentToken, string action, string password)
@@ -197,11 +212,20 @@ public sealed class SecurityProfileService
     }
 
     /// <summary>
+    /// Harici servislerin (örn. SignalingHub) cihaz için geçerli etkin güvenlik profilini sorgulaması için genel metod.
+    /// </summary>
+    public SecurityProfileEntity? GetEffectiveProfile(Guid deviceId)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return ResolveEffectiveProfile(db, deviceId);
+    }
+
+    /// <summary>
     /// Bir cihazın etkin güvenlik profilini çözer: önce cihazın kendi ataması (varsa, her zaman kazanır),
     /// yoksa cihazın grubundan başlayıp <c>ParentGroupId</c> zincirinde yukarı doğru ilk
     /// <c>DefaultSecurityProfileId</c> dolu olan grup. Hiçbiri yoksa null (kısıtlama yok).
     /// </summary>
-    private static SecurityProfileEntity? ResolveEffectiveProfile(AppDbContext db, Guid deviceId)
+    public static SecurityProfileEntity? ResolveEffectiveProfile(AppDbContext db, Guid deviceId)
     {
         var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
         if (device is null)
@@ -257,8 +281,35 @@ public sealed class SecurityProfileService
         {
             profile.PasswordHash = _passwordHasher.HashPassword(profile, request.Password);
         }
+
+        profile.ConsentMode = string.IsNullOrWhiteSpace(request.ConsentMode) ? SecurityProfileConstants.ConsentUnattended : request.ConsentMode.Trim();
+        profile.ConsentTimeoutSeconds = request.ConsentTimeoutSeconds > 0 ? request.ConsentTimeoutSeconds : 30;
+        profile.ConsentDefaultAction = string.Equals(request.ConsentDefaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase)
+            ? SecurityProfileConstants.ActionAllow
+            : SecurityProfileConstants.ActionDeny;
+
+        profile.ViewOnlyMode = request.ViewOnlyMode;
+        profile.AllowRemoteTerminal = request.AllowRemoteTerminal;
+        profile.AllowClipboard = request.AllowClipboard;
+        profile.AllowFileTransfer = request.AllowFileTransfer;
+        profile.ShowConnectionBanner = request.ShowConnectionBanner;
     }
 
     private static SecurityProfileDetail ToDetail(SecurityProfileEntity p) => new(
-        p.Id, p.Name, p.AgentDisplayName, p.IconBase64, p.RestrictTrayMenu, p.RequirePassword, p.CreatedAt, p.UpdatedAt);
+        p.Id,
+        p.Name,
+        p.AgentDisplayName,
+        p.IconBase64,
+        p.RestrictTrayMenu,
+        p.RequirePassword,
+        p.ConsentMode,
+        p.ConsentTimeoutSeconds,
+        p.ConsentDefaultAction,
+        p.ViewOnlyMode,
+        p.AllowRemoteTerminal,
+        p.AllowClipboard,
+        p.AllowFileTransfer,
+        p.ShowConnectionBanner,
+        p.CreatedAt,
+        p.UpdatedAt);
 }

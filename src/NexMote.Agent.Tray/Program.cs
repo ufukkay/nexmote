@@ -447,6 +447,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _uiContext?.Post(_ =>
             {
                 _securityProfile = profile;
+                _streamer.SetSecurityProfile(profile);
                 ApplyBranding();
                 if (_notifyIcon != null)
                 {
@@ -1654,6 +1655,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _starting;
     private bool _disposed;
     private bool _joinedDeviceGroup;
+    private AgentSecurityProfileResponse? _securityProfile;
+    private ConnectionBannerForm? _bannerForm;
+    private volatile string? _lastClipboardText;
     private int _adaptiveQuality = 72;
     private readonly object _qualityLock = new();
     private readonly ConcurrentDictionary<int, long> _lastAckedSequencePerDisplay = new();
@@ -1670,6 +1674,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     }
 
     public bool IsConnected => _connection?.State == HubConnectionState.Connected;
+
+    public void SetSecurityProfile(AgentSecurityProfileResponse? profile)
+    {
+        _securityProfile = profile;
+    }
 
     public void UpdateServerUrl(string newUrl)
     {
@@ -1735,6 +1744,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             .WithAutomaticReconnect()
             .Build();
 
+        _connection.On<ConnectionConsentRequest>("PromptConsentRequested", request =>
+        {
+            _ = HandleConsentRequestAsync(request);
+        });
+
         _connection.On<Guid>("RemoteSessionRequested", sessionId =>
         {
             _ = HandleRemoteSessionRequestedAsync(sessionId);
@@ -1744,6 +1758,10 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         {
             if (string.Equals(type, "remote-input", StringComparison.OrdinalIgnoreCase))
             {
+                if (_securityProfile?.ViewOnlyMode == true)
+                {
+                    return; // Sadece izleme modu aktif
+                }
                 HandleRemoteInput(payload);
             }
             else if (string.Equals(type, "ping", StringComparison.OrdinalIgnoreCase))
@@ -1763,10 +1781,15 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             }
             else if (string.Equals(type, "clipboard-text", StringComparison.OrdinalIgnoreCase))
             {
+                if (_securityProfile?.AllowClipboard == false)
+                {
+                    return; // Pano paylaşımı kapalı
+                }
                 try
                 {
                     if (!string.IsNullOrEmpty(payload))
                     {
+                        _lastClipboardText = payload; // Yankıyı önle: bu değeri biz set ettik, izleme döngüsü tekrar göndermesin
                         Thread thread = new(() => Clipboard.SetText(payload));
                         thread.SetApartmentState(ApartmentState.STA);
                         thread.Start();
@@ -1776,10 +1799,23 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             }
             else if (string.Equals(type, "file-chunk", StringComparison.OrdinalIgnoreCase))
             {
+                if (_securityProfile?.AllowFileTransfer == false)
+                {
+                    return; // Dosya transferi kapalı
+                }
                 HandleFileChunk(payload);
             }
             else if (string.Equals(type, "remote-command", StringComparison.OrdinalIgnoreCase))
             {
+                if (_securityProfile?.AllowRemoteTerminal == false)
+                {
+                    if (_activeSessionId.HasValue && _connection?.State == HubConnectionState.Connected)
+                    {
+                        _ = _connection.InvokeAsync("SendSignal", _activeSessionId.Value, "command-result",
+                            JsonSerializer.Serialize(new { output = "Uzak terminal güvenlik profili tarafından devre dışı bırakılmıştır.", exitCode = 1 }));
+                    }
+                    return;
+                }
                 _ = HandleRemoteCommandAsync(payload);
             }
             else if (string.Equals(type, "set-quality-mode", StringComparison.OrdinalIgnoreCase))
@@ -1799,6 +1835,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             }
             else if (string.Equals(type, "send-sas", StringComparison.OrdinalIgnoreCase))
             {
+                if (_securityProfile?.ViewOnlyMode == true) return;
                 if (!TrySendToInputHelper(JsonSerializer.Serialize(new RemoteInputEvent(_activeSessionId ?? Guid.Empty, "send-sas"))))
                 {
                     SasHelper.SendSas();
@@ -1876,6 +1913,43 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
     }
 
+    private async Task HandleConsentRequestAsync(ConnectionConsentRequest req)
+    {
+        if (_connection is null || _identity is null) return;
+        bool accepted = false;
+        try
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    using var dlg = new ConsentDialogForm(req.TechnicianName, req.TimeoutSeconds, req.DefaultAction);
+                    dlg.ShowDialog();
+                    tcs.SetResult(dlg.Accepted);
+                }
+                catch (Exception ex)
+                {
+                    tcs.SetException(ex);
+                }
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+
+            accepted = await tcs.Task;
+        }
+        catch
+        {
+            accepted = string.Equals(req.DefaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            await _connection.InvokeAsync("SubmitConsentResponse", req.SessionId, _identity.DeviceId, _identity.AgentToken, accepted, accepted ? null : "Hedef kullanıcı bağlantı isteğini reddetti.");
+        }
+        catch { }
+    }
+
     private async Task JoinDeviceAsync()
     {
         if (_connection is null || _identity is null)
@@ -1945,7 +2019,15 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _activeSessionId = sessionId;
         _ = SendScreenInfoAsync(sessionId);
 
+        if (_securityProfile?.ShowConnectionBanner != false)
+        {
+            ShowBanner();
+        }
+
         var token = _streamCancellation.Token;
+        token.Register(() => HideBanner());
+        StartClipboardWatch(sessionId, token);
+
         var info = ScreenCapture.GetInfo();
         var displays = (info.Displays ?? Array.Empty<DisplayItem>()).Where(d => d.Index > 0).ToList();
         if (displays.Count == 0)
@@ -1960,6 +2042,77 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 _ = Task.Run(() => StreamLoopAsync(sessionId, capturedIndex, token));
             }
         }
+    }
+
+    private void ShowBanner()
+    {
+        try
+        {
+            if (_bannerForm != null && !_bannerForm.IsDisposed) return;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    var title = _securityProfile?.AgentDisplayName ?? "NexMote";
+                    _bannerForm = new ConnectionBannerForm(title);
+                    Application.Run(_bannerForm);
+                }
+                catch { }
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Start();
+        }
+        catch { }
+    }
+
+    private void HideBanner()
+    {
+        try
+        {
+            if (_bannerForm != null && !_bannerForm.IsDisposed)
+            {
+                _bannerForm.Invoke(() => _bannerForm.Close());
+                _bannerForm = null;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Aktif oturum boyunca yerel panoyu periyodik olarak izler; değişiklik tespit edilirse
+    /// (ve güvenlik profili izin veriyorsa) teknisyene "clipboard-text" sinyaliyle iletir.
+    /// Clipboard erişimi STA gerektirdiğinden bu döngü kendi ayrılmış STA iş parçacığında çalışır.
+    /// </summary>
+    private void StartClipboardWatch(Guid sessionId, CancellationToken token)
+    {
+        var thread = new Thread(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    if (_securityProfile?.AllowClipboard != false && Clipboard.ContainsText())
+                    {
+                        var text = Clipboard.GetText();
+                        if (!string.IsNullOrEmpty(text) && text != _lastClipboardText)
+                        {
+                            _lastClipboardText = text;
+                            if (_connection?.State == HubConnectionState.Connected && _activeSessionId == sessionId)
+                            {
+                                _connection.InvokeAsync("SendSignal", sessionId, "clipboard-text", text).GetAwaiter().GetResult();
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                token.WaitHandle.WaitOne(1000);
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
     }
 
     private async Task SendScreenInfoAsync(Guid sessionId)
@@ -3717,6 +3870,174 @@ internal static class PowerHelper
         }
         catch
         {
+        }
+    }
+}
+
+/// <summary>
+/// Teknisyen bağlandığında hedef bilgisayardaki kullanıcının karşısına çıkan geri sayımlı bağlantı onay formu.
+/// </summary>
+internal sealed class ConsentDialogForm : Form
+{
+    private readonly System.Windows.Forms.Timer _timer;
+    private int _remainingSeconds;
+    private readonly string _defaultAction;
+    private readonly Label _lblTimer;
+    public bool Accepted { get; private set; }
+
+    public ConsentDialogForm(string technicianName, int timeoutSeconds, string defaultAction)
+    {
+        _remainingSeconds = timeoutSeconds > 0 ? timeoutSeconds : 30;
+        _defaultAction = defaultAction;
+
+        Text = "NexMote - Uzaktan Bağlantı İsteği";
+        Width = 440;
+        Height = 225;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        TopMost = true;
+        BackColor = Color.FromArgb(20, 24, 33);
+        ForeColor = Color.FromArgb(240, 244, 248);
+        Icon = IconHelper.GetAppIcon();
+
+        var pnlHeader = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 48,
+            BackColor = Color.FromArgb(15, 18, 25),
+            Padding = new Padding(16, 12, 16, 0)
+        };
+        var lblTitle = new Label
+        {
+            Text = "🛡️ Uzaktan Bağlantı Onayı",
+            Font = new Font("Segoe UI", 11.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(74, 222, 128),
+            AutoSize = true
+        };
+        pnlHeader.Controls.Add(lblTitle);
+
+        var lblMsg = new Label
+        {
+            Text = $"Teknisyen [{technicianName}] bilgisayarınıza uzaktan bağlanmak istiyor.\n\nBağlantıya izin veriyor musunuz?",
+            Font = new Font("Segoe UI", 9.5F),
+            ForeColor = Color.FromArgb(220, 225, 235),
+            Location = new Point(18, 58),
+            Size = new Size(400, 52)
+        };
+
+        var defText = string.Equals(_defaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase) ? "Otomatik Kabul" : "Otomatik Reddet";
+        _lblTimer = new Label
+        {
+            Text = $"Kalan süre: {_remainingSeconds} sn ({defText})",
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Italic),
+            ForeColor = Color.FromArgb(148, 163, 184),
+            Location = new Point(18, 115),
+            AutoSize = true
+        };
+
+        var btnAccept = new Button
+        {
+            Text = "✔ Kabul Et",
+            DialogResult = DialogResult.OK,
+            Location = new Point(190, 142),
+            Size = new Size(110, 32),
+            BackColor = Color.FromArgb(34, 197, 94),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnAccept.FlatAppearance.BorderSize = 0;
+        btnAccept.Click += (_, _) => { Accepted = true; Close(); };
+
+        var btnReject = new Button
+        {
+            Text = "✖ Reddet",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(310, 142),
+            Size = new Size(100, 32),
+            BackColor = Color.FromArgb(239, 68, 68),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnReject.FlatAppearance.BorderSize = 0;
+        btnReject.Click += (_, _) => { Accepted = false; Close(); };
+
+        Controls.Add(pnlHeader);
+        Controls.Add(lblMsg);
+        Controls.Add(_lblTimer);
+        Controls.Add(btnAccept);
+        Controls.Add(btnReject);
+
+        AcceptButton = btnAccept;
+        CancelButton = btnReject;
+
+        _timer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _timer.Tick += (_, _) =>
+        {
+            _remainingSeconds--;
+            if (_remainingSeconds <= 0)
+            {
+                _timer.Stop();
+                Accepted = string.Equals(_defaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase);
+                Close();
+            }
+            else
+            {
+                _lblTimer.Text = $"Kalan süre: {_remainingSeconds} sn ({defText})";
+            }
+        };
+        _timer.Start();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _timer.Stop();
+        _timer.Dispose();
+        base.OnFormClosed(e);
+    }
+}
+
+/// <summary>
+/// Uzaktan oturum açıkken masaüstünün sağ üst köşesinde görünen küçük, odak çalmayan bildirim rozeti.
+/// </summary>
+internal sealed class ConnectionBannerForm : Form
+{
+    public ConnectionBannerForm(string? title = null)
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        TopMost = true;
+        ShowInTaskbar = false;
+        BackColor = Color.FromArgb(15, 23, 42);
+        ForeColor = Color.FromArgb(240, 244, 248);
+        Size = new Size(270, 36);
+
+        var primary = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        Location = new Point(primary.Right - 285, primary.Top + 12);
+
+        var lbl = new Label
+        {
+            Text = $"🛡️ {title ?? "NexMote"}: Teknisyen Bağlı",
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(74, 222, 128),
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+        Controls.Add(lbl);
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+            return cp;
         }
     }
 }

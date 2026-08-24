@@ -695,7 +695,7 @@ export async function uninstallApp(
   return res.json();
 }
 
-/** Kurumsal ajan güvenlik profili — branding, kısıtlı tray menüsü ve şifre korumaları. */
+/** Kurumsal ajan güvenlik profili — branding, kısıtlı tray menüsü, bağlantı onay politikaları ve izinler. */
 export type SecurityProfile = {
   id: string;
   name: string;
@@ -703,6 +703,14 @@ export type SecurityProfile = {
   iconBase64?: string | null;
   restrictTrayMenu: boolean;
   requirePassword: boolean;
+  consentMode: "unattended" | "always_prompt" | "prompt_if_active";
+  consentTimeoutSeconds: number;
+  consentDefaultAction: "deny" | "allow";
+  viewOnlyMode: boolean;
+  allowRemoteTerminal: boolean;
+  allowClipboard: boolean;
+  allowFileTransfer: boolean;
+  showConnectionBanner: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -714,6 +722,14 @@ export type SecurityProfileInput = {
   restrictTrayMenu: boolean;
   requirePassword: boolean;
   password?: string;
+  consentMode: "unattended" | "always_prompt" | "prompt_if_active";
+  consentTimeoutSeconds: number;
+  consentDefaultAction: "deny" | "allow";
+  viewOnlyMode: boolean;
+  allowRemoteTerminal: boolean;
+  allowClipboard: boolean;
+  allowFileTransfer: boolean;
+  showConnectionBanner: boolean;
 };
 
 /** Güvenlik profillerini listeler (Admin). */
@@ -860,6 +876,25 @@ export async function downloadDeviceGroupProvisionScript(id: string, groupName: 
   const link = document.createElement("a");
   link.href = url;
   link.download = `NexMote-Provision-${groupName.replace(/[^a-zA-Z0-9-_]+/g, "")}.ps1`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Bu gruba özel TEK kurulum script'ini (.ps1) indirir — MSI'ı indirip sessizce kurar ve ajanı doğrudan bu gruba/profile bağlar, ayrı bir provizyon adımı gerekmez (Admin). */
+export async function downloadDeviceGroupInstallScript(id: string, groupName: string): Promise<void> {
+  const response = await fetch(`/api/admin/device-groups/${id}/install-script?serverUrl=${encodeURIComponent(window.location.origin)}`, {
+    headers: authHeaders()
+  });
+  if (!response.ok) {
+    throw new Error("Kurulum script'i indirilemedi.");
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `NexMote-Install-${groupName.replace(/[^a-zA-Z0-9-_]+/g, "")}.ps1`;
   document.body.appendChild(link);
   link.click();
   link.remove();

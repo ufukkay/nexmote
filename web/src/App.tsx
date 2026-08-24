@@ -48,7 +48,11 @@ import {
   ScrollText,
   Ban,
   RotateCcw,
-  Building2
+  Building2,
+  ChevronLeft,
+  ChevronRight,
+  Menu,
+  Layers
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
@@ -74,6 +78,7 @@ import {
   disableMfa,
   disableUser,
   DeviceSummary,
+  downloadDeviceGroupInstallScript,
   downloadDeviceGroupProvisionScript,
   DownloadPackage,
   enableMfa,
@@ -296,6 +301,20 @@ export function App() {
   const [netHistory, setNetHistory] = useState<number[]>([]);
 
   const [view, setView] = useState<View>("devices");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem("nexmote_sidebar_collapsed") === "true";
+  });
+  const [selectedGroupId, setSelectedGroupId] = useState<string>("all");
+  const [settingsActiveTab, setSettingsActiveTab] = useState<"server" | "alerts" | "account">("server");
+
+  function toggleSidebar() {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem("nexmote_sidebar_collapsed", String(next));
+      return next;
+    });
+  }
+
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -333,6 +352,7 @@ export function App() {
   // Hesap Ayarları: şifre değiştirme + MFA kurulum state
   const [accountCurrentPassword, setAccountCurrentPassword] = useState("");
   const [accountNewPassword, setAccountNewPassword] = useState("");
+  const [accountConfirmNewPassword, setAccountConfirmNewPassword] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
   const [mfaSetupQr, setMfaSetupQr] = useState<string | null>(null);
   const [mfaSetupSecret, setMfaSetupSecret] = useState<string | null>(null);
@@ -377,7 +397,15 @@ export function App() {
     iconBase64: "",
     restrictTrayMenu: false,
     requirePassword: false,
-    password: ""
+    password: "",
+    consentMode: "unattended",
+    consentTimeoutSeconds: 30,
+    consentDefaultAction: "deny",
+    viewOnlyMode: false,
+    allowRemoteTerminal: true,
+    allowClipboard: true,
+    allowFileTransfer: true,
+    showConnectionBanner: true
   };
   const [securityProfiles, setSecurityProfiles] = useState<SecurityProfile[]>([]);
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
@@ -391,6 +419,24 @@ export function App() {
   const [groupForm, setGroupForm] = useState<DeviceGroupInput>(emptyGroupForm);
   const [savingGroup, setSavingGroup] = useState(false);
   const [downloadTargetGroupId, setDownloadTargetGroupId] = useState<string>("");
+
+  // Organization Master-Detail & Quick Modals
+  const [selectedOrgCompanyId, setSelectedOrgCompanyId] = useState<string | null>(null);
+  const [showNewCompanyModal, setShowNewCompanyModal] = useState(false);
+  const [newCompanyName, setNewCompanyName] = useState("");
+  const [newCompanyPolicyId, setNewCompanyPolicyId] = useState<string>("");
+
+  const [showNewDeptModal, setShowNewDeptModal] = useState(false);
+  const [newDeptName, setNewDeptName] = useState("");
+  const [newDeptPolicyId, setNewDeptPolicyId] = useState<string>("");
+
+  const [showEditGroupModal, setShowEditGroupModal] = useState(false);
+  const [editGroupTarget, setEditGroupTarget] = useState<DeviceGroup | null>(null);
+  const [editGroupName, setEditGroupName] = useState("");
+  const [editGroupPolicyId, setEditGroupPolicyId] = useState<string>("");
+
+  const [showProfileConfigModal, setShowProfileConfigModal] = useState(false);
+  const [profileModalTarget, setProfileModalTarget] = useState<{ type: "company" | "dept" | "standalone"; id?: string; name?: string } | null>(null);
 
   // Live Activity Event Logs
   const [activityLogs, setActivityLogs] = useState<{ id: string; text: string; time: string; level: "info" | "success" | "warn" }[]>([]);
@@ -607,12 +653,17 @@ export function App() {
 
   async function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();
+    if (accountNewPassword !== accountConfirmNewPassword) {
+      showToast("Yeni şifreler birbiriyle eşleşmiyor.");
+      return;
+    }
     setAccountBusy(true);
     try {
       await changePassword(accountCurrentPassword, accountNewPassword);
       setAccountCurrentPassword("");
       setAccountNewPassword("");
-      showToast("Şifreniz güncellendi.");
+      setAccountConfirmNewPassword("");
+      showToast("Şifreniz başarıyla güncellendi.");
       addActivityLog("Şifre değiştirildi", "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Şifre değiştirilemedi.");
@@ -821,7 +872,15 @@ export function App() {
       iconBase64: profile.iconBase64 ?? "",
       restrictTrayMenu: profile.restrictTrayMenu,
       requirePassword: profile.requirePassword,
-      password: ""
+      password: "",
+      consentMode: profile.consentMode ?? "unattended",
+      consentTimeoutSeconds: profile.consentTimeoutSeconds ?? 30,
+      consentDefaultAction: profile.consentDefaultAction ?? "deny",
+      viewOnlyMode: profile.viewOnlyMode ?? false,
+      allowRemoteTerminal: profile.allowRemoteTerminal ?? true,
+      allowClipboard: profile.allowClipboard ?? true,
+      allowFileTransfer: profile.allowFileTransfer ?? true,
+      showConnectionBanner: profile.showConnectionBanner ?? true
     });
   }
 
@@ -976,6 +1035,155 @@ export function App() {
       await downloadDeviceGroupProvisionScript(group.id, group.name);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Provizyon script'i indirilemedi.");
+    }
+  }
+
+  async function handleDownloadGroupInstallScript(group: DeviceGroup) {
+    try {
+      await downloadDeviceGroupInstallScript(group.id, group.name);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kurulum script'i indirilemedi.");
+    }
+  }
+
+  async function handleCreateCompany(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newCompanyName.trim()) return;
+    setSavingGroup(true);
+    try {
+      const created = await createDeviceGroup({
+        name: newCompanyName.trim(),
+        parentGroupId: null,
+        defaultSecurityProfileId: newCompanyPolicyId || null
+      });
+      setShowNewCompanyModal(false);
+      setNewCompanyName("");
+      setNewCompanyPolicyId("");
+      setSelectedOrgCompanyId(created.id);
+      await refreshDeviceGroups();
+      showToast(`"${created.name}" şirketi oluşturuldu.`);
+      addActivityLog(`Şirket oluşturuldu: ${created.name}`, "success");
+    } catch (err: any) {
+      showToast(err?.message || "Şirket oluşturulamadı.");
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleCreateDepartment(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedOrgCompany || !newDeptName.trim()) return;
+    setSavingGroup(true);
+    try {
+      const created = await createDeviceGroup({
+        name: newDeptName.trim(),
+        parentGroupId: selectedOrgCompany.id,
+        defaultSecurityProfileId: newDeptPolicyId || null
+      });
+      setShowNewDeptModal(false);
+      setNewDeptName("");
+      setNewDeptPolicyId("");
+      await refreshDeviceGroups();
+      showToast(`"${created.name}" departmanı oluşturuldu.`);
+      addActivityLog(`Departman oluşturuldu: ${created.name} (${selectedOrgCompany.name})`, "success");
+    } catch (err: any) {
+      showToast(err?.message || "Departman oluşturulamadı.");
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleQuickUpdateGroupPolicy(group: DeviceGroup, policyId: string | null) {
+    try {
+      await updateDeviceGroup(group.id, {
+        name: group.name,
+        parentGroupId: group.parentGroupId ?? null,
+        defaultSecurityProfileId: policyId || null
+      });
+      setDeviceGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, defaultSecurityProfileId: policyId || null } : g)));
+      showToast(`"${group.name}" güvenlik politikası güncellendi.`);
+      addActivityLog(`Grup politikası güncellendi: ${group.name}`, "info");
+    } catch (err: any) {
+      showToast(err?.message || "Politika atanamadı.");
+    }
+  }
+
+  function handleOpenEditGroup(group: DeviceGroup) {
+    setEditGroupTarget(group);
+    setEditGroupName(group.name);
+    setEditGroupPolicyId(group.defaultSecurityProfileId ?? "");
+    setShowEditGroupModal(true);
+  }
+
+  async function handleSaveEditGroup(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editGroupTarget || !editGroupName.trim()) return;
+    setSavingGroup(true);
+    try {
+      const updated = await updateDeviceGroup(editGroupTarget.id, {
+        name: editGroupName.trim(),
+        parentGroupId: editGroupTarget.parentGroupId ?? null,
+        defaultSecurityProfileId: editGroupPolicyId || null
+      });
+      setDeviceGroups((prev) => prev.map((g) => (g.id === editGroupTarget.id ? updated : g)));
+      setShowEditGroupModal(false);
+      setEditGroupTarget(null);
+      showToast(`"${updated.name}" güncellendi.`);
+      addActivityLog(`Grup güncellendi: ${updated.name}`, "success");
+    } catch (err: any) {
+      showToast(err?.message || "Grup güncellenemedi.");
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  function openProfileEditorFor(profileId?: string | null, target?: { type: "company" | "dept" | "standalone"; id?: string; name?: string }) {
+    if (profileId) {
+      const p = securityProfiles.find((x) => x.id === profileId);
+      if (p) {
+        handleEditProfile(p);
+      } else {
+        handleCancelEditProfile();
+      }
+    } else {
+      handleCancelEditProfile();
+    }
+    setProfileModalTarget(target || null);
+    setShowProfileConfigModal(true);
+  }
+
+  async function handleSaveProfileModal(e: React.FormEvent) {
+    e.preventDefault();
+    if (profileForm.requirePassword && !editingProfileId && (!profileForm.password || profileForm.password.length < 6)) {
+      showToast("Yönetici parolası en az 6 karakter olmalıdır.");
+      return;
+    }
+    setSavingProfile(true);
+    try {
+      let savedProfileId = editingProfileId;
+      if (editingProfileId) {
+        await updateSecurityProfile(editingProfileId, profileForm);
+        showToast("Güvenlik profili güncellendi.");
+        addActivityLog(`Güvenlik profili güncellendi: ${profileForm.name}`, "success");
+      } else {
+        const created = await createSecurityProfile(profileForm);
+        savedProfileId = created.id;
+        showToast("Yeni güvenlik profili oluşturuldu.");
+        addActivityLog(`Güvenlik profili oluşturuldu: ${profileForm.name}`, "success");
+      }
+      await refreshSecurityProfiles();
+      if (profileModalTarget && profileModalTarget.id && savedProfileId) {
+        const grp = deviceGroups.find((g) => g.id === profileModalTarget.id);
+        if (grp) {
+          await handleQuickUpdateGroupPolicy(grp, savedProfileId);
+        }
+      }
+      setShowProfileConfigModal(false);
+      handleCancelEditProfile();
+    } catch (err: any) {
+      showToast(err?.message || "Profil kaydedilemedi.");
+    } finally {
+      setSavingProfile(false);
     }
   }
 
@@ -1245,9 +1453,29 @@ export function App() {
 
   const activeAlertDeviceIds = useMemo(() => new Set(activeAlerts.map((a) => a.deviceId)), [activeAlerts]);
 
+  const matchingGroupIds = useMemo(() => {
+    if (selectedGroupId === "all") return null;
+    const ids = new Set<string>([selectedGroupId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const g of deviceGroups) {
+        if (g.parentGroupId && ids.has(g.parentGroupId) && !ids.has(g.id)) {
+          ids.add(g.id);
+          changed = true;
+        }
+      }
+    }
+    return ids;
+  }, [selectedGroupId, deviceGroups]);
+
   const filteredAndSortedDevices = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = devices.filter((d) => {
+      if (matchingGroupIds && (!d.groupId || !matchingGroupIds.has(d.groupId))) {
+        return false;
+      }
+
       const matchesQuery =
         !q ||
         d.deviceName.toLowerCase().includes(q) ||
@@ -1290,7 +1518,7 @@ export function App() {
     });
 
     return result;
-  }, [devices, query, statusFilter, sortField, sortDirection, latestAgentVersion, activeAlertDeviceIds]);
+  }, [devices, query, statusFilter, sortField, sortDirection, latestAgentVersion, activeAlertDeviceIds, matchingGroupIds]);
 
   const selectedDevice = useMemo(
     () => devices.find((d) => d.id === selectedDeviceId) ?? devices[0] ?? null,
@@ -1327,6 +1555,33 @@ export function App() {
         (u.status && u.status.toLowerCase().includes(q))
     );
   }, [selectedDevice?.windowsUpdates, updateSearchQuery]);
+
+  const rootCompanies = useMemo(() => {
+    return deviceGroups.filter((g) => !g.parentGroupId);
+  }, [deviceGroups]);
+
+  const selectedOrgCompany = useMemo(() => {
+    if (selectedOrgCompanyId) {
+      const found = rootCompanies.find((c) => c.id === selectedOrgCompanyId);
+      if (found) return found;
+    }
+    return rootCompanies[0] || null;
+  }, [rootCompanies, selectedOrgCompanyId]);
+
+  const selectedCompanyDepartments = useMemo(() => {
+    if (!selectedOrgCompany) return [];
+    return deviceGroups.filter((g) => g.parentGroupId === selectedOrgCompany.id);
+  }, [deviceGroups, selectedOrgCompany]);
+
+  function getCompanyDeviceCount(companyId: string) {
+    const deptIds = new Set(deviceGroups.filter(g => g.parentGroupId === companyId).map(g => g.id));
+    deptIds.add(companyId);
+    return devices.filter(d => d.groupId && deptIds.has(d.groupId)).length;
+  }
+
+  function getDepartmentDeviceCount(deptId: string) {
+    return devices.filter(d => d.groupId === deptId).length;
+  }
 
   const userInitial = (currentUser?.displayName || currentUser?.email || "N").charAt(0).toUpperCase();
   const userDisplayName = currentUser?.displayName || currentUser?.email?.split("@")[0] || "Kullanıcı";
@@ -1586,72 +1841,150 @@ export function App() {
   // --- MAIN AUTHENTICATED APP ---
   return (
     <div className="app-layout">
-      {/* 1. Navigation Rail */}
-      <aside className="nav-rail">
-        <div className="rail-top">
-          <div className="rail-logo" title="NexMote RMM">
-            <ShieldCheck size={20} />
+      {/* 1. Modern Categorized Sidebar */}
+      <aside className={`app-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+        <div className="sidebar-header">
+          <div className="sidebar-brand">
+            <div className="sidebar-logo" title="NexMote">
+              <ShieldCheck size={18} />
+            </div>
+            <div className="sidebar-brand-text">
+              <span className="sidebar-title">NexMote</span>
+              <span className="sidebar-version">v0.6.9 Pro</span>
+            </div>
           </div>
-
           <button
-            className={`rail-btn ${view === "devices" ? "active" : ""}`}
-            onClick={() => setView("devices")}
-            title="Cihazlar"
+            type="button"
+            className="sidebar-toggle-btn"
+            onClick={toggleSidebar}
+            title={sidebarCollapsed ? "Menüyü Genişlet" : "Menüyü Daralt"}
           >
-            <Monitor size={18} />
+            {sidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
           </button>
+        </div>
 
-          <button
-            className={`rail-btn ${view === "downloads" ? "active" : ""}`}
-            onClick={() => setView("downloads")}
-            title="İndirmeler"
-          >
-            <Download size={18} />
-          </button>
+        <nav className="sidebar-nav">
+          {/* 1. İZLEME & KONTROL */}
+          <div className="sidebar-group-title">İzleme &amp; Kontrol</div>
+          <ul className="sidebar-nav-list">
+            <li>
+              <button
+                type="button"
+                className={`sidebar-item ${view === "devices" || view === "device-detail" ? "active" : ""}`}
+                onClick={() => setView("devices")}
+                title="Cihazlar"
+              >
+                <span className="sidebar-item-icon"><Monitor size={16} /></span>
+                <span className="sidebar-item-label">Cihazlar</span>
+                <span className={`sidebar-item-badge ${onlineCount > 0 ? "online" : ""}`}>{onlineCount}/{devices.length}</span>
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                className={`sidebar-item ${view === "downloads" ? "active" : ""}`}
+                onClick={() => setView("downloads")}
+                title="İndirme Merkezi"
+              >
+                <span className="sidebar-item-icon"><Download size={16} /></span>
+                <span className="sidebar-item-label">İndirme Merkezi</span>
+              </button>
+            </li>
+          </ul>
 
-          <button
-            className={`rail-btn ${view === "settings" ? "active" : ""}`}
-            onClick={() => setView("settings")}
-            title="Ayarlar"
-          >
-            <Settings size={18} />
-          </button>
-
+          {/* 2. ORGANİZASYON */}
           {currentUser?.role === "Admin" && (
             <>
-              <button
-                className={`rail-btn ${view === "users" ? "active" : ""}`}
-                onClick={() => setView("users")}
-                title="Kullanıcı Yönetimi"
-              >
-                <UsersIcon size={18} />
-              </button>
+              <div className="sidebar-group-title">Organizasyon</div>
+              <ul className="sidebar-nav-list">
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item ${view === "device-groups" ? "active" : ""}`}
+                    onClick={() => setView("device-groups")}
+                    title="Şirketler &amp; Departmanlar"
+                  >
+                    <span className="sidebar-item-icon"><Building2 size={16} /></span>
+                    <span className="sidebar-item-label">Şirketler &amp; Gruplar</span>
+                    <span className="sidebar-item-badge">{deviceGroups.length}</span>
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item ${view === "security-profiles" ? "active" : ""}`}
+                    onClick={() => setView("security-profiles")}
+                    title="Güvenlik Profilleri"
+                  >
+                    <span className="sidebar-item-icon"><Lock size={16} /></span>
+                    <span className="sidebar-item-label">Güvenlik Profilleri</span>
+                    <span className="sidebar-item-badge">{securityProfiles.length}</span>
+                  </button>
+                </li>
+              </ul>
 
-              <button
-                className={`rail-btn ${view === "audit-log" ? "active" : ""}`}
-                onClick={() => setView("audit-log")}
-                title="Denetim Logu"
-              >
-                <ScrollText size={18} />
-              </button>
-
-              <button
-                className={`rail-btn ${view === "security-profiles" ? "active" : ""}`}
-                onClick={() => setView("security-profiles")}
-                title="Güvenlik Profilleri"
-              >
-                <Lock size={18} />
-              </button>
-
-              <button
-                className={`rail-btn ${view === "device-groups" ? "active" : ""}`}
-                onClick={() => setView("device-groups")}
-                title="Cihaz Grupları"
-              >
-                <Building2 size={18} />
-              </button>
+              {/* 3. YÖNETİM & SİSTEM */}
+              <div className="sidebar-group-title">Yönetim &amp; Sistem</div>
+              <ul className="sidebar-nav-list">
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item ${view === "users" ? "active" : ""}`}
+                    onClick={() => setView("users")}
+                    title="Kullanıcı Yönetimi"
+                  >
+                    <span className="sidebar-item-icon"><UsersIcon size={16} /></span>
+                    <span className="sidebar-item-label">Kullanıcılar</span>
+                    <span className="sidebar-item-badge">{users.length}</span>
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item ${view === "audit-log" ? "active" : ""}`}
+                    onClick={() => setView("audit-log")}
+                    title="Denetim Logu"
+                  >
+                    <span className="sidebar-item-icon"><ScrollText size={16} /></span>
+                    <span className="sidebar-item-label">Denetim Logu</span>
+                  </button>
+                </li>
+              </ul>
             </>
           )}
+
+          <div className="sidebar-group-title">Sistem</div>
+          <ul className="sidebar-nav-list">
+            <li>
+              <button
+                type="button"
+                className={`sidebar-item ${view === "settings" ? "active" : ""}`}
+                onClick={() => setView("settings")}
+                title="Sistem &amp; Hesap Ayarları"
+              >
+                <span className="sidebar-item-icon"><Settings size={16} /></span>
+                <span className="sidebar-item-label">Sistem &amp; Hesap</span>
+              </button>
+            </li>
+          </ul>
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="sidebar-user-card">
+            <div className="user-avatar-mini">{userInitial}</div>
+            <div className="sidebar-user-info">
+              <div className="sidebar-user-name" title={currentUser?.email || userDisplayName}>{userDisplayName}</div>
+              <div className="sidebar-user-role">{roleLabel}</div>
+            </div>
+            <button
+              type="button"
+              className="user-logout-mini-btn"
+              onClick={handleLogout}
+              title="Oturumu Kapat"
+            >
+              <LogOut size={13} />
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -1771,6 +2104,24 @@ export function App() {
                   Dikkat ({warningCount})
                 </button>
               </div>
+
+              {deviceGroups.length > 0 && (
+                <div className="filter-group" style={{ gap: "6px" }}>
+                  <Building2 size={13} style={{ color: "var(--text-dim)" }} />
+                  <select
+                    className="form-input"
+                    style={{ height: 26, fontSize: 11.5, padding: "0 8px", width: "auto", minWidth: 160 }}
+                    value={selectedGroupId}
+                    onChange={(e) => setSelectedGroupId(e.target.value)}
+                    title="Şirket / Departmana göre filtrele"
+                  >
+                    <option value="all">Tüm Şirketler ({devices.length})</option>
+                    {deviceGroups.map(g => (
+                      <option key={g.id} value={g.id}>🏢 {g.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Main Workspace Layout */}
@@ -1837,8 +2188,34 @@ export function App() {
                     <tbody>
                       {filteredAndSortedDevices.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="empty-table-cell">
-                            Kriterlere uygun cihaz bulunamadı.
+                          <td colSpan={9} className="empty-table-cell" style={{ padding: "32px 16px", textAlign: "center" }}>
+                            {selectedGroupId !== "all" ? (
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
+                                <Building2 size={24} style={{ color: "var(--primary)" }} />
+                                <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-main)" }}>
+                                  Seçilen Gruba Ait Henüz Cihaz Bağlanmadı
+                                </div>
+                                <div style={{ fontSize: "11.5px", color: "var(--text-dim)", maxWidth: 360 }}>
+                                  Bu şirkete veya departmana cihaz kaydetmek için kurulum scriptini indirebilirsiniz.
+                                </div>
+                                {(() => {
+                                  const grp = deviceGroups.find((g) => g.id === selectedGroupId);
+                                  if (!grp) return null;
+                                  return (
+                                    <button
+                                      type="button"
+                                      className="btn-secondary"
+                                      style={{ height: 28, fontSize: "11.5px", marginTop: 6 }}
+                                      onClick={() => downloadDeviceGroupProvisionScript(grp.id, grp.name)}
+                                    >
+                                      <Download size={13} /> {grp.name} Provizyon Scriptini İndir (.ps1)
+                                    </button>
+                                  );
+                                })()}
+                              </div>
+                            ) : (
+                              "Kriterlere uygun cihaz bulunamadı."
+                            )}
                           </td>
                         </tr>
                       ) : (
@@ -3426,9 +3803,9 @@ export function App() {
                     ))}
                   </select>
                   <span className="form-help">
-                    Bir grup seçerseniz, MSI'ı kurduktan hemen sonra aşağıdaki provizyon script'ini çalıştırın —
-                    ajan otomatik olarak o gruba (ve varsa grubun güvenlik profiline) bağlanır; web panelinde ayrıca
-                    elle atama yapmanız gerekmez.
+                    Bir grup seçerseniz, aşağıdaki "Tek Script ile Kur" dosyasını indirip Yönetici olarak çalıştırın —
+                    MSI'ı sunucudan indirir, sessizce kurar ve ajanı doğrudan seçtiğiniz gruba (ve varsa grubun güvenlik
+                    profiline) bağlar; ayrı bir kurulum sonrası adım veya elle atama gerekmez.
                   </span>
 
                   {(() => {
@@ -3458,9 +3835,18 @@ export function App() {
                             <button
                               type="button"
                               className="btn-primary"
-                              onClick={() => handleDownloadGroupProvisionScript(targetGroup)}
+                              onClick={() => handleDownloadGroupInstallScript(targetGroup)}
+                              title="MSI'ı indirir, sessizce kurar ve ajanı doğrudan bu gruba bağlar — tek adım"
                             >
-                              <Download size={14} /> Provizyon Script'ini İndir
+                              <Download size={14} /> Tek Script ile Kur
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => handleDownloadGroupProvisionScript(targetGroup)}
+                              title="Ajan zaten kuruluysa: sadece bu gruba/profile bağlayan script'i indirir"
+                            >
+                              <Download size={14} /> Sadece Provizyon Script'i
                             </button>
                           </div>
                         )}
@@ -3512,392 +3898,496 @@ export function App() {
         {/* View 3: Server Settings */}
         {view === "settings" && (
           <div className="content-pane">
-            {currentUser?.role === "Admin" && (
-            <div className="content-card">
-              <h2 className="content-card-title">Sunucu ve kayıt yapılandırması</h2>
-              <p className="content-card-copy">
-                Ajan cihazlarının sunucuya kayıt olması ve canlılık sinyali ayarları.
-              </p>
+            <div className="settings-tabs-bar">
+              {currentUser?.role === "Admin" && (
+                <>
+                  <button
+                    type="button"
+                    className={`settings-tab-btn ${settingsActiveTab === "server" ? "active" : ""}`}
+                    onClick={() => setSettingsActiveTab("server")}
+                  >
+                    <Server size={15} /> Sunucu &amp; Metrikler
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab-btn ${settingsActiveTab === "alerts" ? "active" : ""}`}
+                    onClick={() => setSettingsActiveTab("alerts")}
+                  >
+                    <Bell size={15} /> E-Posta (SMTP) &amp; Uyarılar
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                className={`settings-tab-btn ${settingsActiveTab === "account" ? "active" : ""}`}
+                onClick={() => setSettingsActiveTab("account")}
+              >
+                <User size={15} /> Hesabım &amp; Güvenlik (MFA)
+              </button>
+            </div>
 
-              <form onSubmit={handleSaveSettings} className="settings-form">
-                <div className="form-group">
-                  <label className="form-label">Sunucu adresi</label>
-                  <input
-                    type="url"
-                    className="form-input"
-                    value={settings.serverUrl}
-                    onChange={(e) => setSettings({ ...settings, serverUrl: e.target.value })}
-                    required
-                  />
-                  <span className="form-help">Ajan ve teknisyen uygulamalarının bağlandığı güvenli alan adı.</span>
-                </div>
+            {/* TAB 1: SUNUCU & METRİKLER */}
+            {settingsActiveTab === "server" && currentUser?.role === "Admin" && (
+              <>
+                <div className="content-card">
+                  <h2 className="content-card-title">Sunucu ve Kayıt Yapılandırması</h2>
+                  <p className="content-card-copy">
+                    Ajan cihazlarının sunucuya kayıt olması ve canlılık sinyali ayarları.
+                  </p>
 
-                <div className="form-group">
-                  <label className="form-label">Kayıt anahtarı</label>
-                  <div className="form-input-wrapper">
-                    <input
-                      type={showEnrollmentKey ? "text" : "password"}
-                      className="form-input"
-                      value={settings.enrollmentKey}
-                      onChange={(e) => setSettings({ ...settings, enrollmentKey: e.target.value })}
-                      required
-                    />
+                  <form onSubmit={handleSaveSettings} className="settings-form">
+                    <div className="form-group">
+                      <label className="form-label">Sunucu Adresi</label>
+                      <input
+                        type="url"
+                        className="form-input"
+                        value={settings.serverUrl}
+                        onChange={(e) => setSettings({ ...settings, serverUrl: e.target.value })}
+                        required
+                      />
+                      <span className="form-help">Ajan ve teknisyen uygulamalarının bağlandığı güvenli sunucu URL'i.</span>
+                    </div>
+
+                    <div className="form-group">
+                      <label className="form-label">Genel Kayıt Anahtarı (Enrollment Key)</label>
+                      <div className="form-input-wrapper">
+                        <input
+                          type={showEnrollmentKey ? "text" : "password"}
+                          className="form-input"
+                          value={settings.enrollmentKey}
+                          onChange={(e) => setSettings({ ...settings, enrollmentKey: e.target.value })}
+                          required
+                        />
+                        <button
+                          type="button"
+                          className="password-toggle-btn"
+                          onClick={() => setShowEnrollmentKey(!showEnrollmentKey)}
+                          title={showEnrollmentKey ? "Gizle" : "Göster"}
+                          aria-label={showEnrollmentKey ? "Kayıt anahtarını gizle" : "Kayıt anahtarını göster"}
+                        >
+                          {showEnrollmentKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                      <span className="form-help">Yeni genel istemci kurulumlarında kullanılan yetkilendirme anahtarı.</span>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="form-label">Canlılık Sinyali Sıklığı (sn)</label>
+                        <input
+                          type="number"
+                          min={5}
+                          max={300}
+                          className="form-input"
+                          value={settings.heartbeatSeconds}
+                          onChange={(e) => setSettings({ ...settings, heartbeatSeconds: Number(e.target.value) })}
+                          required
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Varsayılan Lokasyon Kodu</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          value={settings.defaultLocationCode}
+                          onChange={(e) => setSettings({ ...settings, defaultLocationCode: e.target.value })}
+                        />
+                      </div>
+                    </div>
+
                     <button
-                      type="button"
-                      className="password-toggle-btn"
-                      onClick={() => setShowEnrollmentKey(!showEnrollmentKey)}
-                      title={showEnrollmentKey ? "Gizle" : "Göster"}
-                      aria-label={showEnrollmentKey ? "Kayıt anahtarını gizle" : "Kayıt anahtarını göster"}
+                      type="submit"
+                      className="btn-primary"
+                      data-size="lg"
+                      data-width="fixed"
+                      disabled={savingSettings}
                     >
-                      {showEnrollmentKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      <Save size={14} />
+                      {savingSettings ? "Kaydediliyor..." : "Ayarları Kaydet"}
                     </button>
+                  </form>
+                </div>
+
+                {/* Sunucu Canlı Metrikleri */}
+                {serverMetrics && (
+                  <div className="content-card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-2)" }}>
+                      <h2 className="content-card-title">Sunucu Canlı Performansı</h2>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ height: 28, fontSize: 12, padding: "0 10px" }}
+                        onClick={() => refreshServerMetrics(true)}
+                        disabled={metricsLoading}
+                      >
+                        <RefreshCw size={13} className={metricsLoading ? "animate-spin" : ""} /> Yenile
+                      </button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "var(--space-3)" }}>
+                      <div className="metric-box">
+                        <div className="metric-label">CPU Kullanımı</div>
+                        <div className="metric-value">{serverMetrics.cpuUsagePercent.toFixed(1)}%</div>
+                        {renderSparkline(cpuHistory, "#2563eb", 100)}
+                      </div>
+                      <div className="metric-box">
+                        <div className="metric-label">RAM Kullanımı</div>
+                        <div className="metric-value">{serverMetrics.memoryUsedMb} / {serverMetrics.memoryTotalMb} MB</div>
+                        <div className="progress-bar-bg" style={{ marginTop: 8 }}>
+                          <div
+                            className="progress-bar-fill"
+                            style={{
+                              width: `${Math.min(100, (serverMetrics.memoryUsedMb / (serverMetrics.memoryTotalMb || 1)) * 100)}%`,
+                              background: "#3b82f6"
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="metric-box">
+                        <div className="metric-label">Disk Boş Alan</div>
+                        <div className="metric-value">{serverMetrics.diskFreeGb.toFixed(1)} GB</div>
+                        <div className="metric-subtext">Çalışma Süresi: {formatUptime(serverMetrics.uptimeSeconds)}</div>
+                      </div>
+                    </div>
                   </div>
-                  <span className="form-help">Yeni istemci kurulumlarında kullanılan yetkilendirme anahtarı.</span>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Canlılık sinyali sıklığı (saniye)</label>
-                  <input
-                    type="number"
-                    min={5}
-                    max={300}
-                    className="form-input"
-                    value={settings.heartbeatSeconds}
-                    onChange={(e) => setSettings({ ...settings, heartbeatSeconds: Number(e.target.value) })}
-                    required
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Varsayılan lokasyon kodu</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={settings.defaultLocationCode}
-                    onChange={(e) => setSettings({ ...settings, defaultLocationCode: e.target.value })}
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  data-size="lg"
-                  data-width="fixed"
-                  disabled={savingSettings}
-                >
-                  <Save size={14} />
-                  {savingSettings ? "Kaydediliyor..." : "Ayarları Kaydet"}
-                </button>
-              </form>
-            </div>
+                )}
+              </>
             )}
 
-            {currentUser?.role === "Admin" && (
-            <div className="content-card">
-              <h2 className="content-card-title">E-posta (SMTP) ayarları</h2>
-              <p className="content-card-copy">
-                Kullanıcı davet e-postaları ve test e-postaları bu sunucu üzerinden gönderilir.
-              </p>
+            {/* TAB 2: E-POSTA & UYARILAR */}
+            {settingsActiveTab === "alerts" && currentUser?.role === "Admin" && (
+              <>
+                <div className="content-card">
+                  <h2 className="content-card-title">E-posta (SMTP) Yapılandırması</h2>
+                  <p className="content-card-copy">
+                    Kullanıcı davet e-postaları ve sistem uyarı bildirimleri bu SMTP sunucusu üzerinden gönderilir.
+                  </p>
 
-              <form onSubmit={handleSaveSettings} className="settings-form">
-                <div className="form-group">
-                  <label className="form-label">SMTP sunucu adresi</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="smtp.hostinger.com"
-                    value={settings.smtpHost ?? ""}
-                    onChange={(e) => setSettings({ ...settings, smtpHost: e.target.value })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Port</label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    value={settings.smtpPort ?? 465}
-                    onChange={(e) => setSettings({ ...settings, smtpPort: Number(e.target.value) })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Kullanıcı adı</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="admin@nexmote.com"
-                    value={settings.smtpUsername ?? ""}
-                    onChange={(e) => setSettings({ ...settings, smtpUsername: e.target.value })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Şifre</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    placeholder="Değiştirmek için doldurun, aksi halde boş bırakın"
-                    value={settings.smtpPassword ?? ""}
-                    onChange={(e) => setSettings({ ...settings, smtpPassword: e.target.value })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Gönderen adresi</label>
-                  <input
-                    type="email"
-                    className="form-input"
-                    placeholder="admin@nexmote.com"
-                    value={settings.smtpFromAddress ?? ""}
-                    onChange={(e) => setSettings({ ...settings, smtpFromAddress: e.target.value })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Gönderen adı</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="NexMote"
-                    value={settings.smtpFromName ?? ""}
-                    onChange={(e) => setSettings({ ...settings, smtpFromName: e.target.value })}
-                  />
-                </div>
+                  <form onSubmit={handleSaveSettings} className="settings-form">
+                    <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="form-label">SMTP Sunucu Adresi</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="smtp.hostinger.com"
+                          value={settings.smtpHost ?? ""}
+                          onChange={(e) => setSettings({ ...settings, smtpHost: e.target.value })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Port</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          value={settings.smtpPort ?? 465}
+                          onChange={(e) => setSettings({ ...settings, smtpPort: Number(e.target.value) })}
+                        />
+                      </div>
+                    </div>
 
-                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={savingSettings}>
-                  <Save size={14} />
-                  {savingSettings ? "Kaydediliyor..." : "SMTP Ayarlarını Kaydet"}
-                </button>
-              </form>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="form-label">Kullanıcı Adı</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="admin@nexmote.com"
+                          value={settings.smtpUsername ?? ""}
+                          onChange={(e) => setSettings({ ...settings, smtpUsername: e.target.value })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Şifre</label>
+                        <input
+                          type="password"
+                          className="form-input"
+                          placeholder="Değiştirmek için doldurun"
+                          value={settings.smtpPassword ?? ""}
+                          onChange={(e) => setSettings({ ...settings, smtpPassword: e.target.value })}
+                        />
+                      </div>
+                    </div>
 
-              <div className="settings-form" style={{ marginTop: "var(--space-4)" }}>
-                <div className="form-group">
-                  <label className="form-label">Test e-postası gönder</label>
-                  <input
-                    type="email"
-                    className="form-input"
-                    placeholder="test@ornek.com"
-                    value={smtpTestEmail}
-                    onChange={(e) => setSmtpTestEmail(e.target.value)}
-                  />
-                </div>
-                <button type="button" className="btn-secondary" onClick={handleTestSmtp} disabled={testingSmtp}>
-                  {testingSmtp ? "Gönderiliyor..." : "Test E-postası Gönder"}
-                </button>
-              </div>
-            </div>
-            )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="form-label">Gönderen E-Posta</label>
+                        <input
+                          type="email"
+                          className="form-input"
+                          placeholder="admin@nexmote.com"
+                          value={settings.smtpFromAddress ?? ""}
+                          onChange={(e) => setSettings({ ...settings, smtpFromAddress: e.target.value })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Gönderen Adı</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="NexMote RMM"
+                          value={settings.smtpFromName ?? ""}
+                          onChange={(e) => setSettings({ ...settings, smtpFromName: e.target.value })}
+                        />
+                      </div>
+                    </div>
 
-            {currentUser?.role === "Admin" && (
-            <div className="content-card">
-              <h2 className="content-card-title">Uyarılar</h2>
-              <p className="content-card-copy">
-                Bir cihaz çevrimdışı kaldığında veya disk/CPU/RAM eşiği aşıldığında yukarıdaki SMTP ayarları
-                üzerinden otomatik e-posta gönderilir. Alıcı boş bırakılırsa tüm aktif Yöneticilere gönderilir.
-              </p>
+                    <div className="row-action-group" style={{ marginTop: "var(--space-2)" }}>
+                      <button type="submit" className="btn-primary" data-width="fixed" disabled={savingSettings}>
+                        <Save size={14} />
+                        {savingSettings ? "Kaydediliyor..." : "SMTP Ayarlarını Kaydet"}
+                      </button>
+                    </div>
+                  </form>
 
-              <form onSubmit={handleSaveSettings} className="settings-form">
-                <div className="form-group">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.alertsEnabled}
-                      onChange={(e) => setSettings({ ...settings, alertsEnabled: e.target.checked })}
-                    />
-                    Uyarı sistemi açık
-                  </label>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Alıcı e-postalar</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="boş bırakılırsa tüm Adminlere gönderilir"
-                    value={settings.alertRecipientEmails ?? ""}
-                    onChange={(e) => setSettings({ ...settings, alertRecipientEmails: e.target.value })}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.alertOfflineEnabled}
-                      onChange={(e) => setSettings({ ...settings, alertOfflineEnabled: e.target.checked })}
-                    />
-                    Çevrimdışı uyarısı — bu kadar dakikadır sinyal yoksa
-                  </label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    min={1}
-                    value={settings.alertOfflineMinutes}
-                    onChange={(e) => setSettings({ ...settings, alertOfflineMinutes: Number(e.target.value) })}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.alertDiskLowEnabled}
-                      onChange={(e) => setSettings({ ...settings, alertDiskLowEnabled: e.target.checked })}
-                    />
-                    Disk az uyarısı — boş alan bu MB değerinin altına düşerse
-                  </label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    min={0}
-                    value={settings.alertDiskLowMb}
-                    onChange={(e) => setSettings({ ...settings, alertDiskLowMb: Number(e.target.value) })}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.alertCpuHighEnabled}
-                      onChange={(e) => setSettings({ ...settings, alertCpuHighEnabled: e.target.checked })}
-                    />
-                    CPU yüksek uyarısı — bu yüzdeyi aşarsa
-                  </label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    min={1}
-                    max={100}
-                    value={settings.alertCpuHighPercent}
-                    onChange={(e) => setSettings({ ...settings, alertCpuHighPercent: Number(e.target.value) })}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="remember-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.alertMemoryHighEnabled}
-                      onChange={(e) => setSettings({ ...settings, alertMemoryHighEnabled: e.target.checked })}
-                    />
-                    RAM yüksek uyarısı — bu yüzdeyi aşarsa
-                  </label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    min={1}
-                    max={100}
-                    value={settings.alertMemoryHighPercent}
-                    onChange={(e) => setSettings({ ...settings, alertMemoryHighPercent: Number(e.target.value) })}
-                  />
-                </div>
-
-                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={savingSettings}>
-                  <Save size={14} />
-                  {savingSettings ? "Kaydediliyor..." : "Uyarı Ayarlarını Kaydet"}
-                </button>
-              </form>
-            </div>
-            )}
-
-            {/* Hesap Ayarları — herkes için (Admin + Teknisyen) */}
-            <div className="content-card">
-              <h2 className="content-card-title">Hesap ayarları</h2>
-              <p className="content-card-copy">Şifrenizi değiştirin ve iki faktörlü doğrulamayı (MFA) yönetin.</p>
-
-              <form onSubmit={handleChangePassword} className="settings-form">
-                <div className="form-group">
-                  <label className="form-label">Mevcut şifre</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    value={accountCurrentPassword}
-                    onChange={(e) => setAccountCurrentPassword(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Yeni şifre</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    value={accountNewPassword}
-                    onChange={(e) => setAccountNewPassword(e.target.value)}
-                    minLength={8}
-                    required
-                  />
-                </div>
-                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={accountBusy}>
-                  <KeyRound size={14} />
-                  {accountBusy ? "Kaydediliyor..." : "Şifreyi Değiştir"}
-                </button>
-              </form>
-            </div>
-
-            <div className="content-card">
-              <h2 className="content-card-title">İki faktörlü doğrulama (MFA)</h2>
-              <p className="content-card-copy">
-                {currentUser?.mfaEnabled
-                  ? "MFA hesabınızda etkin. Her girişte authenticator kodunuz istenir."
-                  : "MFA isteğe bağlıdır. Etkinleştirmek için bir authenticator uygulamasıyla (Google/Microsoft Authenticator) QR kodu okutun."}
-              </p>
-
-              {mfaRecoveryCodes && (
-                <div className="stale-data-notice">
-                  <AlertCircle size={14} />
-                  <div>
-                    <p style={{ margin: "0 0 6px" }}>
-                      <strong>Kurtarma kodlarınız (bir kereliğine gösteriliyor, kaydedin):</strong>
-                    </p>
-                    <div className="recovery-codes-grid">
-                      {mfaRecoveryCodes.map((code) => (
-                        <code key={code}>{code}</code>
-                      ))}
+                  <div className="settings-form" style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-4)", borderTop: "1px solid var(--border-subtle)" }}>
+                    <div className="form-group">
+                      <label className="form-label">Test E-postası Gönder</label>
+                      <div style={{ display: "flex", gap: "var(--space-2)" }}>
+                        <input
+                          type="email"
+                          className="form-input"
+                          placeholder="test@ornek.com"
+                          value={smtpTestEmail}
+                          onChange={(e) => setSmtpTestEmail(e.target.value)}
+                        />
+                        <button type="button" className="btn-secondary" onClick={handleTestSmtp} disabled={testingSmtp}>
+                          {testingSmtp ? "Gönderiliyor..." : "Test Gönder"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-              )}
 
-              {currentUser?.mfaEnabled ? (
-                <form onSubmit={handleDisableMfa} className="settings-form">
-                  <div className="form-group">
-                    <label className="form-label">MFA'yı kapatmak için şifrenizi girin</label>
-                    <input
-                      type="password"
-                      className="form-input"
-                      value={mfaDisablePassword}
-                      onChange={(e) => setMfaDisablePassword(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <button type="submit" className="btn-secondary" disabled={accountBusy}>
-                    {accountBusy ? "İşleniyor..." : "MFA'yı Kapat"}
-                  </button>
-                </form>
-              ) : mfaSetupQr ? (
-                <form onSubmit={handleEnableMfa} className="settings-form">
-                  <img src={mfaSetupQr} alt="MFA QR kodu" style={{ width: 220, height: 220, borderRadius: 8 }} />
-                  {mfaSetupSecret && (
-                    <p className="form-help">Manuel giriş secret'ı: <code>{mfaSetupSecret}</code></p>
+                <div className="content-card">
+                  <h2 className="content-card-title">Otomatik Cihaz Uyarıları</h2>
+                  <p className="content-card-copy">
+                    Bir cihaz çevrimdışı kaldığında veya disk/CPU/RAM eşiği aşıldığında SMTP üzerinden otomatik bildirim e-postası gönderilir.
+                  </p>
+
+                  <form onSubmit={handleSaveSettings} className="settings-form">
+                    <div className="login-options-row">
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={settings.alertsEnabled}
+                          onChange={(e) => setSettings({ ...settings, alertsEnabled: e.target.checked })}
+                        />
+                        <strong>Uyarı Sistemi Açık</strong>
+                      </label>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Bildirim Alıcı E-postaları</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Boş bırakılırsa tüm Yöneticilere (Admin) gönderilir"
+                        value={settings.alertRecipientEmails ?? ""}
+                        onChange={(e) => setSettings({ ...settings, alertRecipientEmails: e.target.value })}
+                      />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="remember-label" style={{ marginBottom: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={settings.alertOfflineEnabled}
+                            onChange={(e) => setSettings({ ...settings, alertOfflineEnabled: e.target.checked })}
+                          />
+                          Çevrimdışı Uyarısı (dk)
+                        </label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          min={1}
+                          value={settings.alertOfflineMinutes}
+                          onChange={(e) => setSettings({ ...settings, alertOfflineMinutes: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="remember-label" style={{ marginBottom: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={settings.alertDiskLowEnabled}
+                            onChange={(e) => setSettings({ ...settings, alertDiskLowEnabled: e.target.checked })}
+                          />
+                          Disk Az Uyarısı (MB)
+                        </label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          min={0}
+                          value={settings.alertDiskLowMb}
+                          onChange={(e) => setSettings({ ...settings, alertDiskLowMb: Number(e.target.value) })}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="remember-label" style={{ marginBottom: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={settings.alertCpuHighEnabled}
+                            onChange={(e) => setSettings({ ...settings, alertCpuHighEnabled: e.target.checked })}
+                          />
+                          CPU Yüksek Uyarısı (%)
+                        </label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          min={1}
+                          max={100}
+                          value={settings.alertCpuHighPercent}
+                          onChange={(e) => setSettings({ ...settings, alertCpuHighPercent: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="remember-label" style={{ marginBottom: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={settings.alertMemoryHighEnabled}
+                            onChange={(e) => setSettings({ ...settings, alertMemoryHighEnabled: e.target.checked })}
+                          />
+                          RAM Yüksek Uyarısı (%)
+                        </label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          min={1}
+                          max={100}
+                          value={settings.alertMemoryHighPercent}
+                          onChange={(e) => setSettings({ ...settings, alertMemoryHighPercent: Number(e.target.value) })}
+                        />
+                      </div>
+                    </div>
+
+                    <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={savingSettings}>
+                      <Save size={14} />
+                      {savingSettings ? "Kaydediliyor..." : "Uyarı Ayarlarını Kaydet"}
+                    </button>
+                  </form>
+                </div>
+              </>
+            )}
+
+            {/* TAB 3: HESABIM & GÜVENLİK */}
+            {settingsActiveTab === "account" && (
+              <>
+                <div className="content-card">
+                  <h2 className="content-card-title">Hesap Bilgileri &amp; Şifre Değiştir</h2>
+                  <p className="content-card-copy">Giriş şifrenizi güncelleyin.</p>
+
+                  <form onSubmit={handleChangePassword} className="settings-form">
+                    <div className="form-group">
+                      <label className="form-label">Mevcut Şifre</label>
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={accountCurrentPassword}
+                        onChange={(e) => setAccountCurrentPassword(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Yeni Şifre (En az 8 karakter)</label>
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={accountNewPassword}
+                        onChange={(e) => setAccountNewPassword(e.target.value)}
+                        minLength={8}
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Yeni Şifreyi Doğrulayın</label>
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={accountConfirmNewPassword}
+                        onChange={(e) => setAccountConfirmNewPassword(e.target.value)}
+                        minLength={8}
+                        required
+                      />
+                    </div>
+                    <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={accountBusy}>
+                      <KeyRound size={14} />
+                      {accountBusy ? "Kaydediliyor..." : "Şifreyi Değiştir"}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="content-card">
+                  <h2 className="content-card-title">İki Faktörlü Doğrulama (TOTP MFA)</h2>
+                  <p className="content-card-copy">
+                    {currentUser?.mfaEnabled
+                      ? "MFA hesabınızda etkin. Her oturum açışta mobil authenticator kodunuz istenir."
+                      : "MFA hesabınızı korumak için önerilir. Etkinleştirmek için Google/Microsoft Authenticator uygulamasıyla QR kodu okutun."}
+                  </p>
+
+                  {mfaRecoveryCodes && (
+                    <div className="stale-data-notice">
+                      <AlertCircle size={14} />
+                      <div>
+                        <p style={{ margin: "0 0 6px" }}>
+                          <strong>Kurtarma kodlarınız (bir kereliğine gösteriliyor, güvenli yere kaydedin):</strong>
+                        </p>
+                        <div className="recovery-codes-grid">
+                          {mfaRecoveryCodes.map((code) => (
+                            <code key={code}>{code}</code>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   )}
-                  <div className="form-group">
-                    <label className="form-label">Authenticator uygulamasındaki 6 haneli kod</label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      className="form-input"
-                      value={mfaEnableCode}
-                      onChange={(e) => setMfaEnableCode(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <button type="submit" className="btn-primary" data-width="fixed" disabled={accountBusy}>
-                    {accountBusy ? "Doğrulanıyor..." : "MFA'yı Etkinleştir"}
-                  </button>
-                </form>
-              ) : (
-                <button className="btn-primary" data-width="fixed" onClick={handleStartMfaSetup} disabled={accountBusy}>
-                  <Shield size={14} />
-                  MFA Kurulumunu Başlat
-                </button>
-              )}
-            </div>
+
+                  {currentUser?.mfaEnabled ? (
+                    <form onSubmit={handleDisableMfa} className="settings-form">
+                      <div className="form-group">
+                        <label className="form-label">MFA'yı kapatmak için şifrenizi girin</label>
+                        <input
+                          type="password"
+                          className="form-input"
+                          value={mfaDisablePassword}
+                          onChange={(e) => setMfaDisablePassword(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <button type="submit" className="btn-secondary" disabled={accountBusy}>
+                        {accountBusy ? "İşleniyor..." : "MFA'yı Kapat"}
+                      </button>
+                    </form>
+                  ) : mfaSetupQr ? (
+                    <form onSubmit={handleEnableMfa} className="settings-form">
+                      <img src={mfaSetupQr} alt="MFA QR kodu" style={{ width: 220, height: 220, borderRadius: 8 }} />
+                      {mfaSetupSecret && (
+                        <p className="form-help">Manuel giriş anahtarı: <code>{mfaSetupSecret}</code></p>
+                      )}
+                      <div className="form-group">
+                        <label className="form-label">Authenticator uygulamasındaki 6 haneli kod</label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          className="form-input"
+                          value={mfaEnableCode}
+                          onChange={(e) => setMfaEnableCode(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <button type="submit" className="btn-primary" data-width="fixed" disabled={accountBusy}>
+                        {accountBusy ? "Doğrulanıyor..." : "MFA'yı Etkinleştir"}
+                      </button>
+                    </form>
+                  ) : (
+                    <button className="btn-primary" data-width="fixed" onClick={handleStartMfaSetup} disabled={accountBusy}>
+                      <Shield size={14} />
+                      MFA Kurulumunu Başlat
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -4087,29 +4577,34 @@ export function App() {
           </div>
         )}
 
-        {/* View 6: Güvenlik Profilleri (Admin) */}
+        {/* View 6: Güvenlik Profilleri & Ajan Politikaları (Admin) */}
         {view === "security-profiles" && currentUser?.role === "Admin" && (
           <div className="content-pane">
             <div className="content-card">
-              <h2 className="content-card-title">{editingProfileId ? "Profili düzenle" : "Yeni güvenlik profili"}</h2>
+              <h2 className="content-card-title">{editingProfileId ? "Ajan Güvenlik Profilini Düzenle" : "Yeni Ajan Güvenlik Profili"}</h2>
               <p className="content-card-copy">
-                Ajanın görünen adı/ikonu ve Durum Paneli/Çıkış/Kaldırma işlemleri için şifre korumaları. Bir cihaza
-                profil atandığında, "Tray menüsünü kısıtla" açıksa sağ tık menüsü sadece Durum Paneli ve Çıkış'ı gösterir.
+                Farklı şirket ve departmanlar için özel ajan davranışları, bağlantı onay politikaları (doğrudan veya onaylı erişim),
+                oturum kısıtlamaları ve parola korumaları tanımlayın.
               </p>
 
               <form onSubmit={handleSaveProfile} className="settings-form">
+                {/* 1. Temel Bilgiler & Markalama */}
+                <div className="form-section-header" style={{ marginTop: "var(--space-2)", marginBottom: "var(--space-2)" }}>
+                  <h3 style={{ fontSize: "0.95rem", color: "var(--color-primary-text)", fontWeight: 600 }}>🏷️ Profil &amp; Markalama Bilgileri</h3>
+                </div>
                 <div className="form-group">
-                  <label className="form-label">Profil adı</label>
+                  <label className="form-label">Profil Adı *</label>
                   <input
                     type="text"
                     className="form-input"
+                    placeholder="Örn: Muhasebe Standart Profil veya IT Sunucu Profili"
                     value={profileForm.name}
                     onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
                     required
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Ajan görünen adı</label>
+                  <label className="form-label">Ajan Görünen Adı</label>
                   <input
                     type="text"
                     className="form-input"
@@ -4119,7 +4614,7 @@ export function App() {
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Ajan ikonu</label>
+                  <label className="form-label">Özel Ajan İkonu (PNG / ICO)</label>
                   <input
                     type="file"
                     accept="image/png,image/x-icon,image/vnd.microsoft.icon"
@@ -4130,11 +4625,114 @@ export function App() {
                     <img
                       src={`data:image/png;base64,${profileForm.iconBase64}`}
                       alt="İkon önizleme"
-                      style={{ width: 32, height: 32, marginTop: 8, borderRadius: 6 }}
+                      style={{ width: 32, height: 32, marginTop: 8, borderRadius: 6, border: "1px solid var(--color-border)" }}
                     />
                   )}
                 </div>
 
+                {/* 2. Uzak Bağlantı & Onay Politikası */}
+                <div className="form-section-header" style={{ marginTop: "var(--space-4)", marginBottom: "var(--space-2)" }}>
+                  <h3 style={{ fontSize: "0.95rem", color: "var(--color-primary-text)", fontWeight: 600 }}>🛡️ Uzaktan Bağlantı &amp; Onay Politikası</h3>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Bağlantı Onay Modu</label>
+                  <select
+                    className="form-input"
+                    value={profileForm.consentMode}
+                    onChange={(e) => setProfileForm({ ...profileForm, consentMode: e.target.value as any })}
+                  >
+                    <option value="unattended">🟢 Doğrudan Bağlan (Unattended - Sormadan anında bağlan, IT/Sunucu)</option>
+                    <option value="always_prompt">🟡 Her Zaman Onay İste (Kullanıcı ekrandan kabul etmeden bağlanma)</option>
+                    <option value="prompt_if_active">🔵 Kullanıcı Aktifken Sor (Oturum açıkken sor, kilitliyken direkt bağlan)</option>
+                  </select>
+                </div>
+
+                {profileForm.consentMode !== "unattended" && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)", marginBottom: "var(--space-3)" }}>
+                    <div className="form-group">
+                      <label className="form-label">Onay Zaman Aşımı (Saniye)</label>
+                      <input
+                        type="number"
+                        className="form-input"
+                        min={10}
+                        max={300}
+                        value={profileForm.consentTimeoutSeconds}
+                        onChange={(e) => setProfileForm({ ...profileForm, consentTimeoutSeconds: Number(e.target.value) || 30 })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Zaman Aşımı Varsayılan Eylemi</label>
+                      <select
+                        className="form-input"
+                        value={profileForm.consentDefaultAction}
+                        onChange={(e) => setProfileForm({ ...profileForm, consentDefaultAction: e.target.value as any })}
+                      >
+                        <option value="deny">✖ Otomatik Reddet (Önerilen)</option>
+                        <option value="allow">✔ Otomatik Kabul Et</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Oturum İzinleri & Kısıtlamaları */}
+                <div className="form-section-header" style={{ marginTop: "var(--space-4)", marginBottom: "var(--space-2)" }}>
+                  <h3 style={{ fontSize: "0.95rem", color: "var(--color-primary-text)", fontWeight: 600 }}>⚙️ Oturum İzinleri &amp; Kısıtlamaları</h3>
+                </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.viewOnlyMode}
+                      onChange={(e) => setProfileForm({ ...profileForm, viewOnlyMode: e.target.checked })}
+                    />
+                    <strong>Sadece İzleme Modu</strong> (Teknisyenin fare ve klavye girdisi göndermesini engelle)
+                  </label>
+                </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.allowRemoteTerminal}
+                      onChange={(e) => setProfileForm({ ...profileForm, allowRemoteTerminal: e.target.checked })}
+                    />
+                    <strong>Uzak Terminal İzni</strong> (Web veya masaüstünden arka plan CMD/PowerShell çalıştırma)
+                  </label>
+                </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.allowClipboard}
+                      onChange={(e) => setProfileForm({ ...profileForm, allowClipboard: e.target.checked })}
+                    />
+                    <strong>Pano (Clipboard) Senkronizasyonu</strong> (Metin kopyalama/yapıştırmaya izin ver)
+                  </label>
+                </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.allowFileTransfer}
+                      onChange={(e) => setProfileForm({ ...profileForm, allowFileTransfer: e.target.checked })}
+                    />
+                    <strong>Dosya Transferi İzni</strong> (Uzaktan dosya yükleme ve indirmeye izin ver)
+                  </label>
+                </div>
+                <div className="login-options-row">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={profileForm.showConnectionBanner}
+                      onChange={(e) => setProfileForm({ ...profileForm, showConnectionBanner: e.target.checked })}
+                    />
+                    <strong>Bağlantı Rozeti Göster</strong> (Bağlantı anında hedef ekranın köşesinde 'Teknisyen Bağlı' çubuğu)
+                  </label>
+                </div>
+
+                {/* 4. Ajan Koruması & Şifre */}
+                <div className="form-section-header" style={{ marginTop: "var(--space-4)", marginBottom: "var(--space-2)" }}>
+                  <h3 style={{ fontSize: "0.95rem", color: "var(--color-primary-text)", fontWeight: 600 }}>🔒 Ajan Koruması &amp; Şifre</h3>
+                </div>
                 <div className="login-options-row">
                   <label className="remember-label">
                     <input
@@ -4142,10 +4740,9 @@ export function App() {
                       checked={profileForm.restrictTrayMenu}
                       onChange={(e) => setProfileForm({ ...profileForm, restrictTrayMenu: e.target.checked })}
                     />
-                    Tray menüsünü kısıtla (sadece Durum Paneli + Çıkış)
+                    <strong>Tray Menüsünü Kısıtla</strong> (Sağ tık menüsünü sadece Durum Paneli ve Çıkış ile sınırla)
                   </label>
                 </div>
-
                 <div className="login-options-row">
                   <label className="remember-label">
                     <input
@@ -4153,23 +4750,24 @@ export function App() {
                       checked={profileForm.requirePassword}
                       onChange={(e) => setProfileForm({ ...profileForm, requirePassword: e.target.checked })}
                     />
-                    Bu profile şifre koruması ekle (Durum Paneli, Çıkış ve Kaldırma için tek şifre)
+                    <strong>Şifre Koruması Ekle</strong> (Durum Paneli açma, çıkış yapma ve kaldırma için şifre iste)
                   </label>
                 </div>
                 {profileForm.requirePassword && (
                   <div className="form-group">
-                    <label className="form-label">Şifre</label>
+                    <label className="form-label">Yönetici Parolası *</label>
                     <input
                       type="password"
                       className="form-input"
-                      placeholder={editingProfileId ? "Değiştirmek için doldurun" : ""}
+                      placeholder={editingProfileId ? "Mevcut şifreyi korumak için boş bırakın" : "En az 6 karakter"}
                       value={profileForm.password}
                       onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })}
+                      required={!editingProfileId}
                     />
                   </div>
                 )}
 
-                <div className="row-action-group">
+                <div className="row-action-group" style={{ marginTop: "var(--space-4)" }}>
                   <button type="submit" className="btn-primary" data-width="fixed" disabled={savingProfile}>
                     <Lock size={14} />
                     {savingProfile ? "Kaydediliyor..." : editingProfileId ? "Profili Güncelle" : "Profil Oluştur"}
@@ -4184,25 +4782,63 @@ export function App() {
             </div>
 
             <div className="content-card">
-              <h2 className="content-card-title">Profiller ({securityProfiles.length})</h2>
+              <h2 className="content-card-title">Mevcut Güvenlik Profilleri ({securityProfiles.length})</h2>
               <div className="op-table-container">
                 <table className="op-table">
                   <thead>
                     <tr>
-                      <th>Ad</th>
-                      <th>Ajan adı</th>
-                      <th>Tray kısıtlı</th>
-                      <th>Şifre</th>
+                      <th>Profil Adı</th>
+                      <th>Bağlantı Onayı</th>
+                      <th>Oturum İzinleri</th>
+                      <th>Korumalar</th>
                       <th>Aksiyonlar</th>
                     </tr>
                   </thead>
                   <tbody>
                     {securityProfiles.map((profile) => (
                       <tr key={profile.id}>
-                        <td>{profile.name}</td>
-                        <td>{profile.agentDisplayName || "—"}</td>
-                        <td>{profile.restrictTrayMenu ? "Evet" : "Hayır"}</td>
-                        <td>{profile.requirePassword ? "Şifreli" : "—"}</td>
+                        <td>
+                          <strong>{profile.name}</strong>
+                          {profile.agentDisplayName && (
+                            <div style={{ fontSize: "0.75rem", color: "var(--color-secondary-text)" }}>
+                              🏷️ {profile.agentDisplayName}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          {profile.consentMode === "always_prompt" ? (
+                            <span className="shield-tag" style={{ background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b" }}>
+                              🟡 Her Zaman Onay ({profile.consentTimeoutSeconds}s)
+                            </span>
+                          ) : profile.consentMode === "prompt_if_active" ? (
+                            <span className="shield-tag" style={{ background: "rgba(59, 130, 246, 0.15)", color: "#3b82f6" }}>
+                              🔵 Aktifken Onay ({profile.consentTimeoutSeconds}s)
+                            </span>
+                          ) : (
+                            <span className="shield-tag" style={{ background: "rgba(34, 197, 94, 0.15)", color: "#22c55e" }}>
+                              🟢 Doğrudan Erişim
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", fontSize: "0.8rem" }}>
+                            {profile.viewOnlyMode && <span className="version-pill">👁️ Sadece İzle</span>}
+                            {!profile.allowRemoteTerminal && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Terminal</span>}
+                            {!profile.allowClipboard && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Pano</span>}
+                            {!profile.allowFileTransfer && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Dosya</span>}
+                            {!profile.viewOnlyMode && profile.allowRemoteTerminal && profile.allowClipboard && profile.allowFileTransfer && (
+                              <span className="shield-tag">⚡ Tam Kontrol</span>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", fontSize: "0.8rem" }}>
+                            {profile.requirePassword && <span className="shield-tag">🔒 Şifreli</span>}
+                            {profile.restrictTrayMenu && <span className="shield-tag">🛡️ Kısıtlı Menü</span>}
+                            {profile.showConnectionBanner && <span className="shield-tag">🏷️ Banner</span>}
+                            {!profile.requirePassword && !profile.restrictTrayMenu && <span>—</span>}
+                          </div>
+                        </td>
                         <td>
                           <div className="row-action-group">
                             <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditProfile(profile)}>
@@ -4222,133 +4858,821 @@ export function App() {
           </div>
         )}
 
-        {/* View 7: Cihaz Grupları (Admin) */}
+        {/* View 7: Şirket & Departman Yönetimi (Master-Detail Organization) (Admin) */}
         {view === "device-groups" && currentUser?.role === "Admin" && (
           <div className="content-pane">
-            <div className="content-card">
-              <h2 className="content-card-title">{editingGroupId ? "Grubu düzenle" : "Yeni grup"}</h2>
-              <p className="content-card-copy">
-                Cihazları şirket/departman gibi iç içe gruplar halinde organize edin. Bir gruba varsayılan güvenlik
-                profili atarsanız, kendi profili olmayan cihazlar (doğrudan veya alt gruplar üzerinden) bunu miras alır.
-              </p>
-
-              <form onSubmit={handleSaveGroup} className="settings-form">
-                <div className="form-group">
-                  <label className="form-label">Grup adı</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="Örn: Talay Lojistik veya Muhasebe"
-                    value={groupForm.name}
-                    onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Üst grup</label>
-                  <select
-                    className="form-input"
-                    value={groupForm.parentGroupId ?? ""}
-                    onChange={(e) => setGroupForm({ ...groupForm, parentGroupId: e.target.value || null })}
+            <div className="org-workspace">
+              {/* Sol Sütun: Şirketler Listesi */}
+              <div className="content-card" style={{ margin: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-2)" }}>
+                  <div>
+                    <h2 className="content-card-title" style={{ margin: 0 }}>Şirketler ({rootCompanies.length})</h2>
+                    <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Müşteri / Ana Organizasyonlar</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ height: 28, fontSize: "11.5px", padding: "0 10px" }}
+                    onClick={() => {
+                      setNewCompanyName("");
+                      setNewCompanyPolicyId("");
+                      setShowNewCompanyModal(true);
+                    }}
                   >
-                    <option value="">Yok (en üst seviye)</option>
-                    {deviceGroups.filter((g) => g.id !== editingGroupId).map((g) => (
-                      <option key={g.id} value={g.id}>{g.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Varsayılan güvenlik profili</label>
-                  <select
-                    className="form-input"
-                    value={groupForm.defaultSecurityProfileId ?? ""}
-                    onChange={(e) => setGroupForm({ ...groupForm, defaultSecurityProfileId: e.target.value || null })}
-                  >
-                    <option value="">Yok</option>
-                    {securityProfiles.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="row-action-group">
-                  <button type="submit" className="btn-primary" data-width="fixed" disabled={savingGroup}>
-                    <Building2 size={14} />
-                    {savingGroup ? "Kaydediliyor..." : editingGroupId ? "Grubu Güncelle" : "Grup Oluştur"}
+                    + Yeni Şirket
                   </button>
-                  {editingGroupId && (
-                    <button type="button" className="btn-secondary" onClick={handleCancelEditGroup}>
-                      İptal
-                    </button>
+                </div>
+
+                <div className="org-company-list">
+                  {rootCompanies.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "24px 12px", color: "var(--text-dim)", fontSize: "12.5px" }}>
+                      Henüz kayıtlı şirket bulunmuyor.<br />
+                      Yukarıdaki <strong>+ Yeni Şirket</strong> butonundan ekleyin.
+                    </div>
+                  ) : (
+                    rootCompanies.map((comp) => {
+                      const isSelected = selectedOrgCompany?.id === comp.id;
+                      const deptCount = deviceGroups.filter((g) => g.parentGroupId === comp.id).length;
+                      const devCount = getCompanyDeviceCount(comp.id);
+                      const matchedProfile = securityProfiles.find((p) => p.id === comp.defaultSecurityProfileId);
+
+                      return (
+                        <div
+                          key={comp.id}
+                          className={`company-card-item ${isSelected ? "active" : ""}`}
+                          onClick={() => setSelectedOrgCompanyId(comp.id)}
+                        >
+                          <div className="company-card-header">
+                            <div className="company-card-title">
+                              <Building2 size={15} style={{ color: isSelected ? "var(--primary)" : "var(--text-dim)" }} />
+                              <span>{comp.name}</span>
+                            </div>
+                            <div className="row-action-group" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                className="icon-action-btn"
+                                title="Şirket Adını Düzenle"
+                                onClick={() => handleOpenEditGroup(comp)}
+                              >
+                                <KeyRound size={12} />
+                              </button>
+                              <button
+                                className="icon-action-btn"
+                                title="Şirketi Sil"
+                                onClick={() => handleDeleteGroup(comp)}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="company-card-meta">
+                            <span>📁 {deptCount} Departman</span>
+                            <span>·</span>
+                            <span>🖥️ {devCount} Cihaz</span>
+                          </div>
+
+                          <div className="company-card-policy">
+                            {matchedProfile ? (
+                              <span className="shield-tag" style={{ fontSize: "10.5px" }}>
+                                🛡️ {matchedProfile.name}{" "}
+                                {matchedProfile.consentMode === "always_prompt"
+                                  ? "(🟡 Onaylı)"
+                                  : matchedProfile.consentMode === "prompt_if_active"
+                                  ? "(🔵 Aktifken)"
+                                  : "(🟢 Doğrudan)"}
+                              </span>
+                            ) : (
+                              <span style={{ color: "var(--text-dim)", fontSize: "10.5px" }}>🛡️ Standart Erişim</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
+                </div>
+              </div>
+
+              {/* Sağ Sütun: Seçili Şirket Detayı, Departmanlar & Güvenlik Politikası */}
+              <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+                {!selectedOrgCompany ? (
+                  <div className="content-card" style={{ textAlign: "center", padding: "40px 20px" }}>
+                    <Building2 size={36} style={{ color: "var(--text-dim)", margin: "0 auto 12px" }} />
+                    <h3 style={{ fontSize: "15px", fontWeight: 600, color: "var(--text-main)", marginBottom: 6 }}>
+                      Şirket Seçilmedi
+                    </h3>
+                    <p style={{ fontSize: "12.5px", color: "var(--text-dim)", maxWidth: 360, margin: "0 auto 16px" }}>
+                      Departmanları ve güvenlik politikalarını yapılandırmak için sol taraftan bir şirket seçin veya yeni bir şirket ekleyin.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => {
+                        setNewCompanyName("");
+                        setNewCompanyPolicyId("");
+                        setShowNewCompanyModal(true);
+                      }}
+                    >
+                      + Yeni Şirket Ekle
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {/* 1. Şirket Genel Başlığı & Kurulum Anahtarı */}
+                    <div className="content-card" style={{ margin: 0 }}>
+                      <div className="org-detail-header">
+                        <div className="org-detail-title-group">
+                          <div className="org-company-badge-icon">
+                            <Building2 size={20} />
+                          </div>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <h2 style={{ fontSize: "17px", fontWeight: 700, color: "var(--text-main)", margin: 0 }}>
+                                {selectedOrgCompany.name}
+                              </h2>
+                              <button
+                                className="icon-action-btn"
+                                title="Şirket Adını Düzenle"
+                                onClick={() => handleOpenEditGroup(selectedOrgCompany)}
+                              >
+                                <KeyRound size={13} />
+                              </button>
+                            </div>
+                            <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>
+                              Toplam {getCompanyDeviceCount(selectedOrgCompany.id)} Cihaz · {selectedCompanyDepartments.length} Departman
+                            </span>
+                          </div>
+                        </div>
+
+                        {selectedOrgCompany.enrollmentKey && (
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Şirket Anahtarı:</span>
+                            <code className="mono-text mono-xs" style={{ padding: "3px 6px", background: "var(--bg-input)", borderRadius: 4 }}>
+                              {selectedOrgCompany.enrollmentKey.slice(0, 8)}…
+                            </code>
+                            <button
+                              className="btn-secondary"
+                              style={{ height: 26, fontSize: "11.5px", padding: "0 8px" }}
+                              title="Kurulum Anahtarını Kopyala"
+                              onClick={() => copyToClipboard(selectedOrgCompany.enrollmentKey!, `Kurulum Anahtarı: ${selectedOrgCompany.name}`)}
+                            >
+                              <Copy size={12} /> Kopyala
+                            </button>
+                            <button
+                              className="btn-secondary"
+                              style={{ height: 26, fontSize: "11.5px", padding: "0 8px" }}
+                              title="Kurulum Anahtarını Yenile"
+                              onClick={() => handleRegenerateGroupKey(selectedOrgCompany)}
+                            >
+                              <RefreshCw size={11} /> Anahtarı Yenile
+                            </button>
+                            <button
+                              className="btn-secondary"
+                              style={{ height: 26, fontSize: "11.5px", padding: "0 8px" }}
+                              title="Ajan Provizyon Scriptini İndir (.ps1)"
+                              onClick={() => downloadDeviceGroupProvisionScript(selectedOrgCompany.id, selectedOrgCompany.name)}
+                            >
+                              <Download size={12} /> .ps1 İndir
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 2. Şirket Varsayılan Güvenlik Politikası & Canlı Yapılandırma */}
+                      <div className="policy-config-box">
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                          <div>
+                            <strong style={{ fontSize: "13px", color: "var(--text-main)" }}>🛡️ Şirket Varsayılan Güvenlik Politikası</strong>
+                            <div style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>
+                              Alt departmanlar ve cihazlar özel bir politika belirlenmedikçe bu politikayı otomatik olarak uygular.
+                            </div>
+                          </div>
+
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <select
+                              className="form-input"
+                              style={{ height: 28, fontSize: "12px", width: "auto", minWidth: 200 }}
+                              value={selectedOrgCompany.defaultSecurityProfileId ?? ""}
+                              onChange={(e) => handleQuickUpdateGroupPolicy(selectedOrgCompany, e.target.value || null)}
+                              title="Politika Seçin"
+                            >
+                              <option value="">Standart / Kısıtlama Yok (Doğrudan Erişim)</option>
+                              {securityProfiles.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name}{" "}
+                                  {p.consentMode === "always_prompt"
+                                    ? "(🟡 Her Zaman Onay)"
+                                    : p.consentMode === "prompt_if_active"
+                                    ? "(🔵 Aktifken Onay)"
+                                    : "(🟢 Doğrudan Bağlan)"}
+                                </option>
+                              ))}
+                            </select>
+
+                            {selectedOrgCompany.defaultSecurityProfileId ? (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                style={{ height: 28, fontSize: "11.5px", padding: "0 10px" }}
+                                onClick={() =>
+                                  openProfileEditorFor(selectedOrgCompany.defaultSecurityProfileId, {
+                                    type: "company",
+                                    id: selectedOrgCompany.id,
+                                    name: selectedOrgCompany.name
+                                  })
+                                }
+                              >
+                                <Sliders size={12} /> Profili Yapılandır
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                style={{ height: 28, fontSize: "11.5px", padding: "0 10px" }}
+                                onClick={() =>
+                                  openProfileEditorFor(null, {
+                                    type: "company",
+                                    id: selectedOrgCompany.id,
+                                    name: selectedOrgCompany.name
+                                  })
+                                }
+                              >
+                                <Lock size={12} /> + Yeni Profil Oluştur
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Seçili Profil Önizleme Rozetleri */}
+                        {(() => {
+                          const p = securityProfiles.find((x) => x.id === selectedOrgCompany.defaultSecurityProfileId);
+                          if (!p) return null;
+                          return (
+                            <div className="policy-chips-row" style={{ marginTop: 4 }}>
+                              {p.consentMode === "always_prompt" ? (
+                                <span className="shield-tag" style={{ background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b" }}>
+                                  🟡 Bağlanırken Kullanıcıdan Onay İste ({p.consentTimeoutSeconds}s)
+                                </span>
+                              ) : p.consentMode === "prompt_if_active" ? (
+                                <span className="shield-tag" style={{ background: "rgba(59, 130, 246, 0.15)", color: "#3b82f6" }}>
+                                  🔵 Oturum Açıkken Sor, Kilitliyken Direkt Bağlan ({p.consentTimeoutSeconds}s)
+                                </span>
+                              ) : (
+                                <span className="shield-tag" style={{ background: "rgba(34, 197, 94, 0.15)", color: "#22c55e" }}>
+                                  🟢 Doğrudan Bağlan (Sormaz / Unattended)
+                                </span>
+                              )}
+
+                              {p.viewOnlyMode ? (
+                                <span className="version-pill" style={{ color: "#f59e0b" }}>👁️ Sadece İzleme Modu</span>
+                              ) : (
+                                <span className="shield-tag">⚡ Tam Kontrol (Klavye &amp; Fare)</span>
+                              )}
+
+                              {!p.allowRemoteTerminal && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Terminal Kapalı</span>}
+                              {!p.allowClipboard && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Pano Kapalı</span>}
+                              {!p.allowFileTransfer && <span className="version-pill" style={{ color: "#ef4444" }}>🚫 Dosya Transferi Kapalı</span>}
+                              {p.requirePassword && <span className="shield-tag">🔒 Parola Korumalı</span>}
+                              {p.showConnectionBanner && <span className="shield-tag">🏷️ Bağlantı Rozeti</span>}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* 3. Departmanlar Bölümü */}
+                    <div className="content-card" style={{ margin: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-3)" }}>
+                        <div>
+                          <h3 style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-main)", margin: 0 }}>
+                            {selectedOrgCompany.name} Departmanları ({selectedCompanyDepartments.length})
+                          </h3>
+                          <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>
+                            Örn: Muhasebe, IT &amp; Sunucular, Lojistik, İnsan Kaynakları
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          style={{ height: 28, fontSize: "11.5px", padding: "0 10px" }}
+                          onClick={() => {
+                            setNewDeptName("");
+                            setNewDeptPolicyId("");
+                            setShowNewDeptModal(true);
+                          }}
+                        >
+                          + Yeni Departman Ekle
+                        </button>
+                      </div>
+
+                      <div className="op-table-container">
+                        <table className="op-table">
+                          <thead>
+                            <tr>
+                              <th>Departman Adı</th>
+                              <th>Cihaz Sayısı</th>
+                              <th>Güvenlik Politikası</th>
+                              <th>Departman Kurulum Anahtarı</th>
+                              <th style={{ textAlign: "right" }}>İşlemler</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedCompanyDepartments.length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="empty-table-cell">
+                                  Bu şirkete henüz departman eklenmemiş. Yukarıdaki <strong>+ Yeni Departman Ekle</strong> butonundan oluşturabilirsiniz.
+                                </td>
+                              </tr>
+                            ) : (
+                              selectedCompanyDepartments.map((dept) => {
+                                const deptDevCount = getDepartmentDeviceCount(dept.id);
+                                const deptMatchedProfile = securityProfiles.find((p) => p.id === dept.defaultSecurityProfileId);
+                                const compProfile = securityProfiles.find((p) => p.id === selectedOrgCompany.defaultSecurityProfileId);
+
+                                return (
+                                  <tr key={dept.id} className="department-table-row">
+                                    <td>
+                                      <strong>📁 {dept.name}</strong>
+                                    </td>
+                                    <td>
+                                      <span className="version-pill">{deptDevCount} Cihaz</span>
+                                    </td>
+                                    <td>
+                                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                        <select
+                                          className="form-input"
+                                          style={{ height: 26, fontSize: "11.5px", width: "auto", minWidth: 160 }}
+                                          value={dept.defaultSecurityProfileId ?? ""}
+                                          onChange={(e) => handleQuickUpdateGroupPolicy(dept, e.target.value || null)}
+                                        >
+                                          <option value="">
+                                            — Miras Al ({compProfile ? compProfile.name : "Şirket Politikası"})
+                                          </option>
+                                          {securityProfiles.map((p) => (
+                                            <option key={p.id} value={p.id}>
+                                              {p.name}{" "}
+                                              {p.consentMode === "always_prompt"
+                                                ? "(🟡 Onaylı)"
+                                                : p.consentMode === "prompt_if_active"
+                                                ? "(🔵 Aktifken)"
+                                                : "(🟢 Doğrudan)"}
+                                            </option>
+                                          ))}
+                                        </select>
+
+                                        {dept.defaultSecurityProfileId ? (
+                                          <button
+                                            type="button"
+                                            className="icon-action-btn"
+                                            title="Departman Politikasını Yapılandır"
+                                            onClick={() =>
+                                              openProfileEditorFor(dept.defaultSecurityProfileId, {
+                                                type: "dept",
+                                                id: dept.id,
+                                                name: `${selectedOrgCompany.name} > ${dept.name}`
+                                              })
+                                            }
+                                          >
+                                            <Sliders size={13} />
+                                          </button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            className="icon-action-btn"
+                                            title="Departmana Özel Profil Oluştur"
+                                            onClick={() =>
+                                              openProfileEditorFor(null, {
+                                                type: "dept",
+                                                id: dept.id,
+                                                name: `${selectedOrgCompany.name} > ${dept.name}`
+                                              })
+                                            }
+                                          >
+                                            <Lock size={13} />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      {dept.enrollmentKey ? (
+                                        <div className="row-action-group">
+                                          <span className="mono-text mono-xs">{dept.enrollmentKey.slice(0, 8)}…</span>
+                                          <button
+                                            className="icon-action-btn"
+                                            title="Departman Anahtarını Kopyala"
+                                            onClick={() =>
+                                              copyToClipboard(dept.enrollmentKey!, `Kurulum Anahtarı: ${selectedOrgCompany.name} > ${dept.name}`)
+                                            }
+                                          >
+                                            <Copy size={12} />
+                                          </button>
+                                          <button
+                                            className="icon-action-btn"
+                                            title="Departman Anahtarını Yenile"
+                                            onClick={() => handleRegenerateGroupKey(dept)}
+                                          >
+                                            <RefreshCw size={11} />
+                                          </button>
+                                          <button
+                                            className="icon-action-btn"
+                                            title="Departman Provizyon Scriptini İndir (.ps1)"
+                                            onClick={() => downloadDeviceGroupProvisionScript(dept.id, `${selectedOrgCompany.name}_${dept.name}`)}
+                                          >
+                                            <Download size={12} />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        "—"
+                                      )}
+                                    </td>
+                                    <td style={{ textAlign: "right" }}>
+                                      <div className="row-action-group" style={{ justifyContent: "flex-end" }}>
+                                        <button
+                                          className="icon-action-btn"
+                                          title="Departman Adını Düzenle"
+                                          onClick={() => handleOpenEditGroup(dept)}
+                                        >
+                                          <KeyRound size={13} />
+                                        </button>
+                                        <button
+                                          className="icon-action-btn"
+                                          title="Departmanı Sil"
+                                          onClick={() => handleDeleteGroup(dept)}
+                                        >
+                                          <Trash2 size={13} />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Yeni Şirket Ekle */}
+        {showNewCompanyModal && (
+          <div className="modal-backdrop" onClick={() => setShowNewCompanyModal(false)}>
+            <div className="modal-dialog" style={{ maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title-with-icon">
+                  <Building2 size={18} style={{ color: "var(--primary)" }} />
+                  <div>
+                    <h3 className="modal-title">Yeni Şirket Ekle</h3>
+                    <p className="modal-subtitle">Müşteri veya ana organizasyon tanımlayın.</p>
+                  </div>
+                </div>
+                <button className="modal-close-btn" onClick={() => setShowNewCompanyModal(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+              <form onSubmit={handleCreateCompany}>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+                  <div className="form-group">
+                    <label className="form-label">Şirket Adı *</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Örn: Talay Holding, Acme Teknoloji"
+                      value={newCompanyName}
+                      onChange={(e) => setNewCompanyName(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Varsayılan Ajan Güvenlik Politikası</label>
+                    <select
+                      className="form-input"
+                      value={newCompanyPolicyId}
+                      onChange={(e) => setNewCompanyPolicyId(e.target.value)}
+                    >
+                      <option value="">Standart / Kısıtlama Yok (Doğrudan Erişim)</option>
+                      {securityProfiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}{" "}
+                          {p.consentMode === "always_prompt"
+                            ? "(🟡 Her Zaman Onay)"
+                            : p.consentMode === "prompt_if_active"
+                            ? "(🔵 Aktifken Onay)"
+                            : "(🟢 Doğrudan)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn-secondary" onClick={() => setShowNewCompanyModal(false)}>
+                    İptal
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={savingGroup}>
+                    {savingGroup ? "Oluşturuluyor..." : "Şirket Oluştur"}
+                  </button>
                 </div>
               </form>
             </div>
+          </div>
+        )}
 
-            <div className="content-card">
-              <h2 className="content-card-title">Gruplar ({deviceGroups.length})</h2>
-              <div className="op-table-container">
-                <table className="op-table">
-                  <thead>
-                    <tr>
-                      <th>Ad</th>
-                      <th>Üst grup</th>
-                      <th>Varsayılan profil</th>
-                      <th>Kurulum anahtarı</th>
-                      <th>Aksiyonlar</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deviceGroups.map((group) => {
-                      let depth = 0;
-                      let cursor = group.parentGroupId;
-                      const seen = new Set<string>([group.id]);
-                      while (cursor && !seen.has(cursor)) {
-                        depth += 1;
-                        seen.add(cursor);
-                        cursor = deviceGroups.find((g) => g.id === cursor)?.parentGroupId ?? null;
-                      }
-                      const parentName = deviceGroups.find((g) => g.id === group.parentGroupId)?.name;
-                      const profileName = securityProfiles.find((p) => p.id === group.defaultSecurityProfileId)?.name;
-                      const keyFieldName = `Kurulum Anahtarı: ${group.name}`;
-                      return (
-                        <tr key={group.id}>
-                          <td style={{ paddingLeft: 12 + depth * 20 }}>{depth > 0 ? "↳ " : ""}{group.name}</td>
-                          <td>{parentName || "—"}</td>
-                          <td>{profileName || "—"}</td>
-                          <td>
-                            {group.enrollmentKey ? (
-                              <div className="row-action-group">
-                                <span className="mono-text mono-xs">{group.enrollmentKey.slice(0, 8)}…</span>
-                                <button
-                                  className="icon-action-btn"
-                                  title="Anahtarı kopyala"
-                                  onClick={() => copyToClipboard(group.enrollmentKey!, keyFieldName)}
-                                >
-                                  {copiedField === keyFieldName ? <Check size={13} /> : <Copy size={13} />}
-                                </button>
-                                <button className="icon-action-btn" title="Yeniden oluştur" onClick={() => handleRegenerateGroupKey(group)}>
-                                  <RefreshCw size={13} />
-                                </button>
-                              </div>
-                            ) : "—"}
-                          </td>
-                          <td>
-                            <div className="row-action-group">
-                              <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditGroup(group)}>
-                                <KeyRound size={14} />
-                              </button>
-                              <button className="icon-action-btn" title="Sil" onClick={() => handleDeleteGroup(group)}>
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+        {/* Modal: Yeni Departman Ekle */}
+        {showNewDeptModal && selectedOrgCompany && (
+          <div className="modal-backdrop" onClick={() => setShowNewDeptModal(false)}>
+            <div className="modal-dialog" style={{ maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title-with-icon">
+                  <Building2 size={18} style={{ color: "var(--primary)" }} />
+                  <div>
+                    <h3 className="modal-title">Yeni Departman Ekle</h3>
+                    <p className="modal-subtitle">
+                      <strong>{selectedOrgCompany.name}</strong> altına bağlı bir departman ekleyin.
+                    </p>
+                  </div>
+                </div>
+                <button className="modal-close-btn" onClick={() => setShowNewDeptModal(false)}>
+                  <X size={16} />
+                </button>
               </div>
+              <form onSubmit={handleCreateDepartment}>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+                  <div className="form-group">
+                    <label className="form-label">Departman Adı *</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Örn: IT &amp; Sunucular, Muhasebe, Lojistik, İK"
+                      value={newDeptName}
+                      onChange={(e) => setNewDeptName(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Departman Güvenlik Politikası</label>
+                    <select
+                      className="form-input"
+                      value={newDeptPolicyId}
+                      onChange={(e) => setNewDeptPolicyId(e.target.value)}
+                    >
+                      <option value="">
+                        — Miras Al ({selectedOrgCompany.name} Şirket Varsayılanı)
+                      </option>
+                      {securityProfiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}{" "}
+                          {p.consentMode === "always_prompt"
+                            ? "(🟡 Her Zaman Onay)"
+                            : p.consentMode === "prompt_if_active"
+                            ? "(🔵 Aktifken Onay)"
+                            : "(🟢 Doğrudan)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn-secondary" onClick={() => setShowNewDeptModal(false)}>
+                    İptal
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={savingGroup}>
+                    {savingGroup ? "Oluşturuluyor..." : "Departman Oluştur"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Şirket veya Departman Düzenle / Yeniden Adlandır */}
+        {showEditGroupModal && editGroupTarget && (
+          <div className="modal-backdrop" onClick={() => setShowEditGroupModal(false)}>
+            <div className="modal-dialog" style={{ maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title-with-icon">
+                  <Building2 size={18} style={{ color: "var(--primary)" }} />
+                  <div>
+                    <h3 className="modal-title">
+                      {editGroupTarget.parentGroupId ? "Departmanı Düzenle" : "Şirketi Düzenle"}
+                    </h3>
+                    <p className="modal-subtitle">Grup adını veya varsayılan politikasını güncelleyin.</p>
+                  </div>
+                </div>
+                <button className="modal-close-btn" onClick={() => setShowEditGroupModal(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+              <form onSubmit={handleSaveEditGroup}>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+                  <div className="form-group">
+                    <label className="form-label">{editGroupTarget.parentGroupId ? "Departman Adı *" : "Şirket Adı *"}</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={editGroupName}
+                      onChange={(e) => setEditGroupName(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Varsayılan Ajan Güvenlik Politikası</label>
+                    <select
+                      className="form-input"
+                      value={editGroupPolicyId}
+                      onChange={(e) => setEditGroupPolicyId(e.target.value)}
+                    >
+                      <option value="">
+                        {editGroupTarget.parentGroupId ? "— Miras Al (Şirket Politikası)" : "Standart / Kısıtlama Yok (Doğrudan Erişim)"}
+                      </option>
+                      {securityProfiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}{" "}
+                          {p.consentMode === "always_prompt"
+                            ? "(🟡 Her Zaman Onay)"
+                            : p.consentMode === "prompt_if_active"
+                            ? "(🔵 Aktifken Onay)"
+                            : "(🟢 Doğrudan)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn-secondary" onClick={() => setShowEditGroupModal(false)}>
+                    İptal
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={savingGroup}>
+                    {savingGroup ? "Kaydediliyor..." : "Değişiklikleri Kaydet"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Canlı Güvenlik Profili Yapılandırıcı (Inline Security Profile Configurator) */}
+        {showProfileConfigModal && (
+          <div className="modal-backdrop" onClick={() => setShowProfileConfigModal(false)}>
+            <div className="modal-dialog" style={{ maxWidth: 560, maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title-with-icon">
+                  <Lock size={18} style={{ color: "var(--primary)" }} />
+                  <div>
+                    <h3 className="modal-title">
+                      {editingProfileId ? "Güvenlik Politikasını Yapılandır" : "Yeni Güvenlik Politikası Oluştur"}
+                    </h3>
+                    <p className="modal-subtitle">
+                      {profileModalTarget?.name ? `Hedef: ${profileModalTarget.name}` : "Uzaktan bağlantı izin ve onay kuralları"}
+                    </p>
+                  </div>
+                </div>
+                <button className="modal-close-btn" onClick={() => setShowProfileConfigModal(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveProfileModal} style={{ overflowY: "auto", flex: 1 }}>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+                  <div className="form-group">
+                    <label className="form-label">Politika / Profil Adı *</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Örn: Muhasebe Onaylı Politika, Sunucu Doğrudan Bağlantı"
+                      value={profileForm.name}
+                      onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
+                      required
+                    />
+                  </div>
+
+                  {/* Onay Modu */}
+                  <div className="form-group">
+                    <label className="form-label">Bağlantı Onay Modu</label>
+                    <select
+                      className="form-input"
+                      value={profileForm.consentMode}
+                      onChange={(e) => setProfileForm({ ...profileForm, consentMode: e.target.value as any })}
+                    >
+                      <option value="unattended">🟢 Doğrudan Bağlan (Sormadan anında bağlan — IT &amp; Sunucu)</option>
+                      <option value="always_prompt">🟡 Her Zaman Onay İste (Kullanıcı ekrandan kabul etmeden bağlanma — Muhasebe/Kullanıcı)</option>
+                      <option value="prompt_if_active">🔵 Kullanıcı Aktifken Sor (Oturum açıkken sor, kilitliyken direkt bağlan)</option>
+                    </select>
+                  </div>
+
+                  {profileForm.consentMode !== "unattended" && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
+                      <div className="form-group">
+                        <label className="form-label">Onay Süresi (Saniye)</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          min={10}
+                          max={300}
+                          value={profileForm.consentTimeoutSeconds}
+                          onChange={(e) => setProfileForm({ ...profileForm, consentTimeoutSeconds: Number(e.target.value) || 30 })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Zaman Aşımı Eylemi</label>
+                        <select
+                          className="form-input"
+                          value={profileForm.consentDefaultAction}
+                          onChange={(e) => setProfileForm({ ...profileForm, consentDefaultAction: e.target.value as any })}
+                        >
+                          <option value="deny">✖ Otomatik Reddet</option>
+                          <option value="allow">✔ Otomatik Kabul Et</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* İzinler */}
+                  <div style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: "var(--space-3)" }}>
+                    <label className="form-label" style={{ marginBottom: 6 }}>Oturum İzinleri &amp; Kısıtlamalar</label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={profileForm.viewOnlyMode}
+                          onChange={(e) => setProfileForm({ ...profileForm, viewOnlyMode: e.target.checked })}
+                        />
+                        <span><strong>Sadece İzleme Modu</strong> (Fare ve klavye kontrolünü kapat)</span>
+                      </label>
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={profileForm.allowRemoteTerminal}
+                          onChange={(e) => setProfileForm({ ...profileForm, allowRemoteTerminal: e.target.checked })}
+                        />
+                        <span>Uzak Terminal / Komut Çalıştırmaya İzin Ver</span>
+                      </label>
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={profileForm.allowClipboard}
+                          onChange={(e) => setProfileForm({ ...profileForm, allowClipboard: e.target.checked })}
+                        />
+                        <span>Pano (Kopyala/Yapıştır) Senkronizasyonuna İzin Ver</span>
+                      </label>
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={profileForm.allowFileTransfer}
+                          onChange={(e) => setProfileForm({ ...profileForm, allowFileTransfer: e.target.checked })}
+                        />
+                        <span>Dosya Yükleme / İndirmeye İzin Ver</span>
+                      </label>
+                      <label className="remember-label">
+                        <input
+                          type="checkbox"
+                          checked={profileForm.showConnectionBanner}
+                          onChange={(e) => setProfileForm({ ...profileForm, showConnectionBanner: e.target.checked })}
+                        />
+                        <span>Ekranda 'Teknisyen Bağlı' Rozeti Göster</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Parola Koruması */}
+                  <div style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: "var(--space-3)" }}>
+                    <label className="remember-label" style={{ marginBottom: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={profileForm.requirePassword}
+                        onChange={(e) => setProfileForm({ ...profileForm, requirePassword: e.target.checked })}
+                      />
+                      <span><strong>Ajan Ayarları ve Çıkış İçin Şifre İste</strong></span>
+                    </label>
+                    {profileForm.requirePassword && (
+                      <div className="form-group" style={{ marginTop: 6 }}>
+                        <input
+                          type="password"
+                          className="form-input"
+                          placeholder={editingProfileId ? "Mevcut şifreyi korumak için boş bırakın" : "Yönetici şifresi (en az 6 karakter)"}
+                          value={profileForm.password}
+                          onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })}
+                          required={!editingProfileId}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="modal-footer">
+                  <button type="button" className="btn-secondary" onClick={() => setShowProfileConfigModal(false)}>
+                    İptal
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={savingProfile}>
+                    {savingProfile ? "Kaydediliyor..." : editingProfileId ? "Politikayı Güncelle" : "Politikayı Oluştur ve Ata"}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         )}

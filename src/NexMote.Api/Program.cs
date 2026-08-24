@@ -269,6 +269,16 @@ using (var scope = app.Services.CreateScope())
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""RequirePassword"" INTEGER NOT NULL DEFAULT 0;"); } catch { }
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""PasswordHash"" TEXT;"); } catch { }
 
+    // Bağlantı onayı (consent) ve granüler izin kolonları — aynı ALTER TABLE deseni.
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""ConsentMode"" TEXT NOT NULL DEFAULT 'unattended';"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""ConsentTimeoutSeconds"" INTEGER NOT NULL DEFAULT 30;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""ConsentDefaultAction"" TEXT NOT NULL DEFAULT 'deny';"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""ViewOnlyMode"" INTEGER NOT NULL DEFAULT 0;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""AllowRemoteTerminal"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""AllowClipboard"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""AllowFileTransfer"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""SecurityProfiles"" ADD COLUMN ""ShowConnectionBanner"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+
     // SMTP ayar kolonları — ServerSettings tablosu EnsureCreated() ile daha önce oluşturulmuş bir
     // veritabanında bu kolonlar yok, DeletedDevices/Users ile aynı ALTER TABLE deseni.
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpHost"" TEXT;"); } catch { }
@@ -608,6 +618,26 @@ admin.MapGet("/admin/device-groups/{id:guid}/provision-script", (Guid id, string
     if (string.IsNullOrEmpty(safeName)) safeName = "Grup";
     var bytes = System.Text.Encoding.UTF8.GetBytes(result.Value.Script);
     return Results.File(bytes, "text/plain", $"NexMote-Provision-{safeName}.ps1");
+});
+
+/// <summary>
+/// Seçilen gruba özel TEK bir kurulum script'i indirir (Admin Yetkisi Gerekir): MSI'ı sunucudan indirir,
+/// sessizce kurar ve ajanı doğrudan seçilen gruba (ve varsa grubun güvenlik profiline) bağlar — indirme
+/// merkezinde "Hedef grup" seçilip indirildiğinde artık ayrı bir kurulum-sonrası provizyon adımına gerek kalmaz.
+/// </summary>
+admin.MapGet("/admin/device-groups/{id:guid}/install-script", (Guid id, string? serverUrl, DeviceGroupService groups, IConfiguration config) =>
+{
+    var effectiveServerUrl = string.IsNullOrWhiteSpace(serverUrl) ? (config["Server:PublicUrl"] ?? "https://nexmote.com") : serverUrl;
+    var result = groups.BuildInstallScript(id, effectiveServerUrl);
+    if (result is null)
+    {
+        return Results.NotFound(new { message = "Grup bulunamadı veya kurulum anahtarı yok." });
+    }
+
+    var safeName = string.Concat(result.Value.GroupName.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_'));
+    if (string.IsNullOrEmpty(safeName)) safeName = "Grup";
+    var bytes = System.Text.Encoding.UTF8.GetBytes(result.Value.Script);
+    return Results.File(bytes, "text/plain", $"NexMote-Install-{safeName}.ps1");
 });
 
 /// <summary>Şu an açık (çözülmemiş) tüm cihaz uyarılarını listeler (Admin veya Teknisyen girişi gerekir — eşik/alıcı ayarları hâlâ Admin-only /api/settings üzerinden yönetilir).</summary>

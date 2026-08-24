@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 using NexMote.Api.Services;
+using NexMote.Shared.Contracts;
 
 namespace NexMote.Api.Hubs;
 
@@ -13,6 +14,7 @@ public sealed class SignalingHub : Hub
     private readonly DeviceRegistry _devices;
     private readonly SignalSessionAccess _access;
     private readonly DeviceCommandManager _commandManager;
+    private readonly SecurityProfileService _securityProfiles;
 
     /// <summary>
     /// Mesaj tipine göre maksimum payload boyutu (byte).
@@ -47,17 +49,19 @@ public sealed class SignalingHub : Hub
         RemoteSessionRegistry sessions,
         DeviceRegistry devices,
         SignalSessionAccess access,
-        DeviceCommandManager commandManager)
+        DeviceCommandManager commandManager,
+        SecurityProfileService securityProfiles)
     {
         _sessions = sessions;
         _devices = devices;
         _access = access;
         _commandManager = commandManager;
+        _securityProfiles = securityProfiles;
     }
 
     /// <summary>
     /// Teknisyen masaüstü uygulamasının geçerli bir oturum token'ı ile canlı oturum odasına katılması.
-    /// Başarılı katılımda hedef cihaza "RemoteSessionRequested" sinyali gönderilir.
+    /// Başarılı katılımda güvenlik profili denetlenir; onay gerekmiyorsa "RemoteSessionRequested", gerekiyorsa "PromptConsentRequested" gönderilir.
     /// </summary>
     /// <param name="sessionId">Teknisyen oturum kimliği.</param>
     /// <param name="token">Oturuma özel tek kullanımlık güvenlik token'ı.</param>
@@ -71,8 +75,73 @@ public sealed class SignalingHub : Hub
 
         await Groups.AddToGroupAsync(Context.ConnectionId, $"session:{sessionId}");
         _access.Add(Context.ConnectionId, sessionId, SignalSessionRole.Technician);
-        // Hedef cihazın kalıcı sinyal kanalına oturum başlatma isteği ilet
-        await Clients.Group($"device:{session.DeviceId}").SendAsync("RemoteSessionRequested", sessionId);
+
+        // Cihazın etkin güvenlik profilini kontrol et
+        var profile = _securityProfiles.GetEffectiveProfile(session.DeviceId);
+        var consentRequired = false;
+
+        if (profile is not null)
+        {
+            if (string.Equals(profile.ConsentMode, SecurityProfileConstants.ConsentAlwaysPrompt, StringComparison.OrdinalIgnoreCase))
+            {
+                consentRequired = true;
+            }
+            else if (string.Equals(profile.ConsentMode, SecurityProfileConstants.ConsentPromptIfActive, StringComparison.OrdinalIgnoreCase))
+            {
+                var device = _devices.Get(session.DeviceId);
+                if (!string.IsNullOrWhiteSpace(device?.ActiveUser) && !device.ActiveUser.EndsWith("$", StringComparison.OrdinalIgnoreCase))
+                {
+                    consentRequired = true;
+                }
+            }
+        }
+
+        if (consentRequired && profile is not null)
+        {
+            // Teknisyene onay beklendiğini bildir
+            await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "waiting_consent");
+            // Hedef cihaza onay diyaloğunu açma sinyali ilet
+            var consentRequest = new ConnectionConsentRequest(
+                sessionId,
+                "NexMote Teknisyeni",
+                profile.ConsentTimeoutSeconds,
+                profile.ConsentDefaultAction);
+            await Clients.Group($"device:{session.DeviceId}").SendAsync("PromptConsentRequested", consentRequest);
+        }
+        else
+        {
+            // Doğrudan bağlan (Unattended)
+            await Clients.Group($"device:{session.DeviceId}").SendAsync("RemoteSessionRequested", sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Hedef bilgisayardaki kullanıcının bağlantı onayı sonucunu iletmesi (Kabul veya Red).
+    /// </summary>
+    public async Task SubmitConsentResponse(Guid sessionId, Guid deviceId, string agentToken, bool accepted, string? reason)
+    {
+        if (!_devices.ValidateAgent(deviceId, agentToken))
+        {
+            throw new HubException("Geçersiz cihaz token'ı.");
+        }
+
+        var session = _sessions.Get(sessionId);
+        if (session is null || session.DeviceId != deviceId)
+        {
+            return;
+        }
+
+        if (accepted)
+        {
+            await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "consent_accepted");
+            await Clients.Group($"device:{deviceId}").SendAsync("RemoteSessionRequested", sessionId);
+        }
+        else
+        {
+            await Clients.Group($"session:{sessionId}").SendAsync("ConsentRejected", reason ?? "Hedef kullanıcı bağlantı isteğini reddetti.");
+            await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "consent_rejected");
+            _sessions.Expire(sessionId);
+        }
     }
 
     /// <summary>

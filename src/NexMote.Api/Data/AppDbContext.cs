@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using Microsoft.EntityFrameworkCore;
+using NexMote.Shared.Contracts;
 
 namespace NexMote.Api.Data;
 
@@ -627,6 +628,32 @@ public sealed class SecurityProfileEntity
     public bool RequirePassword { get; set; }
 
     public string? PasswordHash { get; set; }
+
+    /// <summary>Bağlantı onay modu: "unattended" | "always_prompt" | "prompt_if_active".</summary>
+    [MaxLength(32)]
+    public string ConsentMode { get; set; } = SecurityProfileConstants.ConsentUnattended;
+
+    /// <summary>Kullanıcı onay diyaloğu zaman aşımı süresi (saniye).</summary>
+    public int ConsentTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>Zaman aşımı olduğunda varsayılan eylem: "deny" | "allow".</summary>
+    [MaxLength(16)]
+    public string ConsentDefaultAction { get; set; } = SecurityProfileConstants.ActionDeny;
+
+    /// <summary>true ise teknisyen sadece ekranı izler, klavye/fare girdi gönderemez.</summary>
+    public bool ViewOnlyMode { get; set; }
+
+    /// <summary>Uzak terminalden (CMD/PowerShell) komut çalıştırma izni.</summary>
+    public bool AllowRemoteTerminal { get; set; } = true;
+
+    /// <summary>Pano / kopyala-yapıştır senkronizasyon izni.</summary>
+    public bool AllowClipboard { get; set; } = true;
+
+    /// <summary>Dosya aktarımı gönderme/alma izni.</summary>
+    public bool AllowFileTransfer { get; set; } = true;
+
+    /// <summary>Bağlantı sırasında hedef ekranda "Teknisyen Bağlandı" rozetini göster.</summary>
+    public bool ShowConnectionBanner { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 

@@ -163,6 +163,56 @@ public sealed class DeviceGroupService
     /// </summary>
     public (string Script, string GroupName)? BuildProvisionScript(Guid id, string serverUrl)
     {
+        var body = ResolveProvisionBody(id, serverUrl);
+        if (body is null)
+        {
+            return null;
+        }
+
+        var (group, escapedJson, escapedName) = body.Value;
+
+        var script = $@"# NexMote Agent Provizyon Script'i — Grup: {group.Name}
+# NexMote-Agent-Setup.msi kurulduktan HEMEN SONRA bu script'i çalıştırın.
+# Bu script, ajanı '{escapedName}' grubuna (ve varsa o grubun güvenlik profiline) otomatik olarak bağlar.
+$ErrorActionPreference = 'Stop'
+{ProvisionBodyScript(escapedJson, escapedName)}";
+
+        return (script, group.Name);
+    }
+
+    /// <summary>
+    /// Seçilen gruba özel TEK bir kurulum script'i üretir: MSI'ı sunucudan indirir, sessizce (/qn) kurar,
+    /// ardından ajanı doğrudan bu gruba (ve varsa grubun güvenlik profiline) bağlar. Web konsolunda "Hedef
+    /// grup" seçilip indirme yapıldığında artık ayrı bir provizyon adımına gerek kalmaz — indirilen paket
+    /// zaten seçilen profile uygun kurulur.
+    /// </summary>
+    public (string Script, string GroupName)? BuildInstallScript(Guid id, string serverUrl)
+    {
+        var body = ResolveProvisionBody(id, serverUrl);
+        if (body is null)
+        {
+            return null;
+        }
+
+        var (group, escapedJson, escapedName) = body.Value;
+        var msiUrl = $"{serverUrl.TrimEnd('/')}/downloads/NexMote-Agent-Setup.msi";
+
+        var script = $@"# NexMote Agent Tek Adımda Kurulum Script'i — Grup: {group.Name}
+# Bu script'i (Yönetici olarak) çalıştırın: MSI'ı sunucudan indirir, sessizce kurar ve ajanı otomatik olarak
+# '{escapedName}' grubuna (ve varsa o grubun güvenlik profiline) bağlar — ayrı bir kurulum sonrası adım gerekmez.
+$ErrorActionPreference = 'Stop'
+$msiPath = Join-Path $env:TEMP 'NexMote-Agent-Setup.msi'
+Invoke-WebRequest -Uri '{msiUrl}' -OutFile $msiPath -UseBasicParsing
+Start-Process -FilePath 'msiexec.exe' -ArgumentList ""/i `""$msiPath`"" /qn /norestart"" -Wait
+{ProvisionBodyScript(escapedJson, escapedName)}
+Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+";
+
+        return (script, group.Name);
+    }
+
+    private (DeviceGroupEntity Group, string EscapedJson, string EscapedName)? ResolveProvisionBody(Guid id, string serverUrl)
+    {
         using var db = _dbFactory.CreateDbContext();
         var group = db.DeviceGroups.AsNoTracking().FirstOrDefault(g => g.Id == id);
         if (group is null || string.IsNullOrEmpty(group.EnrollmentKey))
@@ -191,11 +241,14 @@ public sealed class DeviceGroupService
         var escapedJson = configJson.Replace("'", "''");
         var escapedName = group.Name.Replace("'", "''");
 
-        var script = $@"# NexMote Agent Provizyon Script'i — Grup: {group.Name}
-# NexMote-Agent-Setup.msi kurulduktan HEMEN SONRA bu script'i çalıştırın.
-# Bu script, ajanı '{escapedName}' grubuna (ve varsa o grubun güvenlik profiline) otomatik olarak bağlar.
-$ErrorActionPreference = 'Stop'
-$agentDir = Join-Path $env:ProgramData 'NexMote\Agent'
+        return (group, escapedJson, escapedName);
+    }
+
+    /// <summary>
+    /// Hem provizyon-only hem tek-adım kurulum script'lerinde ortak olan, appsettings.json'ı yazıp
+    /// servisi/tepsi uygulamasını yeniden başlatan gövde.
+    /// </summary>
+    private static string ProvisionBodyScript(string escapedJson, string escapedName) => $@"$agentDir = Join-Path $env:ProgramData 'NexMote\Agent'
 New-Item -ItemType Directory -Force -Path $agentDir | Out-Null
 $configJson = '{escapedJson}'
 Set-Content -LiteralPath (Join-Path $agentDir 'appsettings.json') -Value $configJson -Encoding UTF8
@@ -203,11 +256,7 @@ Restart-Service 'NexMote Agent' -ErrorAction SilentlyContinue
 Get-Process -Name 'NexMote.Agent.Tray' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 $trayExe = Join-Path ${{env:ProgramFiles}} 'NexMote\Agent\NexMote.Agent.Tray.exe'
 if (Test-Path $trayExe) {{ Start-Process -FilePath $trayExe -ArgumentList '--tray' }}
-Write-Host 'NexMote Agent ''{escapedName}'' grubuna bağlandı.'
-";
-
-        return (script, group.Name);
-    }
+Write-Host 'NexMote Agent ''{escapedName}'' grubuna bağlandı.'";
 
     private static string GenerateUniqueKey(AppDbContext db)
     {

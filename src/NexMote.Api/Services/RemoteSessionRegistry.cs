@@ -85,4 +85,15 @@ public sealed class RemoteSessionRegistry
 
         return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
     }
+
+    public void Expire(Guid sessionId)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var session = db.RemoteSessions.FirstOrDefault(s => s.Id == sessionId);
+        if (session is not null)
+        {
+            session.ExpiresAt = DateTimeOffset.UtcNow;
+            db.SaveChanges();
+        }
+    }
 }
