@@ -1,7 +1,7 @@
 ﻿{
     "agent":  {
                   "version":  "0.6.9",
-                  "releaseNotes":  "v0.6.9: Ajan sunucuya baglanamama sorunu (silinmis cihaz engeli) giderildi, web konsolu kenar cubugundaki bayat surum etiketi duzeltildi, baglanti onayi (consent) ve granuler ajan izinleri eklendi, pano (kopyala/yapistir) senkronizasyonu eklendi, indirme merkezinde secilen gruba/profile uygun tek script ile kurulum eklendi."
+                  "releaseNotes":  "v0.6.9: Ajan sunucuya baglanamama sorunu (silinmis cihaz engeli) giderildi, web konsolu kenar cubugundaki bayat surum etiketi duzeltildi, baglanti onayi (consent) ve granuler ajan izinleri eklendi, pano (kopyala/yapistir) senkronizasyonu eklendi, indirme merkezinde secilen gruba/profile uygun tek script ile kurulum eklendi, uzaktan ajan guncellemesinin msiexec Restart Manager cakismasi yuzunden suresiz kilitlenmesi sorunu giderildi."
               },
     "technician":  {
                        "version":  "0.6.9",

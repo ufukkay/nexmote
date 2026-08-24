@@ -372,10 +372,27 @@ public sealed class Worker : BackgroundService
             return;
         }
 
+        // Zaten çalışan bir msiexec varsa (önceki bir kurulum denemesi hâlâ sürüyor veya takılı kaldıysa)
+        // ikinci bir kurulumu tetiklemeyi atla — her heartbeat/servis başlangıcında (20sn'de bir) körlemesine
+        // yeni bir msiexec başlatmak, önceki tıkanmış deneme temizlenmeden üst üste yığılmasına yol açar.
+        try
+        {
+            if (System.Diagnostics.Process.GetProcessesByName("msiexec").Length > 0)
+            {
+                return;
+            }
+        }
+        catch { }
+
         try
         {
             var logPath = Path.Combine(programDataDir, "update.log");
-            var psi = new System.Diagnostics.ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart /l*v \"{logPath}\"")
+            // MSIRESTARTMANAGERCONTROL=Disable: bu kurulumu servisin kendisi tetikliyor, ve WiX'in
+            // ServiceControl(Stop="both")/KillAgentTrayProcess adımları kilitli dosyaları zaten temiz
+            // durduruyor. Windows Installer'ın yerleşik Restart Manager'ı devrede kalırsa, kilidi tutan
+            // sürecin (servisin) kapanışını KENDİSİ de ayrıca çözmeye çalışıyor — üretimde doğrulandı:
+            // bu çakışma msiexec'i InstallValidate aşamasında süresiz (40+ dk) kilitliyor.
+            var psi = new System.Diagnostics.ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart MSIRESTARTMANAGERCONTROL=Disable /l*v \"{logPath}\"")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true
