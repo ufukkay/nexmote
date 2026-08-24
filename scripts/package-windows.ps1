@@ -4,9 +4,12 @@ param(
     [string]$EnrollmentKey = "",
     [string]$AdminEmail = "admin@nexmote.com",
     [string]$AdminPassword = "admin123",
-    [string]$Version = "0.6.2",
-    [string]$AgentReleaseNotes = "v0.6.2: Klavye ve fare girdi yonlendirme onarimi, sadelestirilmis sag tik menusu, Denetim Masasi uzerinden kaldirma ve arka plan guncelleme iyilestirmesi.",
-    [string]$TechnicianReleaseNotes = "v0.6.2: UTF-8 karakter duzeltmesi, canli ekran optimizasyonlari ve gelistirilmis uzaktan guncelleme yoneticisi.",
+    [Parameter(Mandatory = $true)]
+    [string]$Version,
+    [Parameter(Mandatory = $true)]
+    [string]$AgentReleaseNotes,
+    [Parameter(Mandatory = $true)]
+    [string]$TechnicianReleaseNotes,
     [switch]$FrameworkDependent
 )
 
@@ -28,7 +31,6 @@ $agentProject = Join-Path $root "src\NexMote.Agent.Windows\NexMote.Agent.Windows
 $trayProject = Join-Path $root "src\NexMote.Agent.Tray\NexMote.Agent.Tray.csproj"
 $technicianProject = Join-Path $root "src\NexMote.TechnicianApp\NexMote.TechnicianApp.csproj"
 $cleanerProject = Join-Path $root "src\NexMote.Cleaner\NexMote.Cleaner.csproj"
-$installerAssets = Join-Path $root "scripts\installer-assets"
 
 function Resolve-EnrollmentKey {
     param(
@@ -146,43 +148,6 @@ $agentConfig = [ordered]@{
 }
 
 $agentConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $agentPublish "appsettings.json") -Encoding UTF8
-
-if (Test-Path (Join-Path $installerAssets "agent")) {
-    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\install-agent.ps1") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\install.bat") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\uninstall-agent.ps1") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $installerAssets "agent\README.txt") -Destination $agentPublish -Force -ErrorAction SilentlyContinue
-}
-
-if (Test-Path (Join-Path $installerAssets "technician")) {
-    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\install-technician.ps1") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\uninstall-technician.ps1") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $installerAssets "technician\README.txt") -Destination $technicianPublish -Force -ErrorAction SilentlyContinue
-}
-
-Write-Host "Building Fast Standalone Installers (Inno Setup)..."
-$isccPaths = @(
-    "ISCC.exe",
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
-)
-$isccExe = $null
-foreach ($path in $isccPaths) {
-    if (Get-Command $path -ErrorAction SilentlyContinue) { $isccExe = $path; break }
-    if (Test-Path $path) { $isccExe = $path; break }
-}
-
-if ($isccExe) {
-    Write-Host "Using Inno Setup Compiler: $isccExe"
-    Remove-Item -Path (Join-Path $downloads "NexMote-*.exe") -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 300
-    $agentIss = Join-Path $PSScriptRoot "agent-setup.iss"
-    $techIss = Join-Path $PSScriptRoot "technician-setup.iss"
-    & $isccExe "/DMyAppVersion=$Version" "/Q" $agentIss
-    & $isccExe "/DMyAppVersion=$Version" "/Q" $techIss
-    Write-Host "Created Inno Setup Installers in $downloads"
-}
 
 Write-Host "Compiling WiX MSI Installers..."
 $buildMsiScript = Join-Path $PSScriptRoot "build-msi.ps1"

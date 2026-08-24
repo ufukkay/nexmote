@@ -121,8 +121,7 @@ NexMote istemci mimarisinde aşağıdaki 4 kuraldan **asla taviz verilmez**:
 - **Protokol:** Özel URL Protokol İşleyicisi (`nexmote://sessionId/deviceId/token`)
 
 ### 📦 Paketleme & Dağıtım Motoru
-- **Kurumsal MSI Yükleyici:** WiX Toolset v4 (Per-Machine, UAC yetkilendirmeli, Windows Servis kayıtlı)
-- **Ultra Hızlı EXE Yükleyici:** Inno Setup (1.5 saniyede ultra hızlı ve sessiz kurulum)
+- **Kurumsal MSI Yükleyici:** WiX Toolset v5 (Per-Machine, UAC yetkilendirmeli, Windows Servis kayıtlı) — Agent, Technician ve Cleaner üçü de tek formatta
 
 ---
 
@@ -200,9 +199,8 @@ NexMote/
 │       ├── api.ts            # REST API Fetch Kontratları ve DTO Tipleri
 │       └── styles.css        # Vanilla CSS Enterprise Tasarım Sistemi
 ├── scripts/                  # Yükleyici Derleme Betikleri
-│   ├── package-windows.ps1   # Tek tıkla publish + Inno Setup (.exe) + WiX (.msi) üretici
-│   ├── agent-setup.iss       # Inno Setup Ajan konfigürasyonu
-│   └── technician-setup.iss  # Inno Setup Teknisyen konfigürasyonu
+│   ├── package-windows.ps1   # Tek tıkla publish + WiX (.msi) üretici
+│   └── build-msi.ps1         # WiX v5 ile Agent/Technician/Cleaner MSI derleme betiği
 ├── assets/                   # Uygulama İkonları (nexmote.ico, nexmote.png)
 └── downloads/                # Dağıtım Paketleri ve versions.json
 ```
@@ -223,11 +221,11 @@ npm run dev
 .\.dotnet\dotnet.exe build NexMote.sln -c Release
 ```
 
-### 3. Windows Yükleyicilerini Paketleme (EXE + MSI)
+### 3. Windows Yükleyicilerini Paketleme (MSI)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -ServerUrl "https://nexmote.com" -EnrollmentKey "your-key" -Version "0.6.3"
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -ServerUrl "https://nexmote.com" -EnrollmentKey "your-key" -Version "0.6.8" -AgentReleaseNotes "..." -TechnicianReleaseNotes "..."
 ```
-*Bu betik `artifacts/package/` altına dosyaları derler, Inno Setup ile ultra hızlı `NexMote-Agent-Setup.exe` ve WiX ile kurumsal `NexMote-Agent-Setup.msi` paketlerini üretir.*
+*Bu betik `artifacts/package/` altına dosyaları derler ve WiX ile kurumsal `NexMote-Agent-Setup.msi` / `NexMote-Technician-Setup.msi` / `NexMote-Cleanup-Setup.msi` paketlerini üretir. `-Version`, `-AgentReleaseNotes` ve `-TechnicianReleaseNotes` zorunludur (bkz. AGENTS.md).*
 
 ### 4. Canlı Sunucuya Yayınlama (Linux VPS)
 ```powershell

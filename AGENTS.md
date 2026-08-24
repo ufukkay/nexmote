@@ -92,13 +92,10 @@ NexMote/
 │       ├── main.tsx          # React DOM Başlangıç Noktası
 │       └── styles.css        # Vanilla CSS SaaS Tasarım Sistemi (Glassmorphism, Light Theme, CSS Variables)
 ├── scripts/
-│   ├── package-windows.ps1   # Agent+Technician'ı publish edip Inno Setup (.exe) / WiX (.msi) üretir
-│   ├── agent-setup.iss       # Inno Setup 1.5 saniyelik ultra hızlı Agent yükleyici konfigürasyonu
-│   ├── technician-setup.iss  # Inno Setup 1.5 saniyelik ultra hızlı Teknisyen yükleyici konfigürasyonu
-│   ├── build-msi.ps1         # WiX v4 ile kurumsal per-machine .msi derleme betiği
-│   └── installer-assets/     # Installer lisans ve grafik bileşenleri
-├── assets/                   # Uygulama İkonları (nexmote.ico)
-└── downloads/                # Üretilen Dağıtım Paketleri (EXE / MSI) ve versions.json
+│   ├── package-windows.ps1   # Agent+Technician+Cleaner'ı publish edip build-msi.ps1'i çağırır
+│   └── build-msi.ps1         # WiX v5 ile kurumsal per-machine .msi (Agent/Technician/Cleaner) derleme betiği
+├── assets/                   # Uygulama İkonları (nexmote.ico) + installer/ (otomatik üretilen dialog/banner/license)
+└── downloads/                # Üretilen Dağıtım Paketleri (MSI) ve versions.json
 ```
 
 ---
@@ -313,6 +310,14 @@ Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/
 ```
 Bu, kütüphanenin varsayılan `WelcomeDlg`→`LicenseAgreementDlg` publish'ini (`Order="1"`) ezer — Welcome ekranındaki tek "Kur" tıklaması artık doğrudan kuruluma geçiyor, Lisans ekranı hiç görünmüyor. **WiX v5 şema tuzağı:** `<Publish>` elementinin koşulu WiX v3'teki gibi inner text (`>1</Publish>`) olarak yazılamaz — WiX v5 şeması bunu `WIX0400: illegal inner text` hatasıyla reddeder, koşul mutlaka `Condition="..."` **attribute**'u olarak verilmeli (`<Publish ... Condition="1" />`). Sonuç: 4 ekran/3 tıklamadan **3 ekran/1 tıklamaya** indi (Welcome → Kur, İlerleme, Bitiş → Son + otomatik uygulama başlatma).
 
+### MSI Yapısının Sadeleştirilmesi (2026-08-24)
+Üç MSI'ın (Agent/Technician/Cleaner) paketleme betikleri denetlenip ölü/sapmış kod temizlendi:
+- **Kaldırıldı:** Inno Setup `.exe` yolu (`agent-setup.iss`, `technician-setup.iss`, `package-windows.ps1`'deki ISCC derleme bloğu) — `DownloadCatalog` zaten hiçbir zaman `.exe` sunmuyordu (sadece `*.msi` arıyor), bu yol sadece build süresini uzatan ölü koddu. Ayrıca `scripts/installer-assets/` altındaki kullanılmayan eski WiX şablonları (`NexMote.Agent.wxs`/`NexMote.Technician.wxs` — `build-msi.ps1` kendi WXS'ini inline üretiyor, bunlara hiç dokunmuyordu), yarım kalmış TR/EN `.wxl` lokalizasyon dosyaları (hiçbir yerden `-culture` ile bağlanmıyordu) ve MSI'nin yaptığı işi elle tekrarlayan, davranışı MSI'dan **sapmış** (`sc.exe` ile servis DisplayName'i farklı, auto-restart config yok) `install-agent.ps1`/`uninstall-agent.ps1`/`install.bat`/`install-technician.ps1`/`uninstall-technician.ps1` script'leri silindi — bunlar hiçbir yerden çağrılmıyordu ama her MSI'ye sessizce paket dosyası olarak gömülüp Program Files'a kuruluyordu.
+- **Zorunlu parametreler:** `package-windows.ps1`'in `-Version`/`-AgentReleaseNotes`/`-TechnicianReleaseNotes` parametreleri ve `build-msi.ps1`'in `-Version`'ı artık `Mandatory` — eskiden hardcoded bayat varsayılanları vardı (`"0.6.2"`), script parametresiz/eksik çağrılırsa artık sessizce eski sürüm üretmek yerine hata verip durur (v0.6.5'teki sürüm-sürüklenmesi bug'ıyla aynı sınıftan bir hatanın tekrarını önlemek için — bkz. yukarıdaki "Versiyonlama & Otomatik Güncelleme Mimarisi").
+- **DownloadCatalog etiket düzeltmesi:** üç paket de yanlışlıkla "Çok Dilli (Multi-Language)" diye etiketlenmişti (MSI UI'ı gerçekte hep tek dilde/Türkçe deriliyor) — `"Türkçe"` olarak düzeltildi.
+- **Cleaner MSI'de eksik ARP metadata tamamlandı:** Agent/Technician'da olan `ARPHELPLINK`/`ARPURLINFOABOUT`/`ARPURLUPDATEINFO`/`ARPCONTACT` Cleaner'a da eklendi (Add/Remove Programs tutarlılığı).
+- **Bilinen/kabul edilmiş sınırlama:** hiçbir MSI code-signed değil (EV sertifika maliyeti nedeniyle şimdilik ertelendi) — bu turun kapsamı dışında bırakıldı.
+
 ---
 
 ## 🔒 Kurumsal Ajan Güvenlik Profilleri (Branding + Kısıtlı Tray Menüsü + Tek Şifre Koruması)
@@ -474,12 +479,7 @@ scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi down
 - **Genel Sistem Logları:** `C:\ProgramData\NexMote\Logs\`
 
 ### 2. Kurulum ve Sessiz Dağıtım Parametreleri
-- **Inno Setup (`.exe`):**
-  - Tamamen sessiz, bildirim vermeden, yeniden başlatmadan kurulum:
-    ```cmd
-    NexMote-Agent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-    ```
-- **Windows Installer (`.msi`):**
+- **Windows Installer (`.msi`):** tek dağıtım formatı — Agent, Technician ve Cleaner üçü de WiX ile üretilir (Inno Setup `.exe` yolu 2026-08-24'te kaldırıldı: `DownloadCatalog` zaten hiçbir zaman `.exe` sunmuyordu, sadece build süresini uzatan ölü kod duruyordu).
   - Active Directory GPO / Intune sessiz kurulum:
     ```cmd
     msiexec /i NexMote-Agent-Setup.msi /qn /norestart

@@ -1,7 +1,8 @@
 param(
     [string]$ServerUrl = "https://nexmote.com",
     [string]$EnrollmentKey = "dev-enrollment-key",
-    [string]$Version = "0.6.2"
+    [Parameter(Mandatory = $true)]
+    [string]$Version
 )
 
 $ErrorActionPreference = "Stop"
@@ -443,11 +444,16 @@ function Generate-CleanerWxs {
            UpgradeCode="C98F12C0-94A1-420E-B6D7-90E0F3628103"
            Scope="perMachine">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="Daha yeni bir sürüm zaten kurulu." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Deep Cleaner uygulamasının daha yeni bir sürümü zaten kurulu." />
     <MediaTemplate EmbedCab="yes" MaximumUncompressedMediaSize="1000" />
 
+    <!-- Icon & Control Panel (Add/Remove Programs) Branding -->
     <Icon Id="NexMoteCleanerIco" SourceFile="$iconPath" />
     <Property Id="ARPPRODUCTICON" Value="NexMoteCleanerIco" />
+    <Property Id="ARPHELPLINK" Value="https://nexmote.com" />
+    <Property Id="ARPURLINFOABOUT" Value="https://nexmote.com" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://nexmote.com/downloads" />
+    <Property Id="ARPCONTACT" Value="destek@nexmote.com" />
     <Property Id="ARPCOMMENTS" Value="NexMote Tam Kaldırıcı ve Derin Temizleyici" />
     <Property Id="ARPNOREPAIR" Value="yes" />
 

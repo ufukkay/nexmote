@@ -12,21 +12,21 @@ public sealed class DownloadCatalog
             "NexMote Agent Setup",
             "Hedef Windows bilgisayarına kurulur. Arka planda servis ve kullanıcı oturumunda tepsi simgesi olarak çalışır.",
             "NexMote-Agent-Setup.msi",
-            "Çok Dilli (Multi-Language)",
+            "Türkçe",
             true),
         new(
             "technician",
             "NexMote Technician Console",
             "Teknisyen bilgisayarına kurulur. nexmote:// protokolü ile canlı oturumları ve cihaz listesini açar.",
             "NexMote-Technician-Setup.msi",
-            "Çok Dilli (Multi-Language)",
+            "Türkçe",
             true),
         new(
             "cleanup",
             "NexMote Tam Kaldırıcı & Derin Temizleyici (MSI)",
             "Cihazda bulunan tüm NexMote Ajanı, Teknisyen Konsolu, Windows Servisi, Kayıt Defteri anahtarları ve artık dosyalarını derinlemesine tamamen kaldırır ve temizler.",
             "NexMote-Cleanup-Setup.msi",
-            "Çok Dilli (Multi-Language)",
+            "Türkçe",
             true)
     ];
 
