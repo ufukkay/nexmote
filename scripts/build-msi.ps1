@@ -159,6 +159,12 @@ function Generate-AgentWxs {
     </InstallExecuteSequence>
 
     <UI>
+      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır — Welcome ekranındaki "Kur" tıklaması
+           doğrudan kuruluma geçer (Order="2", kütüphanenin varsayılan WelcomeDlg->LicenseAgreementDlg
+           publish'inden [Order="1"] SONRA işlenip onu ezer — WiX'in License/ReadyDlg atlama için
+           standart tekniği). Lisans metni ve marka görselleri (dialog.bmp/banner.bmp) hâlâ üretiliyor
+           ama artık sadece Welcome/Bitiş ekranlarında kullanılıyor. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTrayAppExecSequence" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
     </UI>
 
@@ -331,6 +337,8 @@ function Generate-TechnicianWxs {
     </InstallExecuteSequence>
 
     <UI>
+      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır — bkz. NexMote.Agent.wxs'teki aynı tekniğin notu. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTechAppExecSequence" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
     </UI>
 
@@ -455,6 +463,8 @@ function Generate-CleanerWxs {
     </InstallExecuteSequence>
 
     <UI>
+      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır — bkz. NexMote.Agent.wxs'teki aynı tekniğin notu. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="RunCleanerAction" Condition="NOT Installed" />
     </UI>
 

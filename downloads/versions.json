@@ -1,10 +1,10 @@
-{
+﻿{
     "agent":  {
-                  "version":  "0.6.5",
-                  "releaseNotes":  "v0.6.5: Ajan surum numarasi artik derleme ve paketleme adimlari arasinda tutarli; surum karsilastirma hatasi (guncel ajanlarda yanlis 'guncelleme mevcut' uyarisi) giderildi."
+                  "version":  "0.6.8",
+                  "releaseNotes":  "v0.6.8: Guvenlik profili tek sifreye sadelestirildi, cihaz gruplari (sirket/departman) eklendi, kurulum lisans ekrani kaldirilarak sadelestirildi."
               },
     "technician":  {
-                       "version":  "0.6.5",
-                       "releaseNotes":  "v0.6.5: Teknisyen konsolu surum numarasi artik derleme ve paketleme adimlari arasinda tutarli."
+                       "version":  "0.6.8",
+                       "releaseNotes":  "v0.6.8: Kurulum lisans ekrani kaldirilarak sadelestirildi, guvenlik profili/cihaz gruplari destegine hizalandi."
                    }
 }
