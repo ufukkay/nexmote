@@ -242,6 +242,7 @@ using (var scope = app.Services.CreateScope())
                 ""Name"" TEXT NOT NULL,
                 ""ParentGroupId"" TEXT NULL,
                 ""DefaultSecurityProfileId"" TEXT NULL,
+                ""EnrollmentKey"" TEXT NULL,
                 ""CreatedAt"" TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ""IX_DeviceGroups_ParentGroupId"" ON ""DeviceGroups"" (""ParentGroupId"");
@@ -261,6 +262,7 @@ using (var scope = app.Services.CreateScope())
 
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""Devices"" ADD COLUMN ""SecurityProfileId"" TEXT;"); } catch { }
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""Devices"" ADD COLUMN ""GroupId"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""DeviceGroups"" ADD COLUMN ""EnrollmentKey"" TEXT;"); } catch { }
 
     // Güvenlik profili: eski 3-şifreli şemadan (RequireDashboardPassword vb.) tek şifreye (RequirePassword/
     // PasswordHash) geçiş — eski kolonlar zaten var olan veritabanlarında zararsız şekilde kullanılmadan kalır.
@@ -577,14 +579,62 @@ admin.MapPost("/devices/{id:guid}/group", (Guid id, AssignDeviceGroupRequest req
     return groups.AssignDeviceToGroup(id, request.GroupId, actingUserId) ? Results.NoContent() : Results.NotFound();
 });
 
+/// <summary>
+/// Bir grubun kurulum anahtarını yeniden üretir (Admin Yetkisi Gerekir). Eski anahtarla üretilmiş
+/// provizyon script'leri artık bu gruba düşmez; zaten kayıtlı cihazlar (AgentToken ile kimliklendiği için) etkilenmez.
+/// </summary>
+admin.MapPost("/admin/device-groups/{id:guid}/enrollment-key/regenerate", (Guid id, ClaimsPrincipal actor, DeviceGroupService groups) =>
+{
+    var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var result = groups.RegenerateEnrollmentKey(id, actingUserId);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+/// <summary>
+/// Bu gruba özel kurulum anahtarını, kurulumdan hemen sonra çalıştırılacak bir PowerShell provizyon script'i
+/// olarak indirir (Admin Yetkisi Gerekir). Script, ajanı MSI kurulduktan sonra otomatik olarak bu gruba
+/// (ve varsa grubun güvenlik profiline) bağlar — web panelinde elle atama gerekmez.
+/// </summary>
+admin.MapGet("/admin/device-groups/{id:guid}/provision-script", (Guid id, string? serverUrl, DeviceGroupService groups, IConfiguration config) =>
+{
+    var effectiveServerUrl = string.IsNullOrWhiteSpace(serverUrl) ? (config["Server:PublicUrl"] ?? "https://nexmote.com") : serverUrl;
+    var result = groups.BuildProvisionScript(id, effectiveServerUrl);
+    if (result is null)
+    {
+        return Results.NotFound(new { message = "Grup bulunamadı veya kurulum anahtarı yok." });
+    }
+
+    var safeName = string.Concat(result.Value.GroupName.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_'));
+    if (string.IsNullOrEmpty(safeName)) safeName = "Grup";
+    var bytes = System.Text.Encoding.UTF8.GetBytes(result.Value.Script);
+    return Results.File(bytes, "text/plain", $"NexMote-Provision-{safeName}.ps1");
+});
+
 /// <summary>Şu an açık (çözülmemiş) tüm cihaz uyarılarını listeler (Admin veya Teknisyen girişi gerekir — eşik/alıcı ayarları hâlâ Admin-only /api/settings üzerinden yönetilir).</summary>
 authed.MapGet("/alerts/active", (AlertService alerts) => Results.Ok(alerts.ListActive()));
 
 /// <summary>
 /// Yeni Windows Agent istemcisinin sunucuya ilk kaydı (Enrollment).
 /// </summary>
-app.MapPost("/api/agents/enroll", (AgentEnrollmentRequest request, DeviceRegistry devices, IDbContextFactory<AppDbContext> dbFactory, IConfiguration config) =>
+app.MapPost("/api/agents/enroll", (AgentEnrollmentRequest request, DeviceRegistry devices, DeviceGroupService groups, IDbContextFactory<AppDbContext> dbFactory, IConfiguration config) =>
 {
+    // Önce gruba özel kurulum anahtarlarına bak: eşleşirse cihaz İLK kayıtta otomatik olarak o gruba
+    // (ve dolayısıyla grubun varsayılan güvenlik profiline) düşer — web panelinde elle atama gerekmez.
+    // Bkz. Downloads sayfasındaki "Hedef Grup" seçici ve orada üretilen provizyon script'i.
+    var matchedGroup = groups.FindByEnrollmentKey(request.EnrollmentKey);
+    if (matchedGroup is not null)
+    {
+        try
+        {
+            var enrolledToGroup = devices.Enroll(request, matchedGroup.Id);
+            return Results.Ok(enrolledToGroup);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Json(new { message = ex.Message }, statusCode: 403);
+        }
+    }
+
     using var db = dbFactory.CreateDbContext();
     var setting = db.ServerSettings.AsNoTracking().FirstOrDefault();
     var expectedKey = setting?.EnrollmentKey ?? config["Enrollment:Key"] ?? "dev-enrollment-key";

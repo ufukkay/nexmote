@@ -26,8 +26,9 @@ public sealed class DeviceRegistry
     /// Enrollment key'i SHA-256 hash olarak veritabanına kaydeder; plaintext asla saklanmaz.
     /// </summary>
     /// <param name="request">Agent tarafından gönderilen kayıt bilgileri.</param>
+    /// <param name="groupId">Sunulan kayıt anahtarı bir Cihaz Grubuna özelse, cihazın İLK kayıtta otomatik atanacağı grup. Zaten var olan bir cihazın grubu bu yolla değiştirilmez (admin'in elle atadığı grup korunur).</param>
     /// <returns>Cihaz ID'si ve güvenlik token'ını içeren yanıt.</returns>
-    public AgentEnrollmentResponse Enroll(AgentEnrollmentRequest request)
+    public AgentEnrollmentResponse Enroll(AgentEnrollmentRequest request, Guid? groupId = null)
     {
         using var db = _dbFactory.CreateDbContext();
 
@@ -63,7 +64,8 @@ public sealed class DeviceRegistry
                 LocationCode = request.LocationCode,
                 AgentToken = token,
                 LastSeenAt = now,
-                EnrolledAt = now
+                EnrolledAt = now,
+                GroupId = groupId
             };
             db.Devices.Add(existing);
         }

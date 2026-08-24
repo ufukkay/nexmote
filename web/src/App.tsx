@@ -74,6 +74,7 @@ import {
   disableMfa,
   disableUser,
   DeviceSummary,
+  downloadDeviceGroupProvisionScript,
   DownloadPackage,
   enableMfa,
   enableUser,
@@ -94,6 +95,7 @@ import {
   listUsers,
   login,
   logout as apiLogout,
+  regenerateDeviceGroupEnrollmentKey,
   resetUserMfa,
   SecurityProfile,
   SecurityProfileInput,
@@ -317,6 +319,7 @@ export function App() {
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showEnrollmentKey, setShowEnrollmentKey] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [authError, setAuthError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -387,6 +390,7 @@ export function App() {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [groupForm, setGroupForm] = useState<DeviceGroupInput>(emptyGroupForm);
   const [savingGroup, setSavingGroup] = useState(false);
+  const [downloadTargetGroupId, setDownloadTargetGroupId] = useState<string>("");
 
   // Live Activity Event Logs
   const [activityLogs, setActivityLogs] = useState<{ id: string; text: string; time: string; level: "info" | "success" | "warn" }[]>([]);
@@ -951,6 +955,27 @@ export function App() {
       showToast("Grup güncellendi.");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Grup atanamadı.");
+    }
+  }
+
+  async function handleRegenerateGroupKey(group: DeviceGroup) {
+    if (!window.confirm(`"${group.name}" grubunun kurulum anahtarını yeniden oluşturmak istediğinize emin misiniz? Eski anahtarla üretilmiş provizyon script'leri artık bu gruba düşmeyecek.`)) {
+      return;
+    }
+    try {
+      const updated = await regenerateDeviceGroupEnrollmentKey(group.id);
+      setDeviceGroups((prev) => prev.map((g) => (g.id === group.id ? updated : g)));
+      showToast("Kurulum anahtarı yeniden oluşturuldu.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kurulum anahtarı yeniden oluşturulamadı.");
+    }
+  }
+
+  async function handleDownloadGroupProvisionScript(group: DeviceGroup) {
+    try {
+      await downloadDeviceGroupProvisionScript(group.id, group.name);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Provizyon script'i indirilemedi.");
     }
   }
 
@@ -3387,6 +3412,64 @@ export function App() {
                 Active Directory GPO, SCCM, Intune, elle kurulum veya tek tıkla derin kaldırma için hazır araçlar.
               </p>
 
+              {currentUser?.role === "Admin" && deviceGroups.length > 0 && (
+                <div className="form-group" style={{ marginBottom: 20 }}>
+                  <label className="form-label">Hedef grup (opsiyonel)</label>
+                  <select
+                    className="form-input"
+                    value={downloadTargetGroupId}
+                    onChange={(e) => setDownloadTargetGroupId(e.target.value)}
+                  >
+                    <option value="">Seçilmedi — kurulumdan sonra profil elle atanır</option>
+                    {deviceGroups.map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                  </select>
+                  <span className="form-help">
+                    Bir grup seçerseniz, MSI'ı kurduktan hemen sonra aşağıdaki provizyon script'ini çalıştırın —
+                    ajan otomatik olarak o gruba (ve varsa grubun güvenlik profiline) bağlanır; web panelinde ayrıca
+                    elle atama yapmanız gerekmez.
+                  </span>
+
+                  {(() => {
+                    const targetGroup = deviceGroups.find((g) => g.id === downloadTargetGroupId);
+                    if (!targetGroup) return null;
+                    const keyFieldName = `Kurulum Anahtarı: ${targetGroup.name}`;
+                    return (
+                      <div className="package-card" style={{ marginTop: 12 }}>
+                        <div className="package-main">
+                          <div className="package-icon"><KeyRound size={18} /></div>
+                          <div>
+                            <div className="package-name">"{targetGroup.name}" grubu kurulum anahtarı</div>
+                            <div className="mono-text mono-xs">
+                              {targetGroup.enrollmentKey ?? "Bu grup için henüz anahtar üretilmedi — Cihaz Grupları sayfasından üretin."}
+                            </div>
+                          </div>
+                        </div>
+                        {targetGroup.enrollmentKey && (
+                          <div className="row-action-group">
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => copyToClipboard(targetGroup.enrollmentKey!, keyFieldName)}
+                            >
+                              {copiedField === keyFieldName ? <Check size={14} /> : <Copy size={14} />} Anahtarı Kopyala
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              onClick={() => handleDownloadGroupProvisionScript(targetGroup)}
+                            >
+                              <Download size={14} /> Provizyon Script'ini İndir
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
               <div className="package-list">
                 {downloads.map((pkg) => {
                   const isCleanup = pkg.fileName.toLowerCase().includes("cleanup");
@@ -3451,13 +3534,24 @@ export function App() {
 
                 <div className="form-group">
                   <label className="form-label">Kayıt anahtarı</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    value={settings.enrollmentKey}
-                    onChange={(e) => setSettings({ ...settings, enrollmentKey: e.target.value })}
-                    required
-                  />
+                  <div className="form-input-wrapper">
+                    <input
+                      type={showEnrollmentKey ? "text" : "password"}
+                      className="form-input"
+                      value={settings.enrollmentKey}
+                      onChange={(e) => setSettings({ ...settings, enrollmentKey: e.target.value })}
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="password-toggle-btn"
+                      onClick={() => setShowEnrollmentKey(!showEnrollmentKey)}
+                      title={showEnrollmentKey ? "Gizle" : "Göster"}
+                      aria-label={showEnrollmentKey ? "Kayıt anahtarını gizle" : "Kayıt anahtarını göster"}
+                    >
+                      {showEnrollmentKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
                   <span className="form-help">Yeni istemci kurulumlarında kullanılan yetkilendirme anahtarı.</span>
                 </div>
 
@@ -4200,6 +4294,7 @@ export function App() {
                       <th>Ad</th>
                       <th>Üst grup</th>
                       <th>Varsayılan profil</th>
+                      <th>Kurulum anahtarı</th>
                       <th>Aksiyonlar</th>
                     </tr>
                   </thead>
@@ -4215,11 +4310,29 @@ export function App() {
                       }
                       const parentName = deviceGroups.find((g) => g.id === group.parentGroupId)?.name;
                       const profileName = securityProfiles.find((p) => p.id === group.defaultSecurityProfileId)?.name;
+                      const keyFieldName = `Kurulum Anahtarı: ${group.name}`;
                       return (
                         <tr key={group.id}>
                           <td style={{ paddingLeft: 12 + depth * 20 }}>{depth > 0 ? "↳ " : ""}{group.name}</td>
                           <td>{parentName || "—"}</td>
                           <td>{profileName || "—"}</td>
+                          <td>
+                            {group.enrollmentKey ? (
+                              <div className="row-action-group">
+                                <span className="mono-text mono-xs">{group.enrollmentKey.slice(0, 8)}…</span>
+                                <button
+                                  className="icon-action-btn"
+                                  title="Anahtarı kopyala"
+                                  onClick={() => copyToClipboard(group.enrollmentKey!, keyFieldName)}
+                                >
+                                  {copiedField === keyFieldName ? <Check size={13} /> : <Copy size={13} />}
+                                </button>
+                                <button className="icon-action-btn" title="Yeniden oluştur" onClick={() => handleRegenerateGroupKey(group)}>
+                                  <RefreshCw size={13} />
+                                </button>
+                              </div>
+                            ) : "—"}
+                          </td>
                           <td>
                             <div className="row-action-group">
                               <button className="icon-action-btn" title="Düzenle" onClick={() => handleEditGroup(group)}>

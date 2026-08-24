@@ -653,5 +653,8 @@ public sealed class DeviceGroupEntity
     /// <summary>Bu gruba (veya doğrudan grubu olmayıp bu grubun altındaki) atanan cihazların varsayılan güvenlik profili.</summary>
     public Guid? DefaultSecurityProfileId { get; set; }
 
+    /// <summary>Bu gruba özel kurulum anahtarı — bir ajan bu anahtarla kaydolursa otomatik olarak bu gruba atanır. Null ise sadece elle atama mümkündür.</summary>
+    public string? EnrollmentKey { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

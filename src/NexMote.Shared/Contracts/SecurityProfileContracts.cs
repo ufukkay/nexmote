@@ -57,6 +57,7 @@ public sealed record DeviceGroupDetail(
     string Name,
     Guid? ParentGroupId,
     Guid? DefaultSecurityProfileId,
+    string? EnrollmentKey,
     DateTimeOffset CreatedAt);
 
 /// <summary>Bir cihazı bir gruba atama isteği — null ise cihaz gruptan çıkarılır.</summary>

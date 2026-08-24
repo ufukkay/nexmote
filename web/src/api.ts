@@ -779,6 +779,7 @@ export type DeviceGroup = {
   name: string;
   parentGroupId?: string | null;
   defaultSecurityProfileId?: string | null;
+  enrollmentKey?: string | null;
   createdAt: string;
 };
 
@@ -832,6 +833,37 @@ export async function deleteDeviceGroup(id: string): Promise<void> {
     const detail = await response.json().catch(() => null);
     throw new Error(detail?.message ?? "Grup silinemedi.");
   }
+}
+
+/** Bir grubun kurulum anahtarını yeniden üretir (Admin). Eski anahtarla üretilmiş provizyon script'leri artık bu gruba düşmez. */
+export async function regenerateDeviceGroupEnrollmentKey(id: string): Promise<DeviceGroup> {
+  const response = await fetch(`/api/admin/device-groups/${id}/enrollment-key/regenerate`, {
+    method: "POST",
+    headers: authHeaders()
+  });
+  if (!response.ok) {
+    throw new Error("Kurulum anahtarı yeniden oluşturulamadı.");
+  }
+  return response.json();
+}
+
+/** Bu gruba özel provizyon script'ini (.ps1) indirir — kurulumdan hemen sonra çalıştırılınca ajanı otomatik olarak bu gruba/profile bağlar (Admin). */
+export async function downloadDeviceGroupProvisionScript(id: string, groupName: string): Promise<void> {
+  const response = await fetch(`/api/admin/device-groups/${id}/provision-script?serverUrl=${encodeURIComponent(window.location.origin)}`, {
+    headers: authHeaders()
+  });
+  if (!response.ok) {
+    throw new Error("Provizyon script'i indirilemedi.");
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `NexMote-Provision-${groupName.replace(/[^a-zA-Z0-9-_]+/g, "")}.ps1`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 /** Bir cihazı bir gruba atar (null = kaldır) (Admin). */
