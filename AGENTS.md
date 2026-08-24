@@ -242,6 +242,7 @@ Yeni kullanıcı oluştururken artık iki seçenek var: eski "tek seferlik geçi
 | `POST` | `/api/agents/{id}/security/verify` | AgentToken | Panel/Çıkış/Kaldırma tek şifresini sunucuda doğrular |
 | `GET`/`POST`/`PUT`/`DELETE` | `/api/admin/device-groups*` | **Bearer (Admin)** | Cihaz grupları (şirket/departman) CRUD |
 | `POST` | `/api/devices/{id}/group` | **Bearer (Admin)** | Cihazı bir gruba atar/kaldırır |
+| `GET` | `/api/alerts/active` | **Bearer (AnyUser)** | Şu an açık (çözülmemiş) tüm cihaz uyarılarını listeler |
 | `POST` | `/api/admin/users/invite` | **Bearer (Admin)** | E-posta ile davet gönderir (geçici şifre yerine) |
 | `POST` | `/api/admin/settings/smtp/test` | **Bearer (Admin)** | Kayıtlı SMTP config'iyle test e-postası gönderir |
 | `GET` | `/api/invite/{token}` | — | Davet önizlemesi (davet kabul ekranı için) |
@@ -305,6 +306,13 @@ Her üç client projesinin (`NexMote.Agent.Windows`, `NexMote.Agent.Tray`, `NexM
 ### MSI dağıtım notu
 Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/www/nexmote/wwwroot/downloads`) — `DownloadCatalog` hangisini kullanacağını dosya varlığına göre seçer, ama statik dosya sunumu (nginx/Kestrel `UseStaticFiles`) her zaman `wwwroot/downloads`'ı önceliklendirir. **MSI güncellemesi yaparken ikisine de kopyalamak gerekir**, yoksa `/api/downloads` metadata'sı ile gerçek indirilen dosya boyutu tutarsız olur.
 
+### Sade Kurulum Akışı (Lisans Ekranı Atlanır, 2026-08-24)
+Üç MSI de (`Agent`, `Technician`, `Cleaner`) zaten `WixUI_Minimal` kullanıyordu (kurulum dizini/özellik seçim ekranları hiç yok) ama hâlâ **Welcome → Lisans Sözleşmesi (oku/kabul et + İleri) → İlerleme → Bitiş** olmak üzere 4 ekran ve 3 tıklama gerektiriyordu. `scripts/build-msi.ps1`'deki her üç `Generate-*Wxs` fonksiyonunun `<UI>` bloğuna şu satır eklendi:
+```xml
+<Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
+```
+Bu, kütüphanenin varsayılan `WelcomeDlg`→`LicenseAgreementDlg` publish'ini (`Order="1"`) ezer — Welcome ekranındaki tek "Kur" tıklaması artık doğrudan kuruluma geçiyor, Lisans ekranı hiç görünmüyor. **WiX v5 şema tuzağı:** `<Publish>` elementinin koşulu WiX v3'teki gibi inner text (`>1</Publish>`) olarak yazılamaz — WiX v5 şeması bunu `WIX0400: illegal inner text` hatasıyla reddeder, koşul mutlaka `Condition="..."` **attribute**'u olarak verilmeli (`<Publish ... Condition="1" />`). Sonuç: 4 ekran/3 tıklamadan **3 ekran/1 tıklamaya** indi (Welcome → Kur, İlerleme, Bitiş → Son + otomatik uygulama başlatma).
+
 ---
 
 ## 🔒 Kurumsal Ajan Güvenlik Profilleri (Branding + Kısıtlı Tray Menüsü + Tek Şifre Koruması)
@@ -327,6 +335,20 @@ Cihazlar `DeviceGroups` tablosuyla **keyfi derinlikte iç içe gruplar** halinde
 - **Silme/döngü koruması:** Alt grubu olan bir grup silinemez (400 döner); bir grubun `ParentGroupId`'sini kendi alt zincirindeki bir gruba çekmek döngü oluşturacağından reddedilir (`DeviceGroupService.CreatesCycle`).
 - **Web:** "Cihaz Grupları" ekranı (Admin-only, `Building2` ikonu) grup oluşturma/düzenleme formu (Ad, Üst Grup, Varsayılan Güvenlik Profili) + girintili ağaç tablosu sağlar; cihaz detay panelindeki "Oturum & Güvenlik" kartında "Güvenlik Profili" seçicinin yanında bir "Grup" seçici bulunur.
 - **Genişletilebilirlik:** Şu an sadece grup + varsayılan güvenlik profili temeli var — kullanıcı ileride departman/şirket bazlı başka özellikler (farklı ayarlar, branding vb.) eklemeyi planlıyor; `DeviceGroupEntity`/`DeviceGroupService` bu amaçla genişletilebilir tutuldu.
+
+---
+
+## 🚨 Uyarı / Bildirim Sistemi (Cihaz Offline, Disk/CPU/RAM Eşik Aşımı, 2026-08-24)
+
+Üç kişilik (IT uzmanı/yazılım uzmanı/satış) perspektifinden yapılan rekabet analizinde en kritik eksik olarak belirlenen **proaktif uyarı sistemi** eklendi — artık bir cihaz çevrimdışı kaldığında veya disk/CPU/RAM eşiği aşıldığında admin(ler)e otomatik e-posta gider, panele bakmaya gerek kalmaz.
+
+- **4 kural, ayrı ayrı açılıp eşiği ayarlanabilir** (`ServerSettings` tablosunda `Alert*` alanları, Ayarlar ekranında "Uyarılar" kartı): **Offline** (varsayılan: 5dk heartbeat yok, açık), **DiskLow** (varsayılan: boş disk < 5000 MB, açık), **CpuHigh** (10dk ortalama CPU > eşik, **varsayılan kapalı** — gürültülü olabilir), **MemoryHigh** (kullanılan RAM % > eşik, **varsayılan kapalı**).
+- **Alıcılar:** `ServerSettings.AlertRecipientEmails` (virgülle ayrık). Boşsa tüm aktif **Admin** kullanıcılarının e-postalarına gönderilir (fallback, ek konfigürasyon gerektirmeden çalışır).
+- **Durum takibi ve gürültü kontrolü:** `DeviceAlerts` tablosu her `(DeviceId, AlertType)` çifti için en fazla bir **açık** (`ResolvedAt == null`) kayıt tutar. İlk tetiklenmede e-posta gider; açık kaldığı sürece **4 saatte bir** hatırlatma gider (`LastNotifiedAt` kontrolü); koşul düzeldiğinde `ResolvedAt` set edilip tek seferlik "✅ düzeldi" e-postası gider. Bu mantığın tamamı `AlertService.EvaluateAndNotifyAsync` içinde, `SecurityProfileService`/`DeviceGroupService` ile aynı `IDbContextFactory<AppDbContext>` singleton deseniyle.
+- **Değerlendirme motoru:** `AlertMonitorService` (`BackgroundService`, API sürecinde **ilk kez** eklenen periyodik hosted service) — sunucu her açıldığında bir kez hemen, sonra **2 dakikada bir** `AlertService.EvaluateAndNotifyAsync()` çalıştırır. Disk/CPU/RAM kuralları anlık cihaz değerine bakar (`MemoryTotalMb > 0` guard'ı — henüz hiç telemetri göndermemiş yeni kayıtlı cihazlarda yanlış pozitif üretmesin diye); Offline kuralı `now - LastSeenAt` farkına bakar.
+- **Endpoint:** `GET /api/alerts/active` — şu an açık tüm uyarıları (`{deviceId, alertType, triggeredAt}`) döner. Bilinçli olarak `authed` (AnyUser) grubunda — Teknisyenler de görsün diye — ama eşik/alıcı **ayarlarını değiştirmek** hâlâ `/api/settings` üzerinden Admin-only.
+- **Web entegrasyonu:** Cihaz listesindeki "Dikkat" filtresi (`isWarning`/`warningCount`, eskiden sadece "ajan sürümü eski" kontrolü yapıyordu) artık aktif uyarısı olan cihazları da kapsar. Cihaz detay panelinin "Genel Bakış" sekmesinde, o cihaza ait aktif uyarı varsa `.stale-data-notice` (mevcut amber uyarı bandı deseni) ile insan-okunur bir özet gösterilir.
+- **E-posta gönderimi mevcut `EmailService`/SMTP config'ini yeniden kullanır** — ayrı bir alt sistem değil, davet/test e-postalarıyla aynı `SendAsync(toEmail, subject, htmlBody)` çağrısı.
 
 ---
 

@@ -54,6 +54,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import {
   acceptInvite,
+  ActiveDeviceAlert,
   ActivityLogEntry as AuditLogEntry,
   assignDeviceGroup,
   assignSecurityProfile,
@@ -77,6 +78,7 @@ import {
   enableMfa,
   enableUser,
   executeDeviceCommand,
+  getActiveAlerts,
   getAuditLog,
   getCurrentUser,
   getInvitePreview,
@@ -162,6 +164,17 @@ function formatLastSeen(lastSeenAt: string): string {
 
   const diffDays = Math.floor(diffHours / 24);
   return `${diffDays} gün önce`;
+}
+
+const ALERT_TYPE_LABELS: Record<string, string> = {
+  Offline: "Cihaz uzun süredir çevrimdışı",
+  DiskLow: "Disk alanı azaldı",
+  CpuHigh: "CPU kullanımı yüksek",
+  MemoryHigh: "RAM kullanımı yüksek"
+};
+
+function describeAlertType(alertType: string): string {
+  return ALERT_TYPE_LABELS[alertType] ?? alertType;
 }
 
 function cleanUserName(rawUser?: string): string {
@@ -259,8 +272,18 @@ export function App() {
     enrollmentKey: "dev-enrollment-key",
     heartbeatSeconds: 20,
     defaultLocationCode: "OFFICE",
-    smtpPort: 465
+    smtpPort: 465,
+    alertsEnabled: true,
+    alertOfflineEnabled: true,
+    alertOfflineMinutes: 5,
+    alertDiskLowEnabled: true,
+    alertDiskLowMb: 5000,
+    alertCpuHighEnabled: false,
+    alertCpuHighPercent: 90,
+    alertMemoryHighEnabled: false,
+    alertMemoryHighPercent: 90
   });
+  const [activeAlerts, setActiveAlerts] = useState<ActiveDeviceAlert[]>([]);
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [testingSmtp, setTestingSmtp] = useState(false);
 
@@ -858,6 +881,14 @@ export function App() {
     }
   }
 
+  async function refreshActiveAlerts() {
+    try {
+      setActiveAlerts(await getActiveAlerts());
+    } catch {
+      // sessizce geç — uyarı rozetleri opsiyonel, ana akışı bozmasın
+    }
+  }
+
   async function refreshDeviceGroups() {
     try {
       setDeviceGroups(await listDeviceGroups());
@@ -1007,6 +1038,7 @@ export function App() {
         refreshDownloads();
         refreshLatestVersion();
         refreshServerMetrics();
+        refreshActiveAlerts();
         if (me.role === "Admin") {
           refreshSettings();
           refreshSecurityProfiles();
@@ -1019,6 +1051,7 @@ export function App() {
 
     const interval = setInterval(() => {
       refresh(false);
+      refreshActiveAlerts();
       if (view === "settings") {
         refreshServerMetrics(false);
       }
@@ -1185,6 +1218,8 @@ export function App() {
     }
   }
 
+  const activeAlertDeviceIds = useMemo(() => new Set(activeAlerts.map((a) => a.deviceId)), [activeAlerts]);
+
   const filteredAndSortedDevices = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = devices.filter((d) => {
@@ -1198,7 +1233,7 @@ export function App() {
 
       const isWarning = Boolean(
         isVersionOlder(d.agentVersion, latestAgentVersion) ||
-        (d.cpuUsagePercent && d.cpuUsagePercent > 90)
+        activeAlertDeviceIds.has(d.id)
       );
 
       if (statusFilter === "online") return matchesQuery && d.isOnline;
@@ -1230,11 +1265,16 @@ export function App() {
     });
 
     return result;
-  }, [devices, query, statusFilter, sortField, sortDirection, latestAgentVersion]);
+  }, [devices, query, statusFilter, sortField, sortDirection, latestAgentVersion, activeAlertDeviceIds]);
 
   const selectedDevice = useMemo(
     () => devices.find((d) => d.id === selectedDeviceId) ?? devices[0] ?? null,
     [devices, selectedDeviceId]
+  );
+
+  const deviceActiveAlerts = useMemo(
+    () => (selectedDevice ? activeAlerts.filter((a) => a.deviceId === selectedDevice.id) : []),
+    [activeAlerts, selectedDevice]
   );
 
   const filteredApps = useMemo(() => {
@@ -1267,7 +1307,9 @@ export function App() {
   const userDisplayName = currentUser?.displayName || currentUser?.email?.split("@")[0] || "Kullanıcı";
   const roleLabel = currentUser?.role === "Admin" ? "Yönetici" : "Teknisyen";
   const onlineCount = devices.filter((d) => d.isOnline).length;
-  const warningCount = devices.filter((d) => isVersionOlder(d.agentVersion, latestAgentVersion)).length;
+  const warningCount = devices.filter(
+    (d) => isVersionOlder(d.agentVersion, latestAgentVersion) || activeAlertDeviceIds.has(d.id)
+  ).length;
 
   function toggleSelectAll() {
     if (selectedDeviceIds.size === filteredAndSortedDevices.length) {
@@ -2080,6 +2122,17 @@ export function App() {
             <div className="detail-page-body">
               {activeDetailTab === "overview" && (
                 <div className="bento-overview-layout">
+                  {deviceActiveAlerts.length > 0 && (
+                    <div className="stale-data-notice" style={{ gridColumn: "1 / -1" }}>
+                      <AlertCircle size={15} />
+                      <span>
+                        {deviceActiveAlerts.map((a) => describeAlertType(a.alertType)).join(" · ")}
+                        {" — "}
+                        {formatLastSeen(deviceActiveAlerts[0].triggeredAt)} tetiklendi.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Bento Card 1: Sistem & Kimlik */}
                   <div className="bento-card">
                     <div className="bento-card-header">
@@ -3534,6 +3587,118 @@ export function App() {
                   {testingSmtp ? "Gönderiliyor..." : "Test E-postası Gönder"}
                 </button>
               </div>
+            </div>
+            )}
+
+            {currentUser?.role === "Admin" && (
+            <div className="content-card">
+              <h2 className="content-card-title">Uyarılar</h2>
+              <p className="content-card-copy">
+                Bir cihaz çevrimdışı kaldığında veya disk/CPU/RAM eşiği aşıldığında yukarıdaki SMTP ayarları
+                üzerinden otomatik e-posta gönderilir. Alıcı boş bırakılırsa tüm aktif Yöneticilere gönderilir.
+              </p>
+
+              <form onSubmit={handleSaveSettings} className="settings-form">
+                <div className="form-group">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.alertsEnabled}
+                      onChange={(e) => setSettings({ ...settings, alertsEnabled: e.target.checked })}
+                    />
+                    Uyarı sistemi açık
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Alıcı e-postalar</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="boş bırakılırsa tüm Adminlere gönderilir"
+                    value={settings.alertRecipientEmails ?? ""}
+                    onChange={(e) => setSettings({ ...settings, alertRecipientEmails: e.target.value })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.alertOfflineEnabled}
+                      onChange={(e) => setSettings({ ...settings, alertOfflineEnabled: e.target.checked })}
+                    />
+                    Çevrimdışı uyarısı — bu kadar dakikadır sinyal yoksa
+                  </label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    min={1}
+                    value={settings.alertOfflineMinutes}
+                    onChange={(e) => setSettings({ ...settings, alertOfflineMinutes: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.alertDiskLowEnabled}
+                      onChange={(e) => setSettings({ ...settings, alertDiskLowEnabled: e.target.checked })}
+                    />
+                    Disk az uyarısı — boş alan bu MB değerinin altına düşerse
+                  </label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    min={0}
+                    value={settings.alertDiskLowMb}
+                    onChange={(e) => setSettings({ ...settings, alertDiskLowMb: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.alertCpuHighEnabled}
+                      onChange={(e) => setSettings({ ...settings, alertCpuHighEnabled: e.target.checked })}
+                    />
+                    CPU yüksek uyarısı — bu yüzdeyi aşarsa
+                  </label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    min={1}
+                    max={100}
+                    value={settings.alertCpuHighPercent}
+                    onChange={(e) => setSettings({ ...settings, alertCpuHighPercent: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="remember-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.alertMemoryHighEnabled}
+                      onChange={(e) => setSettings({ ...settings, alertMemoryHighEnabled: e.target.checked })}
+                    />
+                    RAM yüksek uyarısı — bu yüzdeyi aşarsa
+                  </label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    min={1}
+                    max={100}
+                    value={settings.alertMemoryHighPercent}
+                    onChange={(e) => setSettings({ ...settings, alertMemoryHighPercent: Number(e.target.value) })}
+                  />
+                </div>
+
+                <button type="submit" className="btn-primary" data-size="lg" data-width="fixed" disabled={savingSettings}>
+                  <Save size={14} />
+                  {savingSettings ? "Kaydediliyor..." : "Uyarı Ayarlarını Kaydet"}
+                </button>
+              </form>
             </div>
             )}
 

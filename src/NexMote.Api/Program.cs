@@ -63,6 +63,8 @@ builder.Services.AddSingleton<UserAuthService>();
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddSingleton<SecurityProfileService>();
 builder.Services.AddSingleton<DeviceGroupService>();
+builder.Services.AddSingleton<AlertService>();
+builder.Services.AddHostedService<AlertMonitorService>();
 
 // Web ön yüzü ve teknisyen istemcisi için CORS politikası
 builder.Services.AddCors(options =>
@@ -243,6 +245,16 @@ using (var scope = app.Services.CreateScope())
                 ""CreatedAt"" TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ""IX_DeviceGroups_ParentGroupId"" ON ""DeviceGroups"" (""ParentGroupId"");
+
+            CREATE TABLE IF NOT EXISTS ""DeviceAlerts"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_DeviceAlerts"" PRIMARY KEY,
+                ""DeviceId"" TEXT NOT NULL,
+                ""AlertType"" TEXT NOT NULL,
+                ""TriggeredAt"" TEXT NOT NULL,
+                ""LastNotifiedAt"" TEXT NOT NULL,
+                ""ResolvedAt"" TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ""IX_DeviceAlerts_DeviceId_ResolvedAt"" ON ""DeviceAlerts"" (""DeviceId"", ""ResolvedAt"");
         ");
     }
     catch { }
@@ -263,6 +275,18 @@ using (var scope = app.Services.CreateScope())
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpPasswordEncrypted"" TEXT;"); } catch { }
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromAddress"" TEXT;"); } catch { }
     try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromName"" TEXT;"); } catch { }
+
+    // Uyarı/bildirim sistemi ayar kolonları (offline/disk/CPU/RAM eşikleri) — aynı ALTER TABLE deseni.
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertsEnabled"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertRecipientEmails"" TEXT;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertOfflineEnabled"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertOfflineMinutes"" INTEGER NOT NULL DEFAULT 5;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertDiskLowEnabled"" INTEGER NOT NULL DEFAULT 1;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertDiskLowMb"" INTEGER NOT NULL DEFAULT 5000;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertCpuHighEnabled"" INTEGER NOT NULL DEFAULT 0;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertCpuHighPercent"" REAL NOT NULL DEFAULT 90;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertMemoryHighEnabled"" INTEGER NOT NULL DEFAULT 0;"); } catch { }
+    try { db.Database.ExecuteSqlRaw(@"ALTER TABLE ""ServerSettings"" ADD COLUMN ""AlertMemoryHighPercent"" REAL NOT NULL DEFAULT 90;"); } catch { }
 
     if (!db.ServerSettings.Any())
     {
@@ -553,6 +577,9 @@ admin.MapPost("/devices/{id:guid}/group", (Guid id, AssignDeviceGroupRequest req
     return groups.AssignDeviceToGroup(id, request.GroupId, actingUserId) ? Results.NoContent() : Results.NotFound();
 });
 
+/// <summary>Şu an açık (çözülmemiş) tüm cihaz uyarılarını listeler (Admin veya Teknisyen girişi gerekir — eşik/alıcı ayarları hâlâ Admin-only /api/settings üzerinden yönetilir).</summary>
+authed.MapGet("/alerts/active", (AlertService alerts) => Results.Ok(alerts.ListActive()));
+
 /// <summary>
 /// Yeni Windows Agent istemcisinin sunucuya ilk kaydı (Enrollment).
 /// </summary>
@@ -649,7 +676,12 @@ admin.MapGet("/settings", (IDbContextFactory<AppDbContext> dbFactory) =>
     return Results.Ok(new ServerSettingsContract(
         setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
         SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
-        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName));
+        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName,
+        AlertsEnabled: setting.AlertsEnabled, AlertRecipientEmails: setting.AlertRecipientEmails,
+        AlertOfflineEnabled: setting.AlertOfflineEnabled, AlertOfflineMinutes: setting.AlertOfflineMinutes,
+        AlertDiskLowEnabled: setting.AlertDiskLowEnabled, AlertDiskLowMb: setting.AlertDiskLowMb,
+        AlertCpuHighEnabled: setting.AlertCpuHighEnabled, AlertCpuHighPercent: setting.AlertCpuHighPercent,
+        AlertMemoryHighEnabled: setting.AlertMemoryHighEnabled, AlertMemoryHighPercent: setting.AlertMemoryHighPercent));
 });
 
 /// <summary>
@@ -673,13 +705,28 @@ admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<Ap
     {
         setting.SmtpPasswordEncrypted = email.EncryptPassword(request.SmtpPassword);
     }
+    setting.AlertsEnabled = request.AlertsEnabled;
+    setting.AlertRecipientEmails = request.AlertRecipientEmails;
+    setting.AlertOfflineEnabled = request.AlertOfflineEnabled;
+    setting.AlertOfflineMinutes = Math.Max(1, request.AlertOfflineMinutes);
+    setting.AlertDiskLowEnabled = request.AlertDiskLowEnabled;
+    setting.AlertDiskLowMb = Math.Max(0, request.AlertDiskLowMb);
+    setting.AlertCpuHighEnabled = request.AlertCpuHighEnabled;
+    setting.AlertCpuHighPercent = request.AlertCpuHighPercent;
+    setting.AlertMemoryHighEnabled = request.AlertMemoryHighEnabled;
+    setting.AlertMemoryHighPercent = request.AlertMemoryHighPercent;
     setting.UpdatedAt = DateTimeOffset.UtcNow;
 
     db.SaveChanges();
     return Results.Ok(new ServerSettingsContract(
         setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
         SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
-        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName));
+        SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName,
+        AlertsEnabled: setting.AlertsEnabled, AlertRecipientEmails: setting.AlertRecipientEmails,
+        AlertOfflineEnabled: setting.AlertOfflineEnabled, AlertOfflineMinutes: setting.AlertOfflineMinutes,
+        AlertDiskLowEnabled: setting.AlertDiskLowEnabled, AlertDiskLowMb: setting.AlertDiskLowMb,
+        AlertCpuHighEnabled: setting.AlertCpuHighEnabled, AlertCpuHighPercent: setting.AlertCpuHighPercent,
+        AlertMemoryHighEnabled: setting.AlertMemoryHighEnabled, AlertMemoryHighPercent: setting.AlertMemoryHighPercent));
 });
 
 /// <summary>SMTP ayarlarını (kayıtlı olan) test etmek için verilen adrese bir test e-postası gönderir (Admin Yetkisi Gerekir).</summary>

@@ -68,6 +68,11 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<DeviceGroupEntity> DeviceGroups => Set<DeviceGroupEntity>();
 
+    /// <summary>
+    /// Cihaz bazlı açık/kapalı uyarı (offline, disk/CPU/RAM eşik aşımı) durumu tablosu.
+    /// </summary>
+    public DbSet<DeviceAlertEntity> DeviceAlerts => Set<DeviceAlertEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -149,6 +154,13 @@ public sealed class AppDbContext : DbContext
         {
             entity.HasKey(g => g.Id);
             entity.HasIndex(g => g.ParentGroupId);
+        });
+
+        // Cihaz uyarısı birincil anahtar ve açık-uyarı sorgu indeksi
+        modelBuilder.Entity<DeviceAlertEntity>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.DeviceId, a.ResolvedAt });
         });
     }
 }
@@ -315,6 +327,62 @@ public sealed class ServerSettingEntity
     /// <summary>Giden e-postalarda görünen gönderen adı.</summary>
     [MaxLength(128)]
     public string? SmtpFromName { get; set; }
+
+    /// <summary>Uyarı/bildirim sisteminin genel açık/kapalı anahtarı.</summary>
+    public bool AlertsEnabled { get; set; } = true;
+
+    /// <summary>Uyarı e-postalarının gönderileceği virgülle ayrılmış adres listesi. Boşsa tüm aktif Admin kullanıcılarına gönderilir.</summary>
+    [MaxLength(1024)]
+    public string? AlertRecipientEmails { get; set; }
+
+    /// <summary>Cihaz çevrimdışı uyarısı açık mı.</summary>
+    public bool AlertOfflineEnabled { get; set; } = true;
+
+    /// <summary>Bu kadar dakikadır heartbeat gelmezse cihaz "çevrimdışı" uyarısı tetiklenir.</summary>
+    public int AlertOfflineMinutes { get; set; } = 5;
+
+    /// <summary>Disk az uyarısı açık mı.</summary>
+    public bool AlertDiskLowEnabled { get; set; } = true;
+
+    /// <summary>Boş disk alanı bu değerin (MB) altına düşerse uyarı tetiklenir.</summary>
+    public int AlertDiskLowMb { get; set; } = 5000;
+
+    /// <summary>CPU yüksek kullanım uyarısı açık mı.</summary>
+    public bool AlertCpuHighEnabled { get; set; }
+
+    /// <summary>10 dakikalık ortalama CPU kullanımı bu yüzdeyi aşarsa uyarı tetiklenir.</summary>
+    public double AlertCpuHighPercent { get; set; } = 90;
+
+    /// <summary>RAM yüksek kullanım uyarısı açık mı.</summary>
+    public bool AlertMemoryHighEnabled { get; set; }
+
+    /// <summary>Kullanılan RAM yüzdesi bu değeri aşarsa uyarı tetiklenir.</summary>
+    public double AlertMemoryHighPercent { get; set; } = 90;
+}
+
+/// <summary>
+/// Bir cihaz için açık (aktif) veya çözülmüş bir uyarı durumunu (offline, disk/CPU/RAM eşik aşımı) temsil eder.
+/// Aynı (DeviceId, AlertType) çifti için aynı anda en fazla bir açık (ResolvedAt == null) kayıt olur.
+/// </summary>
+public sealed class DeviceAlertEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    public Guid DeviceId { get; set; }
+
+    /// <summary>"Offline" | "DiskLow" | "CpuHigh" | "MemoryHigh".</summary>
+    [Required]
+    [MaxLength(32)]
+    public string AlertType { get; set; } = string.Empty;
+
+    public DateTimeOffset TriggeredAt { get; set; }
+
+    /// <summary>Son bildirim e-postasının gönderildiği zaman — tekrar/hatırlatma aralığını hesaplamak için.</summary>
+    public DateTimeOffset LastNotifiedAt { get; set; }
+
+    /// <summary>Koşul düzeldiğinde set edilir; null ise uyarı hâlâ açık.</summary>
+    public DateTimeOffset? ResolvedAt { get; set; }
 }
 
 /// <summary>

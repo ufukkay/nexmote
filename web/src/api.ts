@@ -149,6 +149,16 @@ export type ServerSettings = {
   smtpPassword?: string | null;
   smtpFromAddress?: string | null;
   smtpFromName?: string | null;
+  alertsEnabled: boolean;
+  alertRecipientEmails?: string | null;
+  alertOfflineEnabled: boolean;
+  alertOfflineMinutes: number;
+  alertDiskLowEnabled: boolean;
+  alertDiskLowMb: number;
+  alertCpuHighEnabled: boolean;
+  alertCpuHighPercent: number;
+  alertMemoryHighEnabled: boolean;
+  alertMemoryHighPercent: number;
 };
 
 /**
@@ -834,5 +844,21 @@ export async function assignDeviceGroup(deviceId: string, groupId: string | null
   if (!response.ok) {
     throw new Error("Grup atanamadı.");
   }
+}
+
+/** Şu an açık (çözülmemiş) bir cihaz uyarısı — çevrimdışı, disk/CPU/RAM eşik aşımı. */
+export type ActiveDeviceAlert = {
+  deviceId: string;
+  alertType: "Offline" | "DiskLow" | "CpuHigh" | "MemoryHigh";
+  triggeredAt: string;
+};
+
+/** Şu an açık olan tüm cihaz uyarılarını listeler. */
+export async function getActiveAlerts(): Promise<ActiveDeviceAlert[]> {
+  const response = await fetch("/api/alerts/active", { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Aktif uyarılar alınamadı.");
+  }
+  return response.json();
 }
 

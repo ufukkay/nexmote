@@ -109,4 +109,14 @@ public sealed record ServerSettingsContract(
     string? SmtpUsername = null,
     string? SmtpPassword = null,
     string? SmtpFromAddress = null,
-    string? SmtpFromName = null);
+    string? SmtpFromName = null,
+    bool AlertsEnabled = true,
+    string? AlertRecipientEmails = null,
+    bool AlertOfflineEnabled = true,
+    int AlertOfflineMinutes = 5,
+    bool AlertDiskLowEnabled = true,
+    int AlertDiskLowMb = 5000,
+    bool AlertCpuHighEnabled = false,
+    double AlertCpuHighPercent = 90,
+    bool AlertMemoryHighEnabled = false,
+    double AlertMemoryHighPercent = 90);
