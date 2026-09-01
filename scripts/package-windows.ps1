@@ -25,6 +25,7 @@ if (-not (Test-Path $dotnet)) {
 $downloads = Join-Path $root "downloads"
 $artifacts = Join-Path $root "artifacts\package"
 $agentPublish = Join-Path $artifacts "agent"
+$trayPublish = Join-Path $artifacts "tray"
 $technicianPublish = Join-Path $artifacts "technician"
 $cleanerPublish = Join-Path $artifacts "cleaner"
 $agentProject = Join-Path $root "src\NexMote.Agent.Windows\NexMote.Agent.Windows.csproj"
@@ -58,35 +59,37 @@ function Resolve-EnrollmentKey {
         } | ConvertTo-Json
 
         try {
-            $login = Invoke-RestMethod -Uri "$($BaseUrl.TrimEnd('/'))/api/auth/login" -Method Post -ContentType "application/json" -Body $loginBody
-            $adminToken = $login.token
-        }
-        catch {
+            $loginRes = Invoke-RestMethod -Uri "$BaseUrl/api/auth/login" -Method Post -Body $loginBody -ContentType "application/json" -TimeoutSec 10
+            if ($loginRes.token) {
+                $adminToken = $loginRes.token
+            }
+        } catch {
             Write-Host "Admin login not available. Using default enrollment key."
-            return "dev-enrollment-key"
         }
     }
 
-    try {
-        $settings = Invoke-RestMethod -Uri "$($BaseUrl.TrimEnd('/'))/api/settings" -Headers @{ Authorization = "Bearer $adminToken" }
-        if ([string]::IsNullOrWhiteSpace($settings.enrollmentKey)) {
-            return "dev-enrollment-key"
+    if (-not [string]::IsNullOrWhiteSpace($adminToken)) {
+        try {
+            $headers = @{ "Authorization" = "Bearer $adminToken" }
+            $settings = Invoke-RestMethod -Uri "$BaseUrl/api/settings" -Method Get -Headers $headers -TimeoutSec 10
+            if ($settings.enrollmentKey) {
+                Write-Host "Successfully fetched EnrollmentKey from server."
+                return $settings.enrollmentKey
+            }
+        } catch {
+            Write-Host "Failed to fetch settings from $BaseUrl. Falling back to default."
         }
+    }
 
-        Write-Host "Using current EnrollmentKey from server settings."
-        return [string]$settings.enrollmentKey
-    }
-    catch {
-        Write-Host "Could not read settings from server. Using default enrollment key."
-        return "dev-enrollment-key"
-    }
+    # Fallback to default
+    return "NEXMOTE-DEMO-ENROLL-KEY-2026"
 }
 
 function Assert-UnderRoot {
-    param([string]$Path)
+    param([string]$PathToCheck)
 
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    if (-not $fullPath.StartsWith($rootFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    $fullPath = [System.IO.Path]::GetFullPath($PathToCheck)
+    if (-not $fullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Path is outside NexMote root: $fullPath"
     }
 }
@@ -97,10 +100,10 @@ Assert-UnderRoot $artifacts
 $EnrollmentKey = Resolve-EnrollmentKey -ExplicitKey $EnrollmentKey -BaseUrl $ServerUrl -Email $AdminEmail -Password $AdminPassword
 
 if (Test-Path $artifacts) {
-    Remove-Item -LiteralPath $artifacts -Recurse -Force
+    Remove-Item -LiteralPath $artifacts -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $technicianPublish, $cleanerPublish | Out-Null
+New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $trayPublish, $technicianPublish, $cleanerPublish | Out-Null
 
 $selfContained = -not $FrameworkDependent.IsPresent
 $publishArgs = @("-c", "Release", "-r", "win-x64", "--self-contained", $selfContained.ToString().ToLowerInvariant())
@@ -117,10 +120,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Agent publish failed."
 }
 
-& $dotnet publish $trayProject @publishArgs -o $agentPublish
+& $dotnet publish $trayProject @publishArgs -o $trayPublish
 if ($LASTEXITCODE -ne 0) {
     throw "Agent tray publish failed."
 }
+
+Copy-Item (Join-Path $trayPublish "*") -Destination $agentPublish -Recurse -Force
 
 & $dotnet publish $technicianProject @publishArgs -o $technicianPublish
 if ($LASTEXITCODE -ne 0) {

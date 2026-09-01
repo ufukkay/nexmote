@@ -21,6 +21,7 @@ internal sealed class DashboardForm : Form
 
     private readonly Func<bool> _getIsConnected;
     private readonly Action _refresh;
+    private readonly System.Windows.Forms.Timer _autoRefreshTimer;
 
     // UI Controls
     private Panel _heroCard = null!;
@@ -28,6 +29,7 @@ internal sealed class DashboardForm : Form
     private Label _heroTitle = null!;
     private Label _heroSubtitle = null!;
     private Label _agentStatusPill = null!;
+    private bool _lastReportedConnected;
 
     public DashboardForm(
         Func<bool> getIsConnected,
@@ -48,6 +50,20 @@ internal sealed class DashboardForm : Form
 
         BuildLayout();
         RefreshState();
+
+        _autoRefreshTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _autoRefreshTimer.Tick += (_, _) =>
+        {
+            if (Visible)
+            {
+                var connected = _getIsConnected();
+                if (connected != _lastReportedConnected)
+                {
+                    RefreshState();
+                }
+            }
+        };
+        _autoRefreshTimer.Start();
     }
 
     private void BuildLayout()
@@ -218,6 +234,7 @@ internal sealed class DashboardForm : Form
         _refresh();
 
         var connected = _getIsConnected();
+        _lastReportedConnected = connected;
 
         if (connected)
         {
@@ -246,6 +263,20 @@ internal sealed class DashboardForm : Form
         _agentStatusPill.Invalidate();
     }
 
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+        {
+            RefreshState();
+            _autoRefreshTimer.Start();
+        }
+        else
+        {
+            _autoRefreshTimer.Stop();
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)
@@ -256,5 +287,14 @@ internal sealed class DashboardForm : Form
         }
 
         base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _autoRefreshTimer?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

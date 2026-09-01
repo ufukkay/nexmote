@@ -1,10 +1,10 @@
 ﻿{
     "agent":  {
                   "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Sade arayuz."
+                  "releaseNotes":  "v0.7.0 Durum paneli canli otomatik tazeleme eklendi."
               },
     "technician":  {
                        "version":  "0.7.0",
-                       "releaseNotes":  "v0.7.0 Ust arac cubugu sadelestirildi (Komut, Pano, Kilit Ac, Guc butonlari kaldirildi)."
+                       "releaseNotes":  "v0.7.0 Ust arac cubugu sadelestirildi."
                    }
 }
