@@ -27,7 +27,6 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _disposed;
     private bool _joinedDeviceGroup;
     private AgentSecurityProfileResponse? _securityProfile;
-    private ConnectionBannerForm? _bannerForm;
     private volatile string? _lastClipboardText;
     private int _adaptiveQuality = 72;
     private readonly object _qualityLock = new();
@@ -420,13 +419,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _activeSessionId = sessionId;
         _ = SendScreenInfoAsync(sessionId);
 
-        if (_securityProfile?.ShowConnectionBanner != false)
-        {
-            ShowBanner();
-        }
-
         var token = _streamCancellation.Token;
-        token.Register(() => HideBanner());
         StartClipboardWatch(sessionId, token);
 
         var info = ScreenCapture.GetInfo();
@@ -443,41 +436,6 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 _ = Task.Run(() => StreamLoopAsync(sessionId, capturedIndex, token));
             }
         }
-    }
-
-    private void ShowBanner()
-    {
-        try
-        {
-            if (_bannerForm != null && !_bannerForm.IsDisposed) return;
-            var thread = new Thread(() =>
-            {
-                try
-                {
-                    var title = _securityProfile?.AgentDisplayName ?? "NexMote";
-                    _bannerForm = new ConnectionBannerForm(title);
-                    Application.Run(_bannerForm);
-                }
-                catch { }
-            });
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.IsBackground = true;
-            thread.Start();
-        }
-        catch { }
-    }
-
-    private void HideBanner()
-    {
-        try
-        {
-            if (_bannerForm != null && !_bannerForm.IsDisposed)
-            {
-                _bannerForm.Invoke(() => _bannerForm.Close());
-                _bannerForm = null;
-            }
-        }
-        catch { }
     }
 
     private void StartClipboardWatch(Guid sessionId, CancellationToken token)

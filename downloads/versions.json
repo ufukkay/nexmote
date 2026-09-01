@@ -1,7 +1,7 @@
 ﻿{
     "agent":  {
                   "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Web terminal ve uygulama kaldirma duzeltmeleri."
+                  "releaseNotes":  "v0.7.0 Baglanti bildirim banner\u0027i kaldirildi."
               },
     "technician":  {
                        "version":  "0.7.0",
