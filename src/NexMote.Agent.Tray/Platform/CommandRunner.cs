@@ -117,7 +117,7 @@ internal static class CommandRunner
         var isPowerShell = string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase);
         var fileName = isPowerShell ? "powershell.exe" : "cmd.exe";
         var arguments = isPowerShell
-            ? $"-NoProfile -NonInteractive -Command \"{command.Replace("\"", "\\\"")}\""
+            ? $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\""
             : $"/c {command}";
 
         var psi = new ProcessStartInfo(fileName, arguments)
@@ -125,7 +125,9 @@ internal static class CommandRunner
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
 
         using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };

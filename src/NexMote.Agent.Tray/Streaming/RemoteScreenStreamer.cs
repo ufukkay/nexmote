@@ -249,6 +249,26 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             }
         });
 
+        _connection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
+        {
+            var result = await CommandRunner.RunAsync(shell, command, 60000, runAsAdmin);
+            try
+            {
+                if (_connection?.State == HubConnectionState.Connected)
+                {
+                    await _connection.InvokeAsync("SubmitCommandResult",
+                        requestId,
+                        result.ExitCode,
+                        result.StdOut,
+                        result.StdErr,
+                        result.DurationMs,
+                        result.TimedOut,
+                        result.ElevationDenied);
+                }
+            }
+            catch { }
+        });
+
         _connection.Reconnecting += error =>
         {
             _joinedDeviceGroup = false;

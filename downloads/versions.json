@@ -1,7 +1,7 @@
 ﻿{
     "agent":  {
                   "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Sade ve minimalist ajan arayuzu."
+                  "releaseNotes":  "v0.7.0 Web terminal ve uygulama kaldirma duzeltmeleri."
               },
     "technician":  {
                        "version":  "0.7.0",
