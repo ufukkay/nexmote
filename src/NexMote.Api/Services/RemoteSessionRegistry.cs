@@ -97,3 +97,9 @@ public sealed class RemoteSessionRegistry
         }
     }
 }
+
+/// <summary>
+/// Bellek içi ve oturum sorgularında kullanılan aktif oturum kaydı.
+/// </summary>
+public sealed record RemoteSessionRecord(Guid Id, Guid DeviceId, string Token, DateTimeOffset ExpiresAt);
+

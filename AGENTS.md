@@ -52,7 +52,7 @@ Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan 
 - **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
 - **Sağlık Endpoint:** `https://nexmote.com/health` -> `{"product":"NexMote","status":"ok"}`
 - **Erişim Dokümanı:** [docs/server-credentials.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/docs/server-credentials.md) (git'te takip edilmiyor, sadece yerel)
-- **Güncel Client Sürümü:** `0.6.9` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
+- **Güncel Client Sürümü:** `0.7.0` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
 
 ---
 

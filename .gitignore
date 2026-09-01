@@ -34,9 +34,12 @@ dotnet-install.ps1
 .wix/
 publish-linux/
 publish-linux.zip
+*.tar.gz
+*.zip
 docs/server-credentials.md
 scratch/
 chat.py
 .freebuff/
 walkthrough.md
+
 

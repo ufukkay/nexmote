@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>..\..\assets\nexmote.ico</ApplicationIcon>
-    <Version>0.6.9</Version>
+    <Version>0.7.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

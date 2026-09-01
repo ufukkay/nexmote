@@ -4,7 +4,22 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.6.9] - 2026-08-24 (Güncel Canlı Sürüm)
+## 🏷️ [v0.7.0] - 2026-09-01 (Güncel Sürüm)
+### 🏗️ Kapsamlı Mimari Yenileme ve Modüler Refactoring
+- **Backend Minimal API Modüler Routing Katmanı (`NexMote.Api/Endpoints/`):** Tek parça 1,300 satırlık `Program.cs` dosyası, `AuthEndpoints.cs`, `DeviceEndpoints.cs`, `OrganizationEndpoints.cs`, `SecurityProfileEndpoints.cs` ve `SettingsEndpoints.cs` olmak üzere 5 ayrı izole uzantı sınıfına bölündü. `Program.cs` 355 satıra indirildi.
+- **SQLite WAL Modu ve Eşzamanlılık Optimizasyonu:** Backend başlangıcında `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;` aktif edilerek yoğun eşzamanlı cihaz canlılık sinyallerinde (heartbeat) veritabanı kilitlenmeleri (database is locked) kalıcı olarak önlendi.
+- **Agent Tray Modüler Dizin Mimarisi (`NexMote.Agent.Tray/`):** 4,300+ satırlık devasa `Program.cs` dosyası, sorumluluklarına göre `Config/`, `Forms/`, `Input/`, `Platform/` ve `Streaming/` klasörleri altında 13 bağımsız sınıfa ayrıştırıldı.
+- **Web Ön Yüz Bileşen ve Tip Ayrıştırması (`web/src/`):** 6,400+ satırlık `App.tsx` monolitinden `types.ts`, `utils.tsx` ve `components/` (`LoginScreen`, `InviteAcceptScreen`, `AppSidebar`, `AppHeader`, `DownloadsView`, `UsersView`, `AuditLogView`) modülleri ayrıştırıldı.
+- **Vite Doğrudan Çıktı Pipeline'ı:** `web/vite.config.ts` doğrudan `src/NexMote.Api/wwwroot` yoluna `emptyOutDir: true` ile çıktı verecek şekilde yapılandırıldı; manuel dosya kopyalama adımları ortadan kaldırıldı.
+- **Canlı OTA Güvenlik Profili ve Kurumsal Kimlik (Branding) Senkronizasyonu:** Yönetici panelinden bir güvenlik profili veya cihaz grubu güncellendiğinde ya da cihaza atandığında SignalR üzerinden `SecurityProfileUpdated` sinyali anında iletilir. Hedef bilgisayardaki Ajan yeniden başlatmaya gerek duymadan `RefreshSecurityProfileAsync()` ile güncel logo, isim, menü kısıtları ve bağlantı onay kurallarını dinamik olarak uygular.
+- **Hiyerarşik Organizasyon Dizin Ağacı (Tree View) ve Context Inspector:** Web konsolunda Şirket, Departman ve bağlı Cihazları tek bir dizin ağacı görünümünde listeleyen, genişletme/daraltma ve hızlı arama destekli yeni organizasyon mimarisi. Sağ paneldeki Context Inspector ile seçilen düğüme anında güvenlik profili atama ve toplu cihaz ilişkilendirme imkanı eklendi.
+- **DirectX 3.5 & Vortice Güncellemesi:** Ekran yakalama motoru en güncel `Vortice.Direct3D11` ve `Vortice.DXGI` 3.5.0 sürümüne yükseltildi, derleme zamanı paket uyarıları sıfırlandı.
+- **Kod Konsolidasyonu ve Ölü Kod Temizliği:** Kullanılmayan `DeviceRecord.cs` ölü kodu kaldırıldı. `AlertContracts.cs` kontratı `AgentContracts.cs` ile, `RemoteSessionRecord.cs` modeli `RemoteSessionRegistry.cs` ile, `AlertMonitorService.cs` ise `AlertService.cs` ile konsolide edildi. Kök dizindeki eski büyük arşivler temizlendi ve tüm projelerin sürüm numaraları tek çatı altında v0.7.0'a hizalandı.
+
+---
+
+## 🏷️ [v0.6.9] - 2026-08-24
+
 ### 🚀 Yeni Özellikler
 - **Bağlantı Onayı (Consent) ve Granüler Ajan İzinleri:** Güvenlik profillerine, teknisyen bağlanmadan önce hedef kullanıcıdan onay istenmesini sağlayan bir onay modu (`Kısıtsız` / `Her Zaman Sor` / `Kullanıcı Aktifse Sor`, zaman aşımlı onay diyaloğu) ve dört ayrı izin bayrağı (`Sadece İzleme`, `Uzak Terminal`, `Pano`, `Dosya Aktarımı`) eklendi. Onay bekleniyorken hedef ekranda "Teknisyen Bağlı" rozeti (`ShowConnectionBanner`) gösterilir; teknisyen tarafında bekleme/red durumları canlı olarak state olarak yansıtılır.
 - **Teknisyen ↔ Ajan Pano (Kopyala/Yapıştır) Senkronizasyonu:** Teknisyen uygulamasında elle "📋 Pano" gönderme butonu eklendi; ayrıca canlı oturum sırasında Ajan kendi yerel pano değişikliğini otomatik algılayıp Teknisyene iletir, Teknisyen de gelen metni otomatik kendi panosuna yazar (iki yönlü, `AllowClipboard` güvenlik profili bayrağıyla kapatılabilir).

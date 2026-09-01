@@ -466,8 +466,6 @@ public sealed class Worker : BackgroundService
     /// </summary>
     private async Task RunSessionWatchdogAsync(CancellationToken stoppingToken)
     {
-        uint lastSessionId = uint.MaxValue;
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try

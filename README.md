@@ -223,7 +223,7 @@ npm run dev
 
 ### 3. Windows Yükleyicilerini Paketleme (MSI)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -ServerUrl "https://nexmote.com" -EnrollmentKey "your-key" -Version "0.6.8" -AgentReleaseNotes "..." -TechnicianReleaseNotes "..."
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -ServerUrl "https://nexmote.com" -EnrollmentKey "your-key" -Version "0.7.0" -AgentReleaseNotes "..." -TechnicianReleaseNotes "..."
 ```
 *Bu betik `artifacts/package/` altına dosyaları derler ve WiX ile kurumsal `NexMote-Agent-Setup.msi` / `NexMote-Technician-Setup.msi` / `NexMote-Cleanup-Setup.msi` paketlerini üretir. `-Version`, `-AgentReleaseNotes` ve `-TechnicianReleaseNotes` zorunludur (bkz. AGENTS.md).*
 
