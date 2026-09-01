@@ -1,7 +1,7 @@
 ﻿{
     "agent":  {
                   "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Kapsamli mimari yenileme ve sifir kodlu kurulum destegi."
+                  "releaseNotes":  "v0.7.0 Sade ve minimalist ajan arayuzu."
               },
     "technician":  {
                        "version":  "0.7.0",

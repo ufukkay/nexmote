@@ -313,33 +313,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     /// </summary>
     private ContextMenuStrip BuildContextMenu()
     {
-        var displayName = string.IsNullOrWhiteSpace(_securityProfile?.AgentDisplayName)
-            ? "NexMote Agent"
-            : _securityProfile!.AgentDisplayName!;
-
         var menu = new ContextMenuStrip();
-        menu.Items.Add($"{displayName} v{_versionStr}").Enabled = false;
+        menu.Items.Add("🛡️ Durum Paneli", null, (_, _) => ShowDashboardGated());
         menu.Items.Add(new ToolStripSeparator());
-
-        if (_securityProfile?.RestrictTrayMenu == true)
-        {
-            // Kurumsal kilitli mod: sağ tık menüsünde sadece bu iki aksiyon görünür.
-            menu.Items.Add("🛡️ Durum Panelini Görüntüle", null, (_, _) => ShowDashboardGated());
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Çıkış", null, (_, _) => RequestExit());
-        }
-        else
-        {
-            menu.Items.Add(_statusItem);
-            menu.Items.Add(_serverItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("🛡️ Durum Panelini Aç", null, (_, _) => ShowDashboardGated());
-            menu.Items.Add("🚀 Güncelleme Kontrol Et", null, async (_, _) => await CheckForAgentUpdatesAsync(isManual: true));
-            menu.Items.Add("Sunucu Ayarları...", null, (_, _) => ShowServerSettingsDialog());
-            menu.Items.Add("Durumu Yenile", null, (_, _) => RefreshStatus(showBalloon: true));
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Tray'i Kapat", null, (_, _) => RequestExit());
-        }
+        menu.Items.Add("Çıkış", null, (_, _) => RequestExit());
 
         return menu;
     }
@@ -713,22 +690,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _dashboardForm = new DashboardForm(
-            getServiceStatus: GetServiceStatus,
-            getServerUrl: () => _serverUrl,
-            getScreenStatus: () => _screenStatus,
             getIsConnected: () => _streamer.IsConnected,
-            openPanel: OpenWebPanel,
-            openSettings: ShowServerSettingsDialog,
-            refresh: () => RefreshStatus(showBalloon: false),
-            checkUpdates: () => _ = CheckForAgentUpdatesAsync(isManual: true),
-            runNetworkTest: () => _streamer.RunServerNetworkTestAsync(),
-            saveSettings: (newUrl, newKey) =>
-            {
-                _serverUrl = newUrl;
-                AgentSettings.SaveSettings(newUrl, newKey);
-                _serverItem.Text = $"Sunucu: {newUrl}";
-                _streamer.UpdateServerUrl(newUrl);
-            });
+            refresh: () => RefreshStatus(showBalloon: false));
         _dashboardForm.Show();
         _dashboardForm.WindowState = FormWindowState.Normal;
         _dashboardForm.BringToFront();
