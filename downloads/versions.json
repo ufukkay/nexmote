@@ -1,10 +1,10 @@
 ﻿{
     "agent":  {
                   "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Baglanti bildirim banner\u0027i kaldirildi."
+                  "releaseNotes":  "v0.7.0 Sade arayuz."
               },
     "technician":  {
                        "version":  "0.7.0",
-                       "releaseNotes":  "v0.7.0 Coklu ekran ve kalite optimizasyonlari."
+                       "releaseNotes":  "v0.7.0 Ust arac cubugu sadelestirildi (Komut, Pano, Kilit Ac, Guc butonlari kaldirildi)."
                    }
 }
