@@ -132,22 +132,14 @@ internal sealed class DashboardForm : Form
 
         var brandTitle = new Label
         {
-            Text = "NexMote Agent",
-            Font = new Font("Segoe UI", 14F, FontStyle.Bold),
+            Text = $"NexMote Agent  v{versionStr}",
+            Font = new Font("Segoe UI", 13.5F, FontStyle.Bold),
             ForeColor = TextDark,
             Left = 66,
             Top = 13,
-            AutoSize = true
-        };
-
-        var versionLabel = new Label
-        {
-            Text = $"v{versionStr}",
-            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-            ForeColor = TextMuted,
-            Left = 230,
-            Top = 18,
-            AutoSize = true
+            Width = 350,
+            Height = 32,
+            TextAlign = ContentAlignment.MiddleLeft
         };
 
         _agentStatusPill = new Label
@@ -168,7 +160,7 @@ internal sealed class DashboardForm : Form
             e.Graphics.DrawRectangle(pen, 0, 0, _agentStatusPill.Width - 1, _agentStatusPill.Height - 1);
         };
 
-        headerPanel.Controls.AddRange(new Control[] { logoIcon, brandTitle, versionLabel, _agentStatusPill });
+        headerPanel.Controls.AddRange(new Control[] { logoIcon, brandTitle, _agentStatusPill });
 
         // 2. HERO PROTECTION STATUS CARD
         _heroCard = new Panel { Left = 24, Top = 72, Width = 832, Height = 74, BackColor = SuccessBg };
@@ -265,9 +257,9 @@ internal sealed class DashboardForm : Form
             BackColor = SurfaceColor
         };
 
-        AddStatusRow(cardLeft, 1, "💻  Bilgisayar Adı", Environment.MachineName, TextDark);
-        AddStatusRow(cardLeft, 2, "👤  Aktif Kullanıcı", Environment.UserName, TextDark);
-        AddStatusRow(cardLeft, 3, "🔒  Kurulum Modeli", "• Sıfır-Kodlu (Zero-Touch)", SuccessGreen);
+        AddStatusRow(cardLeft, 1, "Bilgisayar Adı", Environment.MachineName, TextDark);
+        AddStatusRow(cardLeft, 2, "Aktif Kullanıcı", Environment.UserName, TextDark);
+        AddStatusRow(cardLeft, 3, "Kurulum Modeli", "• Sıfır-Kodlu", SuccessGreen);
 
         var btnSaveSettings = new Button
         {
@@ -322,10 +314,10 @@ internal sealed class DashboardForm : Form
             Height = 24
         };
 
-        _lblServiceStatus = AddStatusRow(cardRight, 0, "🛡️  NexMote Servisi", "• Çalışıyor", SuccessGreen);
-        _lblServerConnStatus = AddStatusRow(cardRight, 1, "🗄️  Sunucu Bağlantısı", "• Bağlı", SuccessGreen);
-        _lblSignalRStatus = AddStatusRow(cardRight, 2, "📶  SignalR Canlı Akış", "• Bağlı", SuccessGreen);
-        AddStatusRow(cardRight, 3, "📦  Yüklü Ajan Sürümü", $"v{versionStr}", AccentBlue);
+        _lblServiceStatus = AddStatusRow(cardRight, 0, "NexMote Servisi", "• Çalışıyor", SuccessGreen);
+        _lblServerConnStatus = AddStatusRow(cardRight, 1, "Sunucu Bağlantısı", "• Bağlı", SuccessGreen);
+        _lblSignalRStatus = AddStatusRow(cardRight, 2, "SignalR Canlı Akış", "• Bağlı", SuccessGreen);
+        AddStatusRow(cardRight, 3, "Yüklü Ajan Sürümü", $"v{versionStr}", AccentBlue);
 
         var btnTestConnection = new Button
         {
@@ -393,8 +385,9 @@ internal sealed class DashboardForm : Form
             ForeColor = TextDark,
             Left = 12,
             Top = 10,
-            Width = 200,
-            Height = 20
+            Width = 160,
+            Height = 20,
+            TextAlign = ContentAlignment.MiddleLeft
         };
 
         var val = new Label
@@ -402,9 +395,9 @@ internal sealed class DashboardForm : Form
             Text = defaultVal,
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = defaultColor,
-            Left = 210,
+            Left = 175,
             Top = 10,
-            Width = 146,
+            Width = 182,
             Height = 20,
             TextAlign = ContentAlignment.MiddleRight
         };

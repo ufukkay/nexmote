@@ -35,11 +35,13 @@ public sealed class DeviceRegistry
         var nameLower = request.DeviceName.ToLowerInvariant();
         var domainLower = request.DomainName.ToLowerInvariant();
 
-        // Eğer bu cihaz daha önce yönetici tarafından silinmişse, otomatik kaydı engelle
-        var isDeleted = db.DeletedDevices.Any(d => d.DeviceName.ToLower() == nameLower && d.DomainName.ToLower() == domainLower);
-        if (isDeleted)
+        // Eğer bu cihaz daha önce DeletedDevices listesindeyse, yeni kurulumla kaydolurken bu engeli kaldır
+        var deletedEntries = db.DeletedDevices
+            .Where(d => d.DeviceName.ToLower() == nameLower && d.DomainName.ToLower() == domainLower)
+            .ToList();
+        if (deletedEntries.Count > 0)
         {
-            throw new InvalidOperationException("Bu cihaz yönetici tarafından sistemden silinmiştir.");
+            db.DeletedDevices.RemoveRange(deletedEntries);
         }
 
         var existing = db.Devices.FirstOrDefault(device =>
