@@ -54,7 +54,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
           </div>
           <div className="sidebar-brand-text">
             <span className="sidebar-title">NexMote</span>
-            <span className="sidebar-version">v0.7.0 Pro</span>
+            <span className="sidebar-version">v0.7.2 Pro</span>
           </div>
         </div>
         <button

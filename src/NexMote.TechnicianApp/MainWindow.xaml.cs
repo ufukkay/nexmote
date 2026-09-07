@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Win32;
 using NexMote.Shared.Contracts;
 using NexMote.Shared.Network;
+using NexMote.Shared.Security;
 
 namespace NexMote.TechnicianApp;
 
@@ -43,6 +44,7 @@ public partial class MainWindow : Window
     private HubConnection? _connection;
     private Guid? _sessionId;
     private RemoteScreenInfo? _screenInfo;
+    private WebRtcPeerTransport? _webRtc;
     private long _lastMouseMoveTimestamp;
 
     // Multi-monitor view: display selection and stretch view modes
@@ -78,6 +80,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        var (storedUrl, storedEmail, _) = TechnicianAppSettings.Load();
+        if (!string.IsNullOrWhiteSpace(storedUrl))
+        {
+            _serverUrl = NexMoteHttp.NormalizeUrl(storedUrl);
+        }
+        _loginEmail = storedEmail ?? string.Empty;
+
         Title = $"{Title} (v{RunningVersion})";
         UpdateHeaderIdentity();
 
@@ -279,35 +289,59 @@ public partial class MainWindow : Window
 
         try
         {
-            var uri = new Uri(launchUri);
-            var query = ParseQuery(uri.Query);
-            query.TryGetValue("sessionId", out var sessionId);
-            query.TryGetValue("token", out var token);
-            query.TryGetValue("serverUrl", out var serverUrl);
-            query.TryGetValue("deviceName", out var deviceName);
-            if (query.TryGetValue("deviceId", out var devIdStr) && Guid.TryParse(devIdStr, out var parsedDeviceId))
+            if (!DeepLinkValidator.TryValidate(launchUri, _serverUrl, out var link, out var error, out var requiresConfirmation))
             {
-                _currentConnectedDeviceId = parsedDeviceId;
+                StatusText.Text = $"Deep-link hatası: {error}";
+                MessageBox.Show($"Geçersiz veya güvensiz nexmote:// bağlantı linki:\n\n{error}", "NexMote Güvenlik Uyarısı", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
             }
 
-            if (!string.IsNullOrWhiteSpace(serverUrl))
+            if (requiresConfirmation)
             {
-                _serverUrl = serverUrl;
+                var isOfficial = false;
+                if (Uri.TryCreate(link!.ServerUrl, UriKind.Absolute, out var targetUri))
+                {
+                    var h = targetUri.Host.ToLowerInvariant();
+                    if (h.StartsWith("www.")) h = h[4..];
+                    if (h == "nexmote.com" || h.EndsWith(".nexmote.com"))
+                    {
+                        isOfficial = true;
+                    }
+                }
+
+                if (!isOfficial)
+                {
+                    var result = MessageBox.Show(
+                        $"Bağlantı isteği mevcut sunucunuzdan farklı, harici bir adresten geldi:\n\n{link!.ServerUrl}\n\nBu sunucuya bağlanmak ve ayarlarınızı güncellemek istiyor musunuz?",
+                        "Harici Sunucu Bağlantı Onayı",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (result != MessageBoxResult.Yes)
+                    {
+                        StatusText.Text = "Harici sunucu bağlantısı kullanıcı tarafından iptal edildi.";
+                        return false;
+                    }
+                }
+            }
+
+            if (link!.DeviceId.HasValue)
+            {
+                _currentConnectedDeviceId = link.DeviceId.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(link.ServerUrl) && !string.Equals(_serverUrl, link.ServerUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                _serverUrl = link.ServerUrl;
                 var (_, storedEmail, storedToken) = TechnicianAppSettings.Load();
                 TechnicianAppSettings.Save(_serverUrl, storedEmail, storedToken);
                 UpdateHeaderIdentity();
             }
 
-            SessionText.Text = $"Oturum: {sessionId}";
-            if (!Guid.TryParse(sessionId, out var parsedSessionId) || string.IsNullOrWhiteSpace(token))
-            {
-                StatusText.Text = "Geçersiz oturum kimliği veya token.";
-                return false;
-            }
-
-            _sessionId = parsedSessionId;
-            SwitchToRemoteSession(deviceName);
-            _ = ConnectSignalingAsync(parsedSessionId, token, _serverUrl);
+            _sessionId = link.SessionId;
+            SessionText.Text = $"Oturum: {link.SessionId}";
+            SwitchToRemoteSession(link.DeviceName);
+            _ = ConnectSignalingAsync(link.SessionId, link.Token, _serverUrl);
             return true;
         }
         catch (Exception ex)
@@ -489,7 +523,7 @@ public partial class MainWindow : Window
                 {
                     options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
                 })
-                .WithAutomaticReconnect()
+                .WithAutomaticReconnect(new InfiniteRetryPolicy())
                 .Build();
 
             _connection.On("DeviceJoinedSession", () =>
@@ -583,6 +617,27 @@ public partial class MainWindow : Window
                         });
                     }
                 }
+
+                if (string.Equals(type, "webrtc-signal", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var signal = JsonSerializer.Deserialize<WebRtcSignalMessage>(payload);
+                        if (signal != null && _webRtc != null)
+                        {
+                            if (string.Equals(signal.Type, "answer", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(signal.Sdp))
+                            {
+                                _ = _webRtc.HandleAnswerAsync(signal.Sdp);
+                            }
+                            else if (string.Equals(signal.Type, "candidate", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(signal.Candidate))
+                            {
+                                _webRtc.HandleCandidate(signal.Candidate, signal.SdpMid, signal.SdpMLineIndex);
+                            }
+                        }
+                    }
+                    catch { }
+                    return;
+                }
             });
 
             _connection.Reconnecting += error =>
@@ -633,6 +688,44 @@ public partial class MainWindow : Window
             await _connection.StartAsync();
             await _connection.InvokeAsync("JoinTechnicianSession", sessionId, token);
             StatusText.Text = "Oturuma katılındı. Görüntü akışı bekleniyor...";
+
+            // WebRTC P2P doğrudan veri kanalı müzakeresini başlat (Madde 1)
+            try
+            {
+                _webRtc?.Dispose();
+                _webRtc = new WebRtcPeerTransport();
+                _webRtc.OnSignalReady += async (signal) =>
+                {
+                    if (_connection?.State == HubConnectionState.Connected && _sessionId.HasValue)
+                    {
+                        var json = JsonSerializer.Serialize(signal);
+                        try
+                        {
+                            await _connection.InvokeAsync("SendSignal", _sessionId.Value, "webrtc-signal", json);
+                        }
+                        catch { }
+                    }
+                };
+                _webRtc.OnConnectionStateChanged += (connected) =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        StatusText.Text = connected
+                            ? "WebRTC P2P Doğrudan Bağlantı Aktif (Ultra Düşük Gecikme)."
+                            : "Sinyalleşme Aktif (WebSocket Sunucu Rölesi).";
+                    });
+                };
+                _webRtc.OnDataMessageReceived += (channel, text) =>
+                {
+                    if (string.Equals(channel, "stream", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ = ProcessIncomingFrameAsync(text);
+                    }
+                };
+
+                _ = _webRtc.StartOfferAsync();
+            }
+            catch { }
 
             StartPingTimer();
         }
@@ -1460,6 +1553,48 @@ public partial class MainWindow : Window
                     var msiBytes = await http.GetByteArrayAsync(downloadUrl);
                     await File.WriteAllBytesAsync(tempMsi, msiBytes);
 
+                    StatusText.Text = "Paket bütünlüğü ve dijital imza doğrulanıyor...";
+                    try
+                    {
+                        var expectedSha = tech.TryGetProperty("sha256", out var shaProp) ? shaProp.GetString() : null;
+                        var expectedSize = tech.TryGetProperty("sizeBytes", out var sizeProp) && sizeProp.TryGetInt64(out var sz) ? sz : (long?)null;
+
+                        NexMote.Shared.Security.AuthenticodeVerifier.ValidateFileIntegrity(tempMsi, expectedSha, expectedSize);
+
+#if DEBUG
+                        const bool allowUntrusted = true;
+#else
+                        const bool allowUntrusted = false;
+#endif
+                        var authResult = NexMote.Shared.Security.AuthenticodeVerifier.Verify(
+                            tempMsi,
+                            expectedSubjectContains: "NexMote",
+                            allowUntrustedRootInDev: allowUntrusted);
+
+                        if (!authResult.IsValid)
+                        {
+                            try { File.Delete(tempMsi); } catch { }
+                            MessageBox.Show(
+                                $"Güncelleme paketinin dijital imzası doğrulanamadı!\n\nNeden: {authResult.StatusMessage}\n\nGüvenlik nedeniyle kurulum engellendi.",
+                                "Güvenlik Uyarısı",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                            StatusText.Text = "Güncelleme paketi imza doğrulaması başarısız.";
+                            return;
+                        }
+                    }
+                    catch (Exception valEx)
+                    {
+                        try { File.Delete(tempMsi); } catch { }
+                        MessageBox.Show(
+                            $"Güncelleme paketi bütünlük denetimi başarısız: {valEx.Message}",
+                            "Güvenlik Hatası",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
+                        StatusText.Text = "Paket doğrulaması başarısız.";
+                        return;
+                    }
+
                     StatusText.Text = "Yükleyici çalıştırılıyor (yönetici izni gerekebilir)...";
                     try
                     {
@@ -1653,6 +1788,26 @@ public partial class MainWindow : Window
 
         try
         {
+            if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                if (files is { Count: > 0 })
+                {
+                    StatusText.Text = $"Panodaki {files.Count} dosya uzak cihaza aktarılıyor...";
+                    var sentCount = 0;
+                    foreach (string? file in files)
+                    {
+                        if (!string.IsNullOrWhiteSpace(file) && File.Exists(file))
+                        {
+                            await SendFileAsync(file);
+                            sentCount++;
+                        }
+                    }
+                    StatusText.Text = $"Panodaki {sentCount} dosya aktarıldı ve uzak işletim sisteminin panosuna yerleştirildi.";
+                    return;
+                }
+            }
+
             if (Clipboard.ContainsText())
             {
                 var text = Clipboard.GetText();
@@ -1664,7 +1819,7 @@ public partial class MainWindow : Window
                 }
             }
 
-            StatusText.Text = "Yerel panoda metin bulunamadı.";
+            StatusText.Text = "Yerel panoda metin veya dosya bulunamadı.";
         }
         catch (Exception ex)
         {
@@ -1699,6 +1854,12 @@ public partial class MainWindow : Window
         _rebootWatchdogCts?.Cancel();
         _isAwaitingReboot = false;
         _pingTimer?.Stop();
+        try
+        {
+            _webRtc?.Dispose();
+            _webRtc = null;
+        }
+        catch { }
         if (_connection is not null)
         {
             await _connection.DisposeAsync();
@@ -1718,6 +1879,14 @@ public partial class MainWindow : Window
         if (e.Key == Key.F11)
         {
             ToggleFullScreen();
+            e.Handled = true;
+            return;
+        }
+
+        // Ctrl+Alt+End kısayolu: Uzak bilgisayara Ctrl+Alt+Del (SAS) gönder
+        if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) == (ModifierKeys.Control | ModifierKeys.Alt) && (e.Key == Key.End || e.SystemKey == Key.End))
+        {
+            SendSasBtn_Click(this, new RoutedEventArgs());
             e.Handled = true;
             return;
         }
@@ -1795,7 +1964,11 @@ public partial class MainWindow : Window
                 SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
             var payload = JsonSerializer.Serialize(input);
-            await _connection.InvokeAsync("SendSignal", _sessionId.Value, "remote-input", payload);
+            var sentViaP2p = _webRtc?.SendData("input", payload) ?? false;
+            if (!sentViaP2p)
+            {
+                await _connection.InvokeAsync("SendSignal", _sessionId.Value, "remote-input", payload);
+            }
             _remoteInputSentCount++;
             if (_remoteInputSentCount <= 3 || _remoteInputSentCount % 100 == 0)
             {
@@ -1811,6 +1984,12 @@ public partial class MainWindow : Window
     protected override async void OnClosed(EventArgs e)
     {
         _pingTimer?.Stop();
+        try
+        {
+            _webRtc?.Dispose();
+            _webRtc = null;
+        }
+        catch { }
         if (_connection is not null)
         {
             await _connection.DisposeAsync();
@@ -1845,18 +2024,29 @@ public partial class MainWindow : Window
 
     private async Task SendFileAsync(string filePath)
     {
-        const int ChunkSize = 200 * 1024;
         var fileInfo = new FileInfo(filePath);
+        if (fileInfo.Length > FileTransferValidator.MaxFileSizeBytes)
+        {
+            StatusText.Text = $"Dosya çok büyük: En fazla {FileTransferValidator.MaxFileSizeBytes / (1024 * 1024)} MB gönderilebilir.";
+            MessageBox.Show($"Seçilen dosya ({fileInfo.Length / (1024 * 1024):N1} MB) izin verilen 500 MB sınırını aşıyor.", "Dosya Boyut Sınırı", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        const int ChunkSize = 200 * 1024;
         var totalChunks = Math.Max(1, (int)Math.Ceiling(fileInfo.Length / (double)ChunkSize));
         var transferId = Guid.NewGuid();
         var sessionId = _sessionId!.Value;
 
         await using var stream = File.OpenRead(filePath);
+        var sha256 = FileTransferValidator.ComputeStreamSha256(stream);
+        stream.Position = 0;
+
         var buffer = new byte[ChunkSize];
 
         for (var index = 0; index < totalChunks; index++)
         {
             var read = await stream.ReadAsync(buffer.AsMemory(0, ChunkSize));
+            var isLast = index == totalChunks - 1;
             var chunk = new FileTransferChunk(
                 sessionId,
                 transferId,
@@ -1865,13 +2055,14 @@ public partial class MainWindow : Window
                 index,
                 totalChunks,
                 Convert.ToBase64String(buffer, 0, read),
-                index == totalChunks - 1);
+                isLast,
+                isLast ? sha256 : null);
 
             await _connection!.InvokeAsync("SendSignal", sessionId, "file-chunk", JsonSerializer.Serialize(chunk));
             StatusText.Text = $"Dosya gönderiliyor: {fileInfo.Name} ({index + 1}/{totalChunks})";
         }
 
-        StatusText.Text = $"Dosya gönderildi: {fileInfo.Name}";
+        StatusText.Text = $"Dosya gönderildi: {fileInfo.Name} (SHA-256: {sha256[..8]}...)";
     }
 
     private void CommandPanelToggleBtn_Click(object sender, RoutedEventArgs e)

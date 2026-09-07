@@ -50,9 +50,7 @@ internal static class DeviceIdentityFile
                 OperatingSystem = os,
                 AgentVersion = version,
                 ActiveUser = activeUser,
-                EnrollmentKey = string.IsNullOrWhiteSpace(enrollmentKey) || enrollmentKey == "dev-enrollment-key"
-                    ? "4ed67db20bb0167a310129162ba8a831aae0d1d014032086fa67ebe416bb2ec7"
-                    : enrollmentKey,
+                EnrollmentKey = enrollmentKey,
                 LocationCode = "OFFICE"
             };
 

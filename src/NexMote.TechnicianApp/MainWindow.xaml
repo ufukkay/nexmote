@@ -519,6 +519,9 @@
                             <!-- Screen Refresh -->
                             <Button x:Name="IslandRefreshBtn" Style="{StaticResource IslandBtn}" Content="Yenile" ToolTip="Uzak ekranı yenile" Click="RefreshScreenBtn_Click"/>
 
+                            <!-- SAS (Ctrl+Alt+Del) Unlock button for lock/login screen -->
+                            <Button x:Name="IslandSasBtn" Style="{StaticResource IslandBtn}" Content="🔒 Kilit Aç" ToolTip="Kilit veya giriş ekranını açmak için Ctrl+Alt+Del (SAS) sinyali gönderir" Click="SendSasBtn_Click"/>
+
                             <!-- Disconnect Session (Red Pill) -->
                             <Button x:Name="IslandDisconnectBtn" Style="{StaticResource IslandDangerBtn}" Content="Sonlandır" ToolTip="Bağlantıyı sonlandır" Click="DisconnectBtn_Click"/>
                         </StackPanel>

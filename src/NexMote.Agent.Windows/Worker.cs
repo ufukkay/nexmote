@@ -1,9 +1,15 @@
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Options;
 using Microsoft.Win32;
+using System.Diagnostics;
 using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 using NexMote.Shared.Commands;
+using NexMote.Shared.Contracts;
 using NexMote.Shared.Identity;
 using NexMote.Shared.Network;
 using NexMote.Shared.Telemetry;
@@ -28,6 +34,12 @@ public sealed class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly IOptionsMonitor<AgentOptions> _optionsMonitor;
     private HubConnection? _hubConnection;
+    private DateTimeOffset _lastUpdateCheckUtc = DateTimeOffset.MinValue;
+    private int _updateDownloadInProgress;
+    private string _lastServerUrl = string.Empty;
+
+    private static readonly Version RunningVersion =
+        Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0, 0);
 
     public Worker(
         AgentClient client,
@@ -39,14 +51,25 @@ public sealed class Worker : BackgroundService
         _identityStore = identityStore;
         _logger = logger;
         _optionsMonitor = optionsMonitor;
+        _lastServerUrl = NormalizeServerUrl(_optionsMonitor.CurrentValue.ServerUrl);
 
-        // appsettings.json değiştiğinde kimliği sıfırlayıp yeni sunucuya yeniden kaydol
+        // ServerUrl gerçekten değiştiğinde kimliği sıfırlayıp yeni sunucuya yeniden kaydol.
         _optionsMonitor.OnChange(options =>
         {
-            _logger.LogInformation("Agent ayarları değişti. Yeni ServerUrl için kimlik sıfırlanıyor: {ServerUrl}", options.ServerUrl);
+            var newServerUrl = NormalizeServerUrl(options.ServerUrl);
+            if (string.Equals(_lastServerUrl, newServerUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _lastServerUrl = newServerUrl;
+            _logger.LogInformation("Agent ServerUrl değişti. Yeni ServerUrl için kimlik sıfırlanıyor: {ServerUrl}", options.ServerUrl);
             _identityStore.Delete();
         });
     }
+
+    private static string NormalizeServerUrl(string? serverUrl) =>
+        (serverUrl ?? "https://nexmote.com").Trim().TrimEnd('/');
 
     /// <summary>
     /// Servis ana yürütme döngüsü.
@@ -94,11 +117,13 @@ public sealed class Worker : BackgroundService
 
                 // SignalR üzerinden doğrudan web terminal komutlarını dinle (SYSTEM yetkisiyle)
                 await EnsureHubConnectedAsync(identity, stoppingToken);
+                await ProcessQueuedCommandAsync(identity, stoppingToken);
 
                 // Oturum süreçlerini kontrol et ve bekleyen güncellemeleri kur
                 EnsureTrayRunning();
                 EnsureInputHelperRunning();
                 CheckPendingUpdate();
+                await CheckForAgentUpdatesAsync(stoppingToken);
 
                 await Task.Delay(TimeSpan.FromSeconds(_optionsMonitor.CurrentValue.HeartbeatSeconds), stoppingToken);
             }
@@ -216,18 +241,39 @@ public sealed class Worker : BackgroundService
                 {
                     options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
                 })
-                .WithAutomaticReconnect()
+                .WithAutomaticReconnect(new InfiniteRetryPolicy())
                 .Build();
+
+            _hubConnection.Reconnected += async _ =>
+            {
+                try
+                {
+                    await _hubConnection.InvokeAsync("JoinDevice", identity.DeviceId, identity.AgentToken, "service");
+                    _logger.LogInformation("Windows Servisi SignalR Hub'ına yeniden bağlandı ve dinleme kanalına katıldı.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Windows Servisi yeniden bağlanma sonrası dinleme kanalına katılamadı.");
+                }
+            };
+
+            _hubConnection.On<Guid>("RemoteSessionRequested", sessionId =>
+            {
+                _logger.LogInformation("Sunucudan canlı oturum isteği alındı: {SessionId}. Aktif oturum denetleniyor...", sessionId);
+                EnsureTrayRunning();
+                TryWakeupTraySession(sessionId);
+            });
 
             _hubConnection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
             {
                 _logger.LogInformation("Web terminal komutu alındı: [{Shell}] {Command}", shell, command);
-                var result = await CommandRunner.RunAsync(shell, command, 60000);
+                var result = await CommandRunner.RunAsync(shell, command, 120000);
                 try
                 {
                     if (_hubConnection?.State == HubConnectionState.Connected)
                     {
                         await _hubConnection.InvokeAsync("SubmitCommandResult",
+                            identity.DeviceId,
                             requestId,
                             result.ExitCode,
                             result.StdOut,
@@ -259,82 +305,141 @@ public sealed class Worker : BackgroundService
             _hubConnection.On<string>("RemoteUpdateRequested", async msiUrl =>
             {
                 _logger.LogInformation("Sunucudan uzaktan sessiz ajan güncelleme isteği alındı: {Url}", msiUrl);
-                if (!string.IsNullOrEmpty(msiUrl))
+                try
                 {
-                    try
-                    {
-                        var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
-                        Directory.CreateDirectory(programDataDir);
-                        var pendingMsi = Path.Combine(programDataDir, "pending-update.msi");
-                        var tempMsi = Path.Combine(programDataDir, "pending-update.tmp");
-
-                        using var http = NexMoteHttp.CreateClient();
-                        using var response = await http.GetAsync(msiUrl, HttpCompletionOption.ResponseHeadersRead);
-                        response.EnsureSuccessStatusCode();
-
-                        await using (var contentStream = await response.Content.ReadAsStreamAsync())
-                        await using (var fileStream = new FileStream(tempMsi, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
-                        {
-                            await contentStream.CopyToAsync(fileStream);
-                        }
-
-                        if (File.Exists(pendingMsi))
-                        {
-                            try { File.Delete(pendingMsi); } catch { }
-                        }
-                        File.Move(tempMsi, pendingMsi, overwrite: true);
-                        _logger.LogInformation("Uzaktan güncelleme paketi başarıyla indirildi. Kurulum tetikleniyor...");
-
-                        CheckPendingUpdate();
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Uzaktan sessiz güncelleme paketi indirilemedi.");
-                    }
+                    await CheckForAgentUpdatesAsync(cancellationToken, force: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Uzaktan sessiz güncelleme paketi indirilemedi.");
                 }
             });
 
             _hubConnection.On("RemoteUninstallRequested", () =>
             {
                 _logger.LogInformation("Sunucudan uzaktan sessiz ajan kaldırma isteği alındı. Temizleme süreci başlatılıyor...");
+                StartSilentCleanup();
+            });
+
+            _hubConnection.On<string>("ExecutePowerAction", action =>
+            {
+                _logger.LogInformation("Sunucudan uzaktan güç komutu alındı: {Action}", action);
                 try
                 {
-                    var cleanerExe = Path.Combine(AppContext.BaseDirectory, "NexMote.Cleaner.exe");
-                    if (File.Exists(cleanerExe))
+                    switch (action.ToLowerInvariant())
                     {
-                        var tempExe = Path.Combine(Path.GetTempPath(), $"NexMote_DeepCleaner_{Guid.NewGuid():N}.exe");
-                        File.Copy(cleanerExe, tempExe, overwrite: true);
-                        var psi = new System.Diagnostics.ProcessStartInfo(tempExe, "--silent --from-temp")
-                        {
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-                        System.Diagnostics.Process.Start(psi);
-                    }
-                    else
-                    {
-                        var cmd = "timeout /t 2 /nobreak & sc.exe stop \"NexMote Agent\" & sc.exe delete \"NexMote Agent\" & taskkill /F /T /IM NexMote* & reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"NexMoteAgentTray\" /f & reg delete \"HKLM\\Software\\NexMote\" /f & rmdir /s /q \"%ProgramFiles%\\NexMote\" & rmdir /s /q \"%ProgramData%\\NexMote\"";
-                        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c {cmd}")
-                        {
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-                        System.Diagnostics.Process.Start(psi);
+                        case "reboot":
+                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                            break;
+                        case "reboot-safe":
+                            Process.Start(new ProcessStartInfo("bcdedit.exe", "/set {current} safeboot network") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
+                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                            break;
+                        case "reboot-normal":
+                            Process.Start(new ProcessStartInfo("bcdedit.exe", "/deletevalue {current} safeboot") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
+                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                            break;
+                        case "shutdown":
+                            Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                            break;
+                        case "lock":
+                            SessionProcessLauncher.TryLaunchInActiveSessionAsUser("rundll32.exe", "user32.dll,LockWorkStation", out _);
+                            break;
+                        case "logoff":
+                            Process.Start(new ProcessStartInfo("logoff.exe") { CreateNoWindow = true, UseShellExecute = false });
+                            break;
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Uzaktan kaldırma başlatılamadı.");
+                    _logger.LogError(ex, "Güç komutu yürütülürken hata: {Action}", action);
                 }
             });
 
             await _hubConnection.StartAsync(cancellationToken);
-            await _hubConnection.InvokeAsync("JoinDevice", identity.DeviceId, identity.AgentToken, cancellationToken);
+            await _hubConnection.InvokeAsync("JoinDevice", identity.DeviceId, identity.AgentToken, "service", cancellationToken);
             _logger.LogInformation("Windows Servisi SignalR Hub'ına başarıyla bağlandı ve dinlemeye başladı.");
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SignalR Hub bağlantısı kurulamadı.");
+        }
+    }
+
+    private async Task ProcessQueuedCommandAsync(DeviceIdentity identity, CancellationToken cancellationToken)
+    {
+        AgentQueuedCommand? command = null;
+        try
+        {
+            command = await _client.GetNextQueuedCommandAsync(identity, cancellationToken);
+            if (command is null)
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "Kuyruktaki cihaz işi alındı. RequestId: {RequestId}, Kind: {Kind}, Shell: {Shell}",
+                command.RequestId,
+                command.Kind,
+                command.Shell);
+
+            var timeoutMs = Math.Clamp(command.TimeoutSeconds, 5, 600) * 1000;
+            if (string.Equals(command.Kind, "agent-uninstall", StringComparison.OrdinalIgnoreCase))
+            {
+                var uninstallAck = new CommandRunResult(0, "Silent agent cleanup acknowledged.", string.Empty, 0, false);
+                await _client.PostQueuedCommandResultAsync(identity, command, uninstallAck, cancellationToken);
+                StartSilentCleanup();
+                return;
+            }
+
+            var result = await CommandRunner.RunAsync(command.Shell, command.Command, timeoutMs);
+            await _client.PostQueuedCommandResultAsync(identity, command, result, cancellationToken);
+            await _client.PostCommandAuditAsync(
+                identity,
+                command.RequestId,
+                command.Shell,
+                command.Command,
+                result.ExitCode,
+                result.StdOut,
+                result.StdErr,
+                result.DurationMs,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Kuyruktaki cihaz işi işlenemedi. RequestId: {RequestId}", command?.RequestId);
+        }
+    }
+
+    private void StartSilentCleanup()
+    {
+        try
+        {
+            var cleanerExe = Path.Combine(AppContext.BaseDirectory, "NexMote.Cleaner.exe");
+            if (File.Exists(cleanerExe))
+            {
+                var tempExe = Path.Combine(Path.GetTempPath(), $"NexMote_DeepCleaner_{Guid.NewGuid():N}.exe");
+                File.Copy(cleanerExe, tempExe, overwrite: true);
+                var psi = new System.Diagnostics.ProcessStartInfo(tempExe, "--silent --from-temp")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                System.Diagnostics.Process.Start(psi);
+                return;
+            }
+
+            var cmd = "timeout /t 2 /nobreak & sc.exe stop \"NexMote Agent\" & sc.exe delete \"NexMote Agent\" & taskkill /F /T /IM NexMote* & reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"NexMoteAgentTray\" /f & reg delete \"HKLM\\Software\\NexMote\" /f & rmdir /s /q \"%ProgramFiles%\\NexMote\" & rmdir /s /q \"%ProgramData%\\NexMote\"";
+            var fallback = new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c {cmd}")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            System.Diagnostics.Process.Start(fallback);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Sessiz kaldırma başlatılamadı.");
         }
     }
 
@@ -392,7 +497,7 @@ public sealed class Worker : BackgroundService
             // durduruyor. Windows Installer'ın yerleşik Restart Manager'ı devrede kalırsa, kilidi tutan
             // sürecin (servisin) kapanışını KENDİSİ de ayrıca çözmeye çalışıyor — üretimde doğrulandı:
             // bu çakışma msiexec'i InstallValidate aşamasında süresiz (40+ dk) kilitliyor.
-            var psi = new System.Diagnostics.ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart MSIRESTARTMANAGERCONTROL=Disable /l*v \"{logPath}\"")
+            var psi = new System.Diagnostics.ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart ALLUSERS=1 MSIRESTARTMANAGERCONTROL=Disable /l*v \"{logPath}\"")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -405,21 +510,27 @@ public sealed class Worker : BackgroundService
                 {
                     try
                     {
-                        process.WaitForExit(180_000); // 3 dakikaya kadar kurulumu bekle
+                        var exited = process.WaitForExit(180_000); // 3 dakikaya kadar kurulumu bekle
+                        if (!exited)
+                        {
+                            _logger.LogWarning("Güncelleme yükleyicisi 3 dakika içinde tamamlanmadı; MSI dosyası yeniden deneme için korunuyor.");
+                            return;
+                        }
+
                         _logger.LogInformation("Güncelleme yükleyicisi tamamlandı. Çıkış Kodu: {Code}", process.ExitCode);
+                        if (process.ExitCode == 0)
+                        {
+                            try
+                            {
+                                if (File.Exists(pendingMsi))
+                                {
+                                    File.Delete(pendingMsi);
+                                }
+                            }
+                            catch { }
+                        }
                     }
                     catch { }
-                    finally
-                    {
-                        try
-                        {
-                            if (File.Exists(pendingMsi))
-                            {
-                                File.Delete(pendingMsi);
-                            }
-                        }
-                        catch { }
-                    }
                 });
             }
         }
@@ -427,6 +538,137 @@ public sealed class Worker : BackgroundService
         {
             _logger.LogWarning(ex, "Bekleyen güncelleme kurulumu başlatılamadı.");
         }
+    }
+
+    private async Task CheckForAgentUpdatesAsync(CancellationToken cancellationToken, bool force = false)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (!force && now - _lastUpdateCheckUtc < TimeSpan.FromMinutes(5))
+        {
+            return;
+        }
+
+        _lastUpdateCheckUtc = now;
+
+        try
+        {
+            var serverUrl = _optionsMonitor.CurrentValue.ServerUrl?.TrimEnd('/') ?? "https://nexmote.com";
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(20));
+            var json = await http.GetStringAsync($"{serverUrl}/api/updates/check", cancellationToken);
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("agent", out var agent) ||
+                !agent.TryGetProperty("version", out var versionProperty) ||
+                !agent.TryGetProperty("downloadUrl", out var downloadUrlProperty))
+            {
+                return;
+            }
+
+            var latestVersionText = versionProperty.GetString();
+            var downloadUrl = downloadUrlProperty.GetString();
+            var expectedSha256 = agent.TryGetProperty("sha256", out var sha256Property) ? sha256Property.GetString() : null;
+            var expectedSizeBytes = agent.TryGetProperty("sizeBytes", out var sizeProperty) && sizeProperty.TryGetInt64(out var parsedSize)
+                ? parsedSize
+                : (long?)null;
+            if (string.IsNullOrWhiteSpace(downloadUrl) ||
+                !Version.TryParse(latestVersionText, out var latestVersion) ||
+                latestVersion <= RunningVersion)
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "Yeni Agent sürümü bulundu. Mevcut: {CurrentVersion}, Yeni: {LatestVersion}",
+                RunningVersion.ToString(3),
+                latestVersion.ToString(3));
+
+            if (await DownloadUpdatePackageAsync(downloadUrl, expectedSha256, expectedSizeBytes, cancellationToken))
+            {
+                CheckPendingUpdate();
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Agent güncelleme kontrolü tamamlanamadı.");
+        }
+    }
+
+    private async Task<bool> DownloadUpdatePackageAsync(string msiUrl, string? expectedSha256, long? expectedSizeBytes, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref _updateDownloadInProgress, 1) == 1)
+        {
+            _logger.LogInformation("Bir Agent güncelleme indirmesi zaten devam ediyor; yeni istek atlandı.");
+            return false;
+        }
+
+        var tempMsi = string.Empty;
+        try
+        {
+            var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
+            Directory.CreateDirectory(programDataDir);
+            var pendingMsi = Path.Combine(programDataDir, "pending-update.msi");
+            tempMsi = Path.Combine(programDataDir, $"pending-update-{Guid.NewGuid():N}.tmp");
+
+            using var http = NexMoteHttp.CreateClient(TimeSpan.FromMinutes(5));
+            using var response = await http.GetAsync(msiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            await using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var fileStream = new FileStream(tempMsi, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
+            {
+                await contentStream.CopyToAsync(fileStream, cancellationToken);
+            }
+
+            ValidateDownloadedPackage(tempMsi, expectedSha256, expectedSizeBytes);
+
+            if (File.Exists(pendingMsi))
+            {
+                try { File.Delete(pendingMsi); } catch { }
+            }
+
+            File.Move(tempMsi, pendingMsi, overwrite: true);
+            _logger.LogInformation("Agent güncelleme paketi hazırlandı: {Path}", pendingMsi);
+            return true;
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(tempMsi) && File.Exists(tempMsi))
+            {
+                try { File.Delete(tempMsi); } catch { }
+            }
+            Interlocked.Exchange(ref _updateDownloadInProgress, 0);
+        }
+    }
+
+    private void ValidateDownloadedPackage(string path, string? expectedSha256, long? expectedSizeBytes)
+    {
+        NexMote.Shared.Security.AuthenticodeVerifier.ValidateFileIntegrity(path, expectedSha256, expectedSizeBytes);
+
+        var options = _optionsMonitor.CurrentValue;
+        var allowUntrustedInDev = options.AllowUntrustedUpdates || string.IsNullOrWhiteSpace(options.ExpectedSigningCertificateThumbprint);
+#if DEBUG
+        allowUntrustedInDev = true;
+#endif
+
+        var verification = NexMote.Shared.Security.AuthenticodeVerifier.Verify(
+            path,
+            expectedThumbprint: options.ExpectedSigningCertificateThumbprint,
+            expectedSubjectContains: "NexMote",
+            allowUntrustedRootInDev: allowUntrustedInDev);
+
+        if (!verification.IsValid)
+        {
+            _logger.LogError("Agent güncelleme paketi güvenlik doğrulaması başarısız: {Message} (HRESULT: 0x{HResult:X8}, İmzalayan: {Signer})",
+                verification.StatusMessage, verification.HResult, verification.SignerSubject);
+            throw new InvalidOperationException($"Agent güncelleme paketi güvenlik doğrulaması başarısız: {verification.StatusMessage}");
+        }
+
+        _logger.LogInformation("Agent güncelleme paketi Authenticode doğrulaması başarılı. İmzalayan: {Signer} ({Thumbprint})",
+            verification.SignerSubject, verification.SignerThumbprint);
     }
 
     /// <summary>
@@ -559,6 +801,30 @@ public sealed class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "EnsureTrayRunning çağrısında hata.");
+        }
+    }
+
+    /// <summary>
+    /// Aktif konsol oturumundaki Tray uygulamasına yerel Named Pipe üzerinden canlı oturum başlama sinyali iletir.
+    /// Bu sayede ağ/SignalR gecikmesi olsa dahi Tray anında canlı oturuma katılır.
+    /// </summary>
+    private void TryWakeupTraySession(Guid sessionId)
+    {
+        try
+        {
+            var activeSession = SessionProcessLauncher.GetActiveConsoleSessionId();
+            if (activeSession == 0xFFFFFFFF) return;
+
+            var pipeName = $"NexMote_Session_Wakeup_{activeSession}";
+            using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.Out);
+            client.Connect(300);
+            using var writer = new StreamWriter(client, Encoding.UTF8, 1024, leaveOpen: false) { AutoFlush = true };
+            writer.WriteLine(sessionId.ToString());
+            _logger.LogInformation("Tray canlı oturum uyandırma sinyali yerel pipe üzerinden iletildi: SessionId={SessionId}, Session={Session}", sessionId, activeSession);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Tray yerel pipe sinyali iletilemedi (Tray SignalR üzerinden de alabilir): {Error}", ex.Message);
         }
     }
 }

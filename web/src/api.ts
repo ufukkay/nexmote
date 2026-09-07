@@ -98,6 +98,7 @@ export type DeviceSummary = {
   memoryTotalMb?: number;
   memoryUsedMb?: number;
   diskFreeMb?: number;
+  uptimeSeconds?: number;
   isOnline: boolean;
   lastSeenAt: string;
   networkAdapters?: NetworkAdapterInfo[];
@@ -165,8 +166,8 @@ export type ServerSettings = {
  * En son Agent ve Teknisyen sürüm ve OTA güncelleme sonucu.
  */
 export type UpdateCheckResult = {
-  agent: { version: string; downloadUrl: string; releaseNotes: string };
-  technician: { version: string; downloadUrl: string; releaseNotes: string };
+  agent: { version: string; downloadUrl: string; releaseNotes: string; sha256?: string; sizeBytes?: number };
+  technician: { version: string; downloadUrl: string; releaseNotes: string; sha256?: string; sizeBytes?: number };
 };
 
 /**
@@ -180,60 +181,26 @@ export async function checkUpdates(): Promise<UpdateCheckResult> {
   return response.json();
 }
 
-const TOKEN_STORAGE_KEY = "nexmote_admin_token";
+const LEGACY_TOKEN_STORAGE_KEY = "nexmote_admin_token";
 
-/**
- * Güvenlik notu:
- *  - "Beni hatırla" seçiliyse token localStorage'a yazılır (sekme kapatılsa da kalır).
- *  - Seçili değilse yalnızca sessionStorage kullanılır (sekme kapanınca silinir).
- *  - Her iki durumda da token yalnızca aynı origin'den (same-site) okunabilir.
- *  - XSS riskini minimize etmek için hiçbir harici script yüklenmiyor,
- *    dangerouslySetInnerHTML ve eval() kullanılmıyor (bkz. App.tsx).
- */
-
-/**
- * Tarayıcı depolama alanından (önce sessionStorage, sonra localStorage) admin token'ını okur.
- * sessionStorage önceliklidir: aktif sekme oturumu daha kısa ömürlü olduğundan daha güvenlidir.
- */
-export function getStoredAdminToken(): string | null {
-  // Önce session (kısa ömürlü, daha güvenli)
-  const sessionToken = sessionStorage.getItem(TOKEN_STORAGE_KEY);
-  if (sessionToken) return sessionToken;
-  // Yoksa "beni hatırla" ile kaydedilmiş kalıcı token
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
-}
-
-/**
- * Admin giriş token'ını tarayıcıya kaydeder.
- * remember=true  → localStorage  (sekme kapansa da kalır)
- * remember=false → sessionStorage (sekme/tarayıcı kapanınca silinir — varsayılan daha güvenli)
- */
-export function setStoredAdminToken(token: string, remember: boolean): void {
-  if (remember) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    // sessionStorage'daki eski kopyayı temizle
-    sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-  } else {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-    // localStorage'daki eski kopyayı temizle
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  }
-}
-
-/**
- * Kayıtlı admin oturum token'ını her iki depolama alanından da temizler.
- */
 export function clearStoredAdminToken(): void {
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
-  sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  localStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+  sessionStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
 }
 
-/**
- * Korumalı API istekleri için Bearer Authorization başlığını üretir.
- */
+export function getStoredAdminToken(): string | null {
+  clearStoredAdminToken();
+  return null;
+}
+
+export function setStoredAdminToken(_token: string, _remember: boolean): void {
+  clearStoredAdminToken();
+}
+
 function authHeaders(): Record<string, string> {
-  const token = getStoredAdminToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {
+    "X-NexMote-Client": "Web"
+  };
 }
 
 /** İki adımlı giriş akışının adım 1 (e-posta/şifre) yanıtı. */
@@ -274,6 +241,7 @@ export type ActivityLogEntry = {
   ipAddress: string | null;
   success: boolean;
   createdAt: string;
+  correlationId?: string | null;
 };
 
 /**
@@ -505,6 +473,48 @@ export async function listDevices(): Promise<DeviceSummary[]> {
   return response.json();
 }
 
+export interface DeviceQueryOptions {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: "all" | "online" | "offline";
+  groupId?: string;
+  sortBy?: "name" | "lastSeen" | "cpu" | "memory" | "os" | "user" | "uptime";
+  sortDir?: "asc" | "desc";
+}
+
+export interface PagedResult<T> {
+  items: T[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  onlineCount: number;
+  offlineCount: number;
+}
+
+/**
+ * Sunucu taraflı arama, filtreleme, sıralama ve sayfalama ile cihaz listesini çeker (Madde 7).
+ */
+export async function listDevicesPaged(options: DeviceQueryOptions = {}): Promise<PagedResult<DeviceSummary>> {
+  const params = new URLSearchParams();
+  if (options.page) params.set("page", options.page.toString());
+  if (options.pageSize) params.set("pageSize", options.pageSize.toString());
+  if (options.search) params.set("search", options.search);
+  if (options.status) params.set("status", options.status);
+  if (options.groupId) params.set("groupId", options.groupId);
+  if (options.sortBy) params.set("sortBy", options.sortBy);
+  if (options.sortDir) params.set("sortDir", options.sortDir);
+
+  const qs = params.toString();
+  const url = qs ? `/api/devices/paged?${qs}` : "/api/devices/paged";
+  const response = await fetch(url, { headers: authHeaders() });
+  if (!response.ok) {
+    throw new Error("Sayfalanmış cihaz listesi alınamadı.");
+  }
+  return response.json();
+}
+
 /**
  * Kayıtlı bir cihazı sistemden siler.
  * @param uninstallAgent Eğer true ise hedef bilgisayara uzaktan sessiz ajan kaldırma emri gönderilir.
@@ -635,6 +645,7 @@ export type CommandExecutionResponse = {
   requestId: string;
   shell: string;
   command: string;
+  queued?: boolean;
   exitCode: number;
   stdOut: string;
   stdErr: string;
@@ -673,7 +684,7 @@ export async function executeDeviceCommand(
 export async function uninstallApp(
   deviceId: string,
   app: { appName: string; uninstallString?: string; quietUninstallString?: string }
-): Promise<{ success: boolean; appName: string; exitCode: number; stdOut?: string; stdErr?: string; message: string }> {
+): Promise<{ success: boolean; queued?: boolean; appName: string; exitCode: number; stdOut?: string; stdErr?: string; message: string }> {
   const res = await fetch(`/api/devices/${deviceId}/uninstall-app`, {
     method: "POST",
     headers: {
@@ -929,3 +940,27 @@ export async function getActiveAlerts(): Promise<ActiveDeviceAlert[]> {
   return response.json();
 }
 
+/** Desteklenen uzaktan güç eylemleri tipi. */
+export type PowerActionType = "reboot" | "shutdown" | "lock" | "logoff" | "reboot-safe" | "reboot-normal";
+
+export type DevicePowerResult = {
+  success: boolean;
+  action: string;
+  message: string;
+};
+
+/**
+ * Hedef cihaza uzaktan güç komutu (yeniden başlat, kapat, kilitle, oturumu kapat vb.) iletir.
+ */
+export async function sendDevicePowerAction(deviceId: string, action: PowerActionType): Promise<DevicePowerResult> {
+  const response = await fetch(`/api/devices/${deviceId}/power`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ action })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || "Güç eylemi iletilemedi.");
+  }
+  return data;
+}

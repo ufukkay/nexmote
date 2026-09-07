@@ -1,5 +1,5 @@
 import React from "react";
-import { Download, Laptop, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Download, Laptop, Network, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import { DownloadPackage } from "../api";
 
 interface DownloadsViewProps {
@@ -10,9 +10,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ downloads }) => {
   return (
     <div className="content-pane">
       <div className="content-card">
-        <h2 className="content-card-title">Kurulum ve Temizleme Paketleri</h2>
+        <h2 className="content-card-title">Kurulum ve Dağıtım Paketleri</h2>
         <p className="content-card-copy">
-          Hedef istemci bilgisayarlar, teknisyen konsolu ve tek tıkla derin kaldırma araçları.
+          Hedef istemci bilgisayarlar, teknisyen konsolu, uzaktan toplu ajan dağıtım aracı ve derin kaldırma araçları.
         </p>
 
         {/* Zero-Touch Kurulum Bilgi Kartı */}
@@ -27,7 +27,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ downloads }) => {
         >
           <Sparkles size={18} style={{ color: "var(--primary)", flexShrink: 0 }} />
           <div style={{ fontSize: "12.5px", color: "var(--text-main)", lineHeight: 1.5 }}>
-            <strong>💡 Sıfır Kodlu Kurulum (Zero-Touch):</strong> Hedef bilgisayarda komut çalıştırmanıza gerek yoktur. Sadece <strong>NexMote Agent Setup</strong> paketini kurun. Kurulum biter bitmez cihaz web panelinizde belirecektir; ardından cihazı istediğiniz Şirket ve Departmana atadığınızda tüm güvenlik kuralları cihaza anında uygulanacaktır.
+            <strong>💡 Sıfır Kodlu Kurulum (Zero-Touch):</strong> Hedef bilgisayarda komut çalıştırmanıza gerek yoktur. Sadece <strong>NexMote Agent Setup</strong> paketini kurun veya yerel ağdaki cihazlara <strong>NexMote Deployer</strong> ile uzaktan tek tıkla toplu kurulum yapın.
           </div>
         </div>
 
@@ -35,6 +35,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ downloads }) => {
           {downloads.map((pkg) => {
             const isCleanup = pkg.fileName.toLowerCase().includes("cleanup");
             const isTechnician = pkg.fileName.toLowerCase().includes("technician");
+            const isDeployer = pkg.fileName.toLowerCase().includes("deployer");
             const sizeLabel =
               pkg.sizeBytes > 1024 * 1024
                 ? `${(pkg.sizeBytes / (1024 * 1024)).toFixed(1)} MB`
@@ -43,8 +44,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ downloads }) => {
             return (
               <div key={pkg.fileName} className={`package-card ${isCleanup ? "cleanup-card" : ""}`}>
                 <div className="package-main">
-                  <div className={`package-icon ${isCleanup ? "danger-icon" : isTechnician ? "technician-icon" : ""}`}>
-                    {isCleanup ? <Trash2 size={18} /> : isTechnician ? <Laptop size={18} /> : <ShieldCheck size={18} />}
+                  <div className={`package-icon ${isCleanup ? "danger-icon" : isTechnician ? "technician-icon" : isDeployer ? "deployer-icon" : ""}`}>
+                    {isCleanup ? <Trash2 size={18} /> : isTechnician ? <Laptop size={18} /> : isDeployer ? <Network size={18} /> : <ShieldCheck size={18} />}
                   </div>
                   <div>
                     <div className="package-name">

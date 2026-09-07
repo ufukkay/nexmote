@@ -26,19 +26,25 @@ public static class SettingsEndpoints
         {
             var baseUrl = config["PublicUrl"] ?? "https://nexmote.com";
             var versions = downloads.GetVersionInfo();
+            var agentIntegrity = downloads.GetIntegrity("NexMote-Agent-Setup.msi");
+            var technicianIntegrity = downloads.GetIntegrity("NexMote-Technician-Setup.msi");
             return Results.Ok(new
             {
                 agent = new
                 {
                     version = versions.Agent.Version,
                     downloadUrl = $"{baseUrl.TrimEnd('/')}/downloads/NexMote-Agent-Setup.msi",
-                    releaseNotes = versions.Agent.ReleaseNotes
+                    releaseNotes = versions.Agent.ReleaseNotes,
+                    sha256 = versions.Agent.Sha256 ?? agentIntegrity?.Sha256,
+                    sizeBytes = versions.Agent.SizeBytes ?? agentIntegrity?.SizeBytes
                 },
                 technician = new
                 {
                     version = versions.Technician.Version,
                     downloadUrl = $"{baseUrl.TrimEnd('/')}/downloads/NexMote-Technician-Setup.msi",
-                    releaseNotes = versions.Technician.ReleaseNotes
+                    releaseNotes = versions.Technician.ReleaseNotes,
+                    sha256 = versions.Technician.Sha256 ?? technicianIntegrity?.Sha256,
+                    sizeBytes = versions.Technician.SizeBytes ?? technicianIntegrity?.SizeBytes
                 }
             });
         });
@@ -63,12 +69,20 @@ public static class SettingsEndpoints
                 AlertMemoryHighEnabled: setting.AlertMemoryHighEnabled, AlertMemoryHighPercent: setting.AlertMemoryHighPercent));
         });
 
-        admin.MapPost("/settings", (ServerSettingsContract request, IDbContextFactory<AppDbContext> dbFactory, EmailService email) =>
+        admin.MapPost("/settings", (
+            ServerSettingsContract request,
+            HttpContext http,
+            IDbContextFactory<AppDbContext> dbFactory,
+            EmailService email,
+            AuditLogService auditLog) =>
         {
             using var db = dbFactory.CreateDbContext();
             var setting = db.ServerSettings.First();
             setting.ServerUrl = request.ServerUrl.TrimEnd('/');
-            setting.EnrollmentKey = request.EnrollmentKey;
+            if (!string.IsNullOrWhiteSpace(request.EnrollmentKey))
+            {
+                setting.EnrollmentKey = request.EnrollmentKey.Trim();
+            }
             setting.HeartbeatSeconds = Math.Max(5, request.HeartbeatSeconds);
             setting.DefaultLocationCode = request.DefaultLocationCode;
             setting.SmtpHost = request.SmtpHost;
@@ -93,6 +107,20 @@ public static class SettingsEndpoints
             setting.UpdatedAt = DateTimeOffset.UtcNow;
 
             db.SaveChanges();
+
+            auditLog.Log(http, "settings.update", "ServerSetting", "1", new
+            {
+                request.ServerUrl,
+                request.HeartbeatSeconds,
+                request.DefaultLocationCode,
+                request.AlertsEnabled,
+                request.AlertOfflineEnabled,
+                request.AlertDiskLowEnabled,
+                request.AlertCpuHighEnabled,
+                request.AlertMemoryHighEnabled,
+                SmtpConfigured = !string.IsNullOrWhiteSpace(request.SmtpHost)
+            });
+
             return Results.Ok(new ServerSettingsContract(
                 setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
                 SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
@@ -104,13 +132,54 @@ public static class SettingsEndpoints
                 AlertMemoryHighEnabled: setting.AlertMemoryHighEnabled, AlertMemoryHighPercent: setting.AlertMemoryHighPercent));
         });
 
-        admin.MapPost("/admin/settings/smtp/test", async (SmtpTestRequest request, EmailService email) =>
+        admin.MapPost("/admin/settings/smtp/test", async (
+            SmtpTestRequest request,
+            HttpContext http,
+            EmailService email,
+            AuditLogService auditLog) =>
         {
             var (success, error) = await email.SendAsync(
                 request.ToEmail,
                 "NexMote - Test E-postası",
                 "<p>Bu, NexMote sunucunuzun SMTP yapılandırmasını doğrulamak için gönderilen bir test e-postasıdır.</p>");
+
+            auditLog.Log(http, "settings.smtp_test", "ServerSetting", "1", new { toEmail = request.ToEmail, success, error }, success);
+
             return success ? Results.Ok(new { message = "Test e-postası gönderildi." }) : Results.BadRequest(new { message = error });
+        });
+
+        // Veritabanı Yedekleme ve Bakım Endpoint'leri (Madde 6)
+        admin.MapGet("/admin/database/backups", (DatabaseMaintenanceService maintenance) =>
+        {
+            return Results.Ok(maintenance.GetBackups());
+        });
+
+        admin.MapPost("/admin/database/backup", async (
+            HttpContext http,
+            DatabaseMaintenanceService maintenance,
+            AuditLogService auditLog,
+            CancellationToken ct) =>
+        {
+            var result = await maintenance.CreateBackupAsync(ct);
+            if (result.Success)
+            {
+                auditLog.Log(http, "database.backup", "Database", result.BackupFileName, new { result.BackupFileName, result.SizeBytes });
+                return Results.Ok(result);
+            }
+
+            auditLog.Log(http, "database.backup", "Database", "failed", new { result.ErrorMessage }, success: false);
+            return Results.BadRequest(new { message = result.ErrorMessage ?? "Yedekleme oluşturulamadı." });
+        });
+
+        admin.MapPost("/admin/database/maintenance", async (
+            HttpContext http,
+            DatabaseMaintenanceService maintenance,
+            AuditLogService auditLog,
+            CancellationToken ct) =>
+        {
+            var result = await maintenance.PurgeExpiredDataAsync(ct);
+            auditLog.Log(http, "database.maintenance", "Database", "retention_purge", result);
+            return Results.Ok(result);
         });
     }
 }

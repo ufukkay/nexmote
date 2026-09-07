@@ -16,9 +16,9 @@ internal static class AgentSettings
 
     public static string LoadEnrollmentKey()
     {
-        var key = LoadSetting("EnrollmentKey", "4ed67db20bb0167a310129162ba8a831aae0d1d014032086fa67ebe416bb2ec7");
-        return string.IsNullOrWhiteSpace(key) || key == "dev-enrollment-key" || key.StartsWith("CHANGE-ME")
-            ? "4ed67db20bb0167a310129162ba8a831aae0d1d014032086fa67ebe416bb2ec7"
+        var key = LoadSetting("EnrollmentKey", string.Empty);
+        return string.IsNullOrWhiteSpace(key) || key == "dev-enrollment-key" || key.StartsWith("CHANGE-ME", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
             : key;
     }
 

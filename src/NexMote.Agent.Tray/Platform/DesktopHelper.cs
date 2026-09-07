@@ -8,12 +8,18 @@ namespace NexMote.Agent.Tray;
 internal static class DesktopHelper
 {
     private const uint GENERIC_ALL = 0x10000000;
+    private const uint MAXIMUM_ALLOWED = 0x02000000;
+    private const uint DESKTOP_ALL = 0x01FF | MAXIMUM_ALLOWED;
+    private const uint WINSTA_ALL = 0x037F | MAXIMUM_ALLOWED;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr OpenWindowStation(string lpszWinSta, bool fInherit, uint dwDesiredAccess);
 
-    private const uint MAXIMUM_ALLOWED = 0x02000000;
-    private const uint DESKTOP_ALL = 0x01FF | MAXIMUM_ALLOWED;
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetProcessWindowStation(IntPtr hWinSta);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcessWindowStation();
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseWindowStation(IntPtr hWinSta);
@@ -30,13 +36,48 @@ internal static class DesktopHelper
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseDesktop(IntPtr hDesktop);
 
+    [ThreadStatic]
+    private static IntPtr _currentThreadDesktop;
+
+    private static IntPtr _winsta0Handle = IntPtr.Zero;
+    private static readonly object _winstaLock = new();
+
+    /// <summary>
+    /// Sürecin interaktif pencere istasyonuna (winsta0) bağlı olduğundan emin olur.
+    /// </summary>
+    public static void EnsureWindowStation()
+    {
+        try
+        {
+            if (_winsta0Handle == IntPtr.Zero)
+            {
+                lock (_winstaLock)
+                {
+                    if (_winsta0Handle == IntPtr.Zero)
+                    {
+                        var hWinSta = OpenWindowStation("winsta0", false, WINSTA_ALL);
+                        if (hWinSta != IntPtr.Zero)
+                        {
+                            SetProcessWindowStation(hWinSta);
+                            _winsta0Handle = hWinSta;
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
     /// <summary>
     /// Aktif masaüstüne (Default / Winlogon secure desktop) çağıran iş parçacığını iliştirir.
+    /// Handle'ı hemen kapatmayıp iş parçacığı o masaüstünü kullandığı sürece açık tutar.
     /// </summary>
     public static void AttachToActiveDesktop()
     {
         try
         {
+            EnsureWindowStation();
+
             var hDesktop = OpenInputDesktop(0, false, DESKTOP_ALL);
             if (hDesktop == IntPtr.Zero)
             {
@@ -45,22 +86,34 @@ internal static class DesktopHelper
 
             if (hDesktop == IntPtr.Zero)
             {
-                hDesktop = OpenDesktop("Winlogon", 0, false, MAXIMUM_ALLOWED);
+                hDesktop = OpenDesktop("Winlogon", 0, false, DESKTOP_ALL);
             }
 
             if (hDesktop == IntPtr.Zero)
             {
-                hDesktop = OpenDesktop("Default", 0, false, MAXIMUM_ALLOWED);
+                hDesktop = OpenDesktop("Default", 0, false, DESKTOP_ALL);
             }
 
             if (hDesktop != IntPtr.Zero)
             {
-                try
+                if (hDesktop != _currentThreadDesktop)
                 {
-                    SetThreadDesktop(hDesktop);
+                    if (SetThreadDesktop(hDesktop))
+                    {
+                        if (_currentThreadDesktop != IntPtr.Zero)
+                        {
+                            try { CloseDesktop(_currentThreadDesktop); } catch { }
+                        }
+                        _currentThreadDesktop = hDesktop;
+                    }
+                    else
+                    {
+                        CloseDesktop(hDesktop);
+                    }
                 }
-                finally
+                else
                 {
+                    // Zaten bu masaüstü handle'ına bağlıyız; açılan mükerrer handle'ı kapat
                     CloseDesktop(hDesktop);
                 }
             }

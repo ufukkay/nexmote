@@ -74,6 +74,11 @@ public sealed class AppDbContext : DbContext
     /// </summary>
     public DbSet<DeviceAlertEntity> DeviceAlerts => Set<DeviceAlertEntity>();
 
+    /// <summary>
+    /// Agent'a teslim edilecek kalıcı komut ve bakım işleri kuyruğu.
+    /// </summary>
+    public DbSet<DeviceCommandEntity> DeviceCommands => Set<DeviceCommandEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -162,6 +167,13 @@ public sealed class AppDbContext : DbContext
         {
             entity.HasKey(a => a.Id);
             entity.HasIndex(a => new { a.DeviceId, a.ResolvedAt });
+        });
+
+        modelBuilder.Entity<DeviceCommandEntity>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.DeviceId, c.Status, c.CreatedAt });
+            entity.HasIndex(c => c.RequestId).IsUnique();
         });
     }
 }
@@ -387,6 +399,79 @@ public sealed class DeviceAlertEntity
 }
 
 /// <summary>
+/// Web/API tarafından oluşturulan ve agent tarafından ACK/result ile tamamlanan kalıcı cihaz işi.
+/// </summary>
+public sealed class DeviceCommandEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    public Guid RequestId { get; set; }
+
+    public Guid DeviceId { get; set; }
+
+    /// <summary>"command" | "uninstall-app" | "agent-update" | "agent-uninstall".</summary>
+    [Required]
+    [MaxLength(32)]
+    public string Kind { get; set; } = "command";
+
+    [Required]
+    [MaxLength(32)]
+    public string Shell { get; set; } = "powershell";
+
+    [Required]
+    [MaxLength(8000)]
+    public string Command { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(32)]
+    public string Status { get; set; } = DeviceCommandStatuses.Queued;
+
+    public int TimeoutSeconds { get; set; } = 30;
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset? DeliveredAt { get; set; }
+
+    public DateTimeOffset? CompletedAt { get; set; }
+
+    public int? ExitCode { get; set; }
+
+    [MaxLength(2000)]
+    public string? StdOutPreview { get; set; }
+
+    [MaxLength(2000)]
+    public string? StdErrPreview { get; set; }
+
+    public long? DurationMs { get; set; }
+
+    public bool TimedOut { get; set; }
+
+    public bool ElevationDenied { get; set; }
+
+    /// <summary>İşi başlatan teknisyenin kullanıcı kimliği.</summary>
+    public Guid? InitiatorUserId { get; set; }
+
+    /// <summary>İşi başlatan teknisyenin e-posta adresi.</summary>
+    [MaxLength(256)]
+    public string? InitiatorEmail { get; set; }
+
+    /// <summary>İşlemin uçtan uca korelasyon kimliği.</summary>
+    [MaxLength(64)]
+    public string? CorrelationId { get; set; }
+}
+
+public static class DeviceCommandStatuses
+{
+    public const string Queued = "Queued";
+    public const string Delivered = "Delivered";
+    public const string Completed = "Completed";
+    public const string Failed = "Failed";
+    public const string TimedOut = "TimedOut";
+    public const string Canceled = "Canceled";
+}
+
+/// <summary>
 /// İstemcide çalıştırılan CMD/PowerShell komutlarının denetim kaydını tutan veritabanı varlığı.
 /// </summary>
 public sealed class CommandAuditEntity
@@ -427,6 +512,17 @@ public sealed class CommandAuditEntity
 
     /// <summary>Komutun yürütüldüğü zaman damgası.</summary>
     public DateTimeOffset ExecutedAt { get; set; }
+
+    /// <summary>Komutu başlatan teknisyenin kullanıcı kimliği (biliniyorsa).</summary>
+    public Guid? InitiatorUserId { get; set; }
+
+    /// <summary>Komutu başlatan teknisyenin e-posta adresi (biliniyorsa).</summary>
+    [MaxLength(256)]
+    public string? InitiatorEmail { get; set; }
+
+    /// <summary>İsteğin uçtan uca korelasyon kimliği.</summary>
+    [MaxLength(64)]
+    public string? CorrelationId { get; set; }
 }
 
 /// <summary>
@@ -566,6 +662,10 @@ public sealed class ActivityLogEntity
 
     [MaxLength(64)]
     public string? IpAddress { get; set; }
+
+    /// <summary>İsteğin uçtan uca korelasyon kimliği.</summary>
+    [MaxLength(64)]
+    public string? CorrelationId { get; set; }
 
     public bool Success { get; set; } = true;
 

@@ -21,6 +21,8 @@ internal static class SasHelper
 
     public static void SendSas()
     {
+        DesktopHelper.AttachToActiveDesktop();
+
         try
         {
             SendSAS(false);

@@ -25,9 +25,18 @@ public static class CommandRunner
         var stopwatch = Stopwatch.StartNew();
         var isPowerShell = string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase);
         var fileName = isPowerShell ? "powershell.exe" : "cmd.exe";
-        var arguments = isPowerShell
-            ? $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\""
-            : $"/c {command}";
+        string arguments;
+        if (isPowerShell)
+        {
+            var utf8Preamble = "$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); $ProgressPreference = 'SilentlyContinue'; ";
+            var bytes = Encoding.Unicode.GetBytes(utf8Preamble + command);
+            var base64 = Convert.ToBase64String(bytes);
+            arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {base64}";
+        }
+        else
+        {
+            arguments = $"/c \"chcp 65001 >nul & {command}\"";
+        }
 
         var psi = new ProcessStartInfo(fileName, arguments)
         {

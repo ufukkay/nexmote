@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace NexMote.Agent.Tray;
@@ -5,6 +6,7 @@ namespace NexMote.Agent.Tray;
 /// <summary>
 /// Uzaktan gelen fare ve klavye girdilerini önce SYSTEM yetkili Girdi Yardımcısına (Named Pipe) ileten,
 /// yardımcının ulaşılamadığı durumlarda standart Win32 SendInput API'sine geri düşen (fallback) girdi enjektörü.
+/// Kilit ekranı (Winlogon) ve UAC pencerelerinde de sorunsuz enjeksiyon sağlar.
 /// </summary>
 internal static class InputInjector
 {
@@ -23,6 +25,29 @@ internal static class InputInjector
     private const uint KeyboardKeyUp = 0x0002;
     private const uint KeyboardExtendedKey = 0x0001;
 
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    private static Rectangle GetVirtualScreenBounds(Rectangle displayBounds)
+    {
+        var vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        var vWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var vHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        if (vWidth <= 0 || vHeight <= 0)
+        {
+            return displayBounds.Width > 0 ? displayBounds : new Rectangle(0, 0, 1920, 1080);
+        }
+
+        return new Rectangle(vLeft, vTop, vWidth, vHeight);
+    }
+
     public static void MoveMouse(int displayIndex, int x, int y)
     {
         DesktopHelper.AttachToActiveDesktop();
@@ -31,7 +56,7 @@ internal static class InputInjector
         var globalX = displayBounds.Left + x;
         var globalY = displayBounds.Top + y;
 
-        var virtualBounds = SystemInformation.VirtualScreen;
+        var virtualBounds = GetVirtualScreenBounds(displayBounds);
         var clampedX = Math.Clamp(globalX, virtualBounds.Left, virtualBounds.Right - 1);
         var clampedY = Math.Clamp(globalY, virtualBounds.Top, virtualBounds.Bottom - 1);
 
@@ -54,6 +79,7 @@ internal static class InputInjector
                 }
             }
         };
+
         if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
         {
             try

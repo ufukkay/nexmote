@@ -53,4 +53,5 @@ public sealed record FileTransferChunk(
     int ChunkIndex,
     int TotalChunks,
     string Base64Data,
-    bool IsLast);
+    bool IsLast,
+    string? Sha256 = null);

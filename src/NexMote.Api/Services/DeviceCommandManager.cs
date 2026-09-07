@@ -20,26 +20,26 @@ public sealed record DeviceCommandExecutionResult(
 /// </summary>
 public sealed class DeviceCommandManager
 {
-    private readonly ConcurrentDictionary<Guid, TaskCompletionSource<DeviceCommandExecutionResult>> _pendingCommands = new();
+    private readonly ConcurrentDictionary<Guid, PendingDeviceCommand> _pendingCommands = new();
 
     /// <summary>
     /// Yeni bir komut isteği için asenkron bekleme tanımlar.
     /// </summary>
-    public TaskCompletionSource<DeviceCommandExecutionResult> RegisterCommand(Guid requestId)
+    public TaskCompletionSource<DeviceCommandExecutionResult> RegisterCommand(Guid requestId, Guid deviceId)
     {
         var tcs = new TaskCompletionSource<DeviceCommandExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingCommands[requestId] = tcs;
+        _pendingCommands[requestId] = new PendingDeviceCommand(deviceId, tcs);
         return tcs;
     }
 
     /// <summary>
     /// Ajan tarafından SignalR üzerinden dönülen komut sonucunu tamamlar ve bekleyen HTTP isteğini çözer.
     /// </summary>
-    public bool CompleteCommand(DeviceCommandExecutionResult result)
+    public bool CompleteCommand(Guid deviceId, DeviceCommandExecutionResult result)
     {
-        if (_pendingCommands.TryRemove(result.RequestId, out var tcs))
+        if (_pendingCommands.TryGetValue(result.RequestId, out var pending) && pending.DeviceId == deviceId)
         {
-            return tcs.TrySetResult(result);
+            return _pendingCommands.TryRemove(result.RequestId, out _) && pending.Completion.TrySetResult(result);
         }
         return false;
     }
@@ -49,9 +49,11 @@ public sealed class DeviceCommandManager
     /// </summary>
     public void CancelCommand(Guid requestId)
     {
-        if (_pendingCommands.TryRemove(requestId, out var tcs))
+        if (_pendingCommands.TryRemove(requestId, out var pending))
         {
-            tcs.TrySetCanceled();
+            pending.Completion.TrySetCanceled();
         }
     }
 }
+
+internal sealed record PendingDeviceCommand(Guid DeviceId, TaskCompletionSource<DeviceCommandExecutionResult> Completion);

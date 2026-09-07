@@ -1,9 +1,11 @@
+using System.Security.Cryptography;
+
 namespace NexMote.Api.Services;
 
 /// <summary>
 /// Sunucudaki kurulum paketlerini (Agent ve Teknisyen MSI paketleri) ve sürüm bildirimlerini yöneten katalog servisi.
 /// </summary>
-public sealed class DownloadCatalog
+public sealed class DownloadCatalog(ManifestSignatureVerifier manifestSignatureVerifier)
 {
     private readonly IReadOnlyList<DownloadPackage> _packages =
     [
@@ -26,6 +28,13 @@ public sealed class DownloadCatalog
             "NexMote Tam Kaldırıcı & Derin Temizleyici (MSI)",
             "Cihazda bulunan tüm NexMote Ajanı, Teknisyen Konsolu, Windows Servisi, Kayıt Defteri anahtarları ve artık dosyalarını derinlemesine tamamen kaldırır ve temizler.",
             "NexMote-Cleanup-Setup.msi",
+            "Türkçe",
+            true),
+        new(
+            "deployer",
+            "NexMote Uzaktan Ajan Dağıtım Aracı (Deployer)",
+            "Yerel ağdaki bilgisayarlara (tekli IP veya IP aralığı) uzaktan yönetici kimlik bilgileriyle sessizce NexMote Ajanı kurar ve canlı sonuç raporu sunar.",
+            "NexMote-Deployer-Setup.msi",
             "Türkçe",
             true)
     ];
@@ -99,6 +108,13 @@ public sealed class DownloadCatalog
         {
             try
             {
+                var signaturePath = Path.Combine(DownloadsPath, "versions.json.sig");
+                var signatureResult = manifestSignatureVerifier.Verify(path, signaturePath);
+                if (signatureResult.IsConfigured && !signatureResult.IsValid)
+                {
+                    throw new InvalidOperationException(signatureResult.Error ?? "Update manifest signature verification failed.");
+                }
+
                 var manifest = System.Text.Json.JsonSerializer.Deserialize<VersionManifest>(
                     File.ReadAllText(path),
                     new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -115,6 +131,20 @@ public sealed class DownloadCatalog
 
         var fallback = new PackageVersionInfo("0.0.0", "Sürüm bilgisi bulunamadı.");
         return new VersionManifest(fallback, fallback);
+    }
+
+    public PackageIntegrity? GetIntegrity(string fileName)
+    {
+        var file = GetFile(fileName);
+        if (file is null)
+        {
+            return null;
+        }
+
+        using var stream = File.OpenRead(file.Path);
+        var sha256 = Convert.ToHexString(SHA256.HashData(stream));
+        var sizeBytes = new FileInfo(file.Path).Length;
+        return new PackageIntegrity(sha256, sizeBytes);
     }
 
     /// <summary>
@@ -206,7 +236,10 @@ public sealed record DownloadPackageInfo(
 public sealed record DownloadFile(string Path, string FileName, string ContentType);
 
 /// <summary>Tekil paket sürüm bilgisi ve sürüm notları.</summary>
-public sealed record PackageVersionInfo(string Version, string ReleaseNotes);
+public sealed record PackageVersionInfo(string Version, string ReleaseNotes, string? Sha256 = null, long? SizeBytes = null);
+
+/// <summary>Kurulum paketinin bütünlük bilgisi.</summary>
+public sealed record PackageIntegrity(string Sha256, long SizeBytes);
 
 /// <summary>Agent ve Teknisyen sürümlerini içeren manifest.</summary>
 public sealed record VersionManifest(PackageVersionInfo Agent, PackageVersionInfo Technician);

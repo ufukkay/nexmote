@@ -7,6 +7,8 @@ internal sealed class UpdateProgressForm : Form
 {
     private readonly string _downloadUrl;
     private readonly string _targetVersion;
+    private readonly string? _expectedSha256;
+    private readonly long? _expectedSizeBytes;
     private readonly ProgressBar _progressBar;
     private readonly Label _lblStage;
     private readonly Label _lblDetails;
@@ -15,10 +17,12 @@ internal sealed class UpdateProgressForm : Form
     private readonly CancellationTokenSource _cts = new();
     private bool _isFinished;
 
-    public UpdateProgressForm(string downloadUrl, string targetVersion)
+    public UpdateProgressForm(string downloadUrl, string targetVersion, string? expectedSha256 = null, long? expectedSizeBytes = null)
     {
         _downloadUrl = downloadUrl;
         _targetVersion = targetVersion;
+        _expectedSha256 = expectedSha256;
+        _expectedSizeBytes = expectedSizeBytes;
 
         Text = "NexMote Ajan Güncellemesi";
         ClientSize = new Size(520, 230);
@@ -162,14 +166,14 @@ internal sealed class UpdateProgressForm : Form
 
         try
         {
-            await RemoteScreenStreamer.PerformSelfUpdateAsync(_downloadUrl, progress, _cts.Token);
+            await RemoteScreenStreamer.PerformSelfUpdateAsync(_downloadUrl, progress, _cts.Token, _expectedSha256, _expectedSizeBytes);
             _isFinished = true;
 
             _progressBar.Value = 100;
             _lblPercent.Text = "%100";
             _lblPercent.ForeColor = Color.FromArgb(0x10, 0xB9, 0x81);
-            _lblStage.Text = "✓ Güncelleme ve kurulum başarıyla tamamlandı!";
-            _lblDetails.Text = "Yeni sürüm devrede. Ajan yenileniyor...";
+            _lblStage.Text = "Güncelleme paketi hazırlandı.";
+            _lblDetails.Text = "Windows Servisi kurulumu arka planda sessizce tamamlayacak.";
             _btnAction.Text = "Kapat";
             _btnAction.ForeColor = Color.White;
             _btnAction.BackColor = Color.FromArgb(0x10, 0xB9, 0x81);

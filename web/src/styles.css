@@ -1568,6 +1568,16 @@ button, input, select, textarea {
   flex-shrink: 0;
 }
 
+.package-icon.technician-icon {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0ea5e9;
+}
+
+.package-icon.deployer-icon {
+  background: rgba(99, 102, 241, 0.12);
+  color: #6366f1;
+}
+
 .package-name {
   font-weight: 600;
   color: var(--text-main);
@@ -2061,6 +2071,177 @@ button, input, select, textarea {
 .detail-nav-action-btn.danger:hover {
   background: #fee2e2;
   border-color: #fca5a5;
+}
+
+/* Power Menu & Dropdown */
+.power-menu-container {
+  position: relative;
+  display: inline-flex;
+}
+
+.detail-nav-action-btn.power {
+  color: #d97706;
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.detail-nav-action-btn.power:hover:not(:disabled) {
+  background: #fef3c7;
+  border-color: #fcd34d;
+  color: #b45309;
+}
+
+.detail-nav-action-btn.power:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.power-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 250px;
+  background: var(--bg-surface, #ffffff);
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 10px;
+  box-shadow: 0 12px 30px -4px rgba(0, 0, 0, 0.12), 0 6px 12px -4px rgba(0, 0, 0, 0.08);
+  padding: 6px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: powerDropdownFade 0.15s ease-out;
+}
+
+@keyframes powerDropdownFade {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.power-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  width: 100%;
+}
+
+.power-dropdown-item:hover {
+  background: var(--bg-canvas, #f8fafc);
+}
+
+.power-item-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.power-item-icon.amber {
+  background: #fef3c7;
+  color: #d97706;
+}
+
+.power-item-icon.danger {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.power-item-icon.blue {
+  background: #e0f2fe;
+  color: #0284c7;
+}
+
+.power-item-icon.purple {
+  background: #f3e8ff;
+  color: #7e22ce;
+}
+
+.power-item-icon.orange {
+  background: #ffedd5;
+  color: #ea580c;
+}
+
+.power-dropdown-divider {
+  height: 1px;
+  background: var(--border-color, #e2e8f0);
+  margin: 4px 6px;
+}
+
+.power-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.power-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-main, #1e293b);
+}
+
+.power-item-desc {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+}
+
+.power-warning-card {
+  background: #f8fafc;
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-main, #334155);
+}
+
+.btn-warning {
+  background: #f59e0b;
+  color: #ffffff;
+  border: 1px solid #d97706;
+  padding: 7px 14px;
+  border-radius: var(--radius-control, 6px);
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: #d97706;
+}
+
+.btn-warning:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.modal-icon-badge.warn {
+  background: #fef3c7;
+  color: #d97706;
+}
+
+.modal-icon-badge.purple {
+  background: #f3e8ff;
+  color: #7e22ce;
 }
 
 /* Segmented Navigation Tabs */
@@ -2955,13 +3136,17 @@ button, input, select, textarea {
 }
 
 /* Silent App Uninstall Modal Styles */
+.modal-uninstall-app {
+  max-width: 520px;
+}
+
 .uninstall-app-summary-card {
   display: flex;
   align-items: center;
   gap: 14px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-control);
+  background: var(--bg-base, #f8fafc);
+  border: 1px solid var(--border-subtle, #e2e8f0);
+  border-radius: var(--radius-control, 8px);
   padding: 14px 16px;
   margin-bottom: 14px;
 }
@@ -2971,7 +3156,7 @@ button, input, select, textarea {
   height: 42px;
   border-radius: 10px;
   background: #eff6ff;
-  color: var(--primary);
+  color: #2563eb;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2987,9 +3172,9 @@ button, input, select, textarea {
 }
 
 .uninstall-app-name {
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--text-main, #0f172a);
   margin: 0;
 }
 
@@ -2998,7 +3183,7 @@ button, input, select, textarea {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--text-subtle);
+  color: var(--text-dim, #64748b);
   flex-wrap: wrap;
 }
 
@@ -3673,6 +3858,20 @@ button, input, select, textarea {
   border-top: 1px solid var(--border-subtle, #e2e8f0);
   background: var(--bg-base, #f8fafc);
   flex-shrink: 0;
+}
+
+.modal-footer button {
+  height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 
 /* Modal Form Inputs & Controls (Zero Layout Shift) */

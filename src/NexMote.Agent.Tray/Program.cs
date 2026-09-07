@@ -265,7 +265,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _signalingTimer.Tick += async (_, _) =>
         {
             await _streamer.EnsureStartedAsync();
-            _signalingTimer.Interval = _streamer.IsConnected ? 5000 : 1000;
+            _signalingTimer.Interval = _streamer.IsConnected ? 5000 : 8000;
         };
         _signalingTimer.Start();
 
@@ -565,6 +565,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 var latestVersion = verProp.GetString();
                 var downloadUrl = urlProp.GetString();
                 var releaseNotes = agent.TryGetProperty("releaseNotes", out var notesProp) ? notesProp.GetString() : "Performans ve kararlılık iyileştirmesi.";
+                var expectedSha256 = agent.TryGetProperty("sha256", out var sha256Prop) ? sha256Prop.GetString() : null;
+                var expectedSizeBytes = agent.TryGetProperty("sizeBytes", out var sizeProp) && sizeProp.TryGetInt64(out var parsedSize)
+                    ? parsedSize
+                    : (long?)null;
 
                 var runningVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.7.0";
                 var isNewer = Version.TryParse(latestVersion, out var latest) &&
@@ -598,7 +602,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
                     if (prompt == DialogResult.Yes && !string.IsNullOrEmpty(downloadUrl))
                     {
-                        using var progressForm = new UpdateProgressForm(downloadUrl, latestVersion ?? "0.7.0");
+                        using var progressForm = new UpdateProgressForm(downloadUrl, latestVersion ?? "0.7.0", expectedSha256, expectedSizeBytes);
                         progressForm.ShowDialog();
                     }
                 }
@@ -606,7 +610,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 {
                     // Arka plan otomatik güncellemesi: Kullanıcıyı rahatsız etmeden sessizce indir ve kur
                     _statusItem.Text = "Servis durumu: arka plan güncellemesi indiriliyor...";
-                    await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl);
+                    await RemoteScreenStreamer.PerformSelfUpdateAsync(downloadUrl, expectedSha256: expectedSha256, expectedSizeBytes: expectedSizeBytes);
                 }
             }
             else if (isManual)

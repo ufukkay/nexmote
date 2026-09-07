@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
@@ -38,7 +39,7 @@ public sealed class RemoteSessionRegistry
         {
             Id = id,
             DeviceId = deviceId,
-            Token = token,
+            Token = HashToken(token),
             CreatedAt = now,
             ExpiresAt = expiresAt
         };
@@ -46,8 +47,17 @@ public sealed class RemoteSessionRegistry
         db.RemoteSessions.Add(entity);
         db.SaveChanges();
 
+        var normalizedServerUrl = serverUrl.TrimEnd('/');
+        if (Uri.TryCreate(normalizedServerUrl, UriKind.Absolute, out var parsedUri) &&
+            (parsedUri.Host.Equals("nexmote.com", StringComparison.OrdinalIgnoreCase) ||
+             parsedUri.Host.Equals("www.nexmote.com", StringComparison.OrdinalIgnoreCase) ||
+             parsedUri.Host.EndsWith(".nexmote.com", StringComparison.OrdinalIgnoreCase)))
+        {
+            normalizedServerUrl = "https://nexmote.com";
+        }
+
         // Teknisyen masaüstü uygulamasını tetikleyen custom URI protokol formatı
-        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(serverUrl.TrimEnd('/'))}&deviceId={deviceId}";
+        var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(normalizedServerUrl)}&deviceId={deviceId}";
         return new CreateRemoteSessionResponse(id, deviceId, launchUri, expiresAt);
     }
 
@@ -65,17 +75,18 @@ public sealed class RemoteSessionRegistry
             return null;
         }
 
-        return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
+        return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt);
     }
 
     public RemoteSessionRecord? Activate(Guid sessionId, string token)
     {
         using var db = _dbFactory.CreateDbContext();
 
+        var tokenHash = HashToken(token);
         var session = db.RemoteSessions.FirstOrDefault(s => s.Id == sessionId);
         if (session is null ||
             session.ExpiresAt <= DateTimeOffset.UtcNow ||
-            !string.Equals(session.Token, token, StringComparison.Ordinal))
+            !string.Equals(session.Token, tokenHash, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
@@ -83,7 +94,7 @@ public sealed class RemoteSessionRegistry
         session.ExpiresAt = DateTimeOffset.UtcNow.Add(ActiveSessionLifetime);
         db.SaveChanges();
 
-        return new RemoteSessionRecord(session.Id, session.DeviceId, session.Token, session.ExpiresAt);
+        return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt);
     }
 
     public void Expire(Guid sessionId)
@@ -96,10 +107,12 @@ public sealed class RemoteSessionRegistry
             db.SaveChanges();
         }
     }
+
+    private static string HashToken(string token) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 }
 
 /// <summary>
 /// Bellek içi ve oturum sorgularında kullanılan aktif oturum kaydı.
 /// </summary>
 public sealed record RemoteSessionRecord(Guid Id, Guid DeviceId, string Token, DateTimeOffset ExpiresAt);
-

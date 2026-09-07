@@ -99,3 +99,14 @@ public static class QualityModes
     public const string Balanced = "balanced";
     public const string Quality = "quality";
 }
+
+/// <summary>
+/// WebRTC P2P doğrudan veri kanalı müzakeresi için sinyalleşme kontratı (Offer, Answer, ICE Candidate).
+/// </summary>
+public sealed record WebRtcSignalMessage(
+    string Type,
+    string? Sdp = null,
+    string? Candidate = null,
+    string? SdpMid = null,
+    int? SdpMLineIndex = null);
+

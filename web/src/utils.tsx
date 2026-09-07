@@ -75,16 +75,17 @@ export function cleanUserName(rawUser?: string): string {
   return user || "—";
 }
 
-export function formatUptime(seconds: number): string {
+export function formatUptime(seconds?: number): string {
+  if (!seconds || seconds <= 0) return "—";
   if (seconds < 60) return `${seconds} sn`;
   const m = Math.floor(seconds / 60);
   if (m < 60) return `${m} dk`;
   const h = Math.floor(m / 60);
   const remM = m % 60;
-  if (h < 24) return `${h} sa ${remM} dk`;
+  if (h < 24) return `${h} saat ${remM} dk`;
   const d = Math.floor(h / 24);
   const remH = h % 24;
-  return `${d} gün ${remH} sa`;
+  return `${d} gün ${remH} saat (${h} saat)`;
 }
 
 export function formatOsName(rawOs?: string): string {

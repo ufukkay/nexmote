@@ -1,10 +1,20 @@
 ﻿{
-    "agent":  {
-                  "version":  "0.7.0",
-                  "releaseNotes":  "v0.7.0 Durum paneli canli otomatik tazeleme eklendi."
-              },
-    "technician":  {
-                       "version":  "0.7.0",
-                       "releaseNotes":  "v0.7.0 Ust arac cubugu sadelestirildi."
-                   }
+  "agent": {
+    "version": "0.7.3",
+    "releaseNotes": "NexMote Agent v0.7.3 güncellemesi.",
+    "sha256": "083AD49266A3FB5103A042ACCF73F94C521774D8987F959B32B35E01C0637F24",
+    "sizeBytes": 161726464
+  },
+  "technician": {
+    "version": "0.7.3",
+    "releaseNotes": "NexMote Teknisyen Konsolu v0.7.3 güncellemesi.",
+    "sha256": "4EBA403954E5A26E152D2D407D636961F933F922AA0C68AB008BC5C663DC5625",
+    "sizeBytes": 64319488
+  },
+  "deployer": {
+    "version": "0.7.3",
+    "releaseNotes": "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
+    "sha256": "4A91DAA2962AA3D0901D63C2740FD698661FEA89D79D5EE28A9A39C8907E17C5",
+    "sizeBytes": 64163840
+  }
 }

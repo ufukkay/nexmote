@@ -33,7 +33,7 @@ internal static class CommandRunner
 
         if (isPowerShell)
         {
-            var psScript = $"{command} *>&1 | Out-File -FilePath '{outFile}' -Encoding utf8";
+            var psScript = $"$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); $ProgressPreference = 'SilentlyContinue'; {command} *>&1 | Out-File -FilePath '{outFile}' -Encoding utf8";
             var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
             arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encodedScript}";
         }
@@ -94,7 +94,7 @@ internal static class CommandRunner
         {
             if (File.Exists(outFile))
             {
-                output = await File.ReadAllTextAsync(outFile);
+                output = await File.ReadAllTextAsync(outFile, Encoding.UTF8);
                 File.Delete(outFile);
             }
         }
@@ -116,9 +116,18 @@ internal static class CommandRunner
         var stopwatch = Stopwatch.StartNew();
         var isPowerShell = string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase);
         var fileName = isPowerShell ? "powershell.exe" : "cmd.exe";
-        var arguments = isPowerShell
-            ? $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\""
-            : $"/c {command}";
+        string arguments;
+        if (isPowerShell)
+        {
+            var utf8Preamble = "$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); $ProgressPreference = 'SilentlyContinue'; ";
+            var bytes = Encoding.Unicode.GetBytes(utf8Preamble + command);
+            var base64 = Convert.ToBase64String(bytes);
+            arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {base64}";
+        }
+        else
+        {
+            arguments = $"/c \"chcp 65001 >nul & {command}\"";
+        }
 
         var psi = new ProcessStartInfo(fileName, arguments)
         {

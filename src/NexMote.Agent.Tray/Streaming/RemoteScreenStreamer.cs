@@ -2,12 +2,16 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Http.Json;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR.Client;
 using NexMote.Shared.Contracts;
 using NexMote.Shared.Identity;
 using NexMote.Shared.Network;
+using NexMote.Shared.Security;
 
 namespace NexMote.Agent.Tray;
 
@@ -31,11 +35,12 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private int _adaptiveQuality = 72;
     private readonly object _qualityLock = new();
     private readonly ConcurrentDictionary<int, long> _lastAckedSequencePerDisplay = new();
-    private readonly Dictionary<Guid, (MemoryStream Stream, string FileName)> _activeTransfers = new();
+    private readonly Dictionary<Guid, ActiveFileTransfer> _activeTransfers = new();
     private NamedPipeClientStream? _inputHelperPipe;
     private StreamWriter? _inputHelperWriter;
     private long _nextPipeConnectAttemptTicks;
     private readonly object _pipeLock = new();
+    private WebRtcPeerTransport? _webRtc;
 
     private readonly Func<Task>? _onSecurityProfileUpdated;
 
@@ -44,9 +49,10 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _serverUrl = serverUrl;
         _setStatus = setStatus;
         _onSecurityProfileUpdated = onSecurityProfileUpdated;
+        StartWakeupListener();
     }
 
-    public bool IsConnected => _connection?.State == HubConnectionState.Connected;
+    public bool IsConnected => _connection?.State == HubConnectionState.Connected && _joinedDeviceGroup;
 
     public void SetSecurityProfile(AgentSecurityProfileResponse? profile)
     {
@@ -67,7 +73,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
     public async Task EnsureStartedAsync()
     {
-        if (_disposed || _starting || (_connection?.State == HubConnectionState.Connected && _joinedDeviceGroup))
+        if (_disposed || _starting || _connection?.State == HubConnectionState.Reconnecting || (_connection?.State == HubConnectionState.Connected && _joinedDeviceGroup))
         {
             return;
         }
@@ -87,6 +93,49 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
     }
 
+    private void StartWakeupListener()
+    {
+        _ = Task.Run(async () =>
+        {
+            var sessionId = Process.GetCurrentProcess().SessionId;
+            var pipeName = $"NexMote_Session_Wakeup_{sessionId}";
+
+            while (!_disposed)
+            {
+                try
+                {
+                    var security = new PipeSecurity();
+                    security.AddAccessRule(new PipeAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                        PipeAccessRights.ReadWrite,
+                        AccessControlType.Allow));
+
+                    using var server = NamedPipeServerStreamAcl.Create(
+                        pipeName,
+                        PipeDirection.In,
+                        maxNumberOfServerInstances: 2,
+                        PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous,
+                        inBufferSize: 1024,
+                        outBufferSize: 1024,
+                        security);
+
+                    await server.WaitForConnectionAsync();
+                    using var reader = new StreamReader(server, Encoding.UTF8);
+                    var line = await reader.ReadLineAsync();
+                    if (Guid.TryParse(line?.Trim(), out var requestedSessionId))
+                    {
+                        _ = HandleRemoteSessionRequestedAsync(requestedSessionId);
+                    }
+                }
+                catch
+                {
+                    await Task.Delay(1000);
+                }
+            }
+        });
+    }
+
     private async Task ConnectAsync()
     {
         _identity = DeviceIdentityFile.Load();
@@ -104,7 +153,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         if (_connection is not null)
         {
-            await _connection.DisposeAsync();
+            try { await _connection.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
             _joinedDeviceGroup = false;
         }
 
@@ -114,7 +163,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             {
                 options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
             })
-            .WithAutomaticReconnect()
+            .WithAutomaticReconnect(new InfiniteRetryPolicy())
             .Build();
 
         _connection.On<ConnectionConsentRequest>("PromptConsentRequested", request =>
@@ -203,6 +252,25 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             {
                 HandleSetQualityMode(payload);
             }
+            else if (string.Equals(type, "webrtc-signal", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var signal = JsonSerializer.Deserialize<WebRtcSignalMessage>(payload);
+                    if (signal != null && _webRtc != null)
+                    {
+                        if (string.Equals(signal.Type, "offer", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(signal.Sdp))
+                        {
+                            _ = _webRtc.HandleOfferAsync(signal.Sdp);
+                        }
+                        else if (string.Equals(signal.Type, "candidate", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(signal.Candidate))
+                        {
+                            _webRtc.HandleCandidate(signal.Candidate, signal.SdpMid, signal.SdpMLineIndex);
+                        }
+                    }
+                }
+                catch { }
+            }
             else if (string.Equals(type, "refresh-screen", StringComparison.OrdinalIgnoreCase))
             {
                 for (var i = 1; i <= ScreenCapture.GetDisplayCount(); i++)
@@ -250,12 +318,18 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         _connection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
         {
-            var result = await CommandRunner.RunAsync(shell, command, 60000, runAsAdmin);
+            if (IsWindowsServiceRunning())
+            {
+                return;
+            }
+
+            var result = await CommandRunner.RunAsync(shell, command, 120000, runAsAdmin);
             try
             {
                 if (_connection?.State == HubConnectionState.Connected)
                 {
                     await _connection.InvokeAsync("SubmitCommandResult",
+                        _identity.DeviceId,
                         requestId,
                         result.ExitCode,
                         result.StdOut,
@@ -263,6 +337,18 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                         result.DurationMs,
                         result.TimedOut,
                         result.ElevationDenied);
+                }
+            }
+            catch { }
+        });
+
+        _connection.On<string>("ExecutePowerAction", action =>
+        {
+            try
+            {
+                if (!TrySendToInputHelper(JsonSerializer.Serialize(new RemoteInputEvent(_activeSessionId ?? Guid.Empty, "power-action", Button: action))))
+                {
+                    PowerHelper.Execute(action);
                 }
             }
             catch { }
@@ -295,10 +381,19 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         {
             _joinedDeviceGroup = false;
             _setStatus($"kapandi ({error?.Message ?? "baglanti kapandi"})");
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2000);
+                if (!_disposed)
+                {
+                    await EnsureStartedAsync();
+                }
+            });
             return Task.CompletedTask;
         };
 
-        await _connection.StartAsync();
+        using var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await _connection.StartAsync(connectCts.Token);
         try
         {
             await JoinDeviceAsync();
@@ -308,7 +403,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         catch
         {
             _joinedDeviceGroup = false;
-            await _connection.DisposeAsync();
+            try { await _connection.DisposeAsync(); } catch { }
             _connection = null;
             throw;
         }
@@ -355,31 +450,58 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     {
         if (_connection is null || _identity is null)
         {
-            return;
+            throw new InvalidOperationException("Cihaz kanalina katilmak icin baglanti ve cihaz kimligi gerekli.");
         }
 
         try
         {
-            await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken);
+            await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken, "tray");
         }
-        catch (Exception)
+        catch (Exception firstError)
         {
-            try
+            _joinedDeviceGroup = false;
+            // Reload the service-owned identity without rotating it on an unrelated hub error.
+            var refreshed = DeviceIdentityFile.Load();
+            if (refreshed is null ||
+                (refreshed.DeviceId == _identity.DeviceId && refreshed.AgentToken == _identity.AgentToken))
             {
-                var enrollKey = AgentSettings.LoadEnrollmentKey();
-                var refreshed = await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
-                if (refreshed is not null)
-                {
-                    _identity = refreshed;
-                    await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken);
-                }
+                throw new InvalidOperationException("Cihaz dinleme kanalina katilinamadi; baglanti yeniden denenecek.", firstError);
             }
-            catch { }
+
+            _identity = refreshed;
+            await _connection.InvokeAsync("JoinDevice", _identity.DeviceId, _identity.AgentToken, "tray");
+        }
+    }
+
+    private static bool IsWindowsServiceRunning()
+    {
+        try
+        {
+            return Process.GetProcessesByName("NexMote.Agent.Windows").Length > 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
     private async Task HandleRemoteSessionRequestedAsync(Guid sessionId)
     {
+        if (_activeSessionId == sessionId && _connection?.State == HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        if (_identity is null)
+        {
+            _identity = DeviceIdentityFile.Load();
+        }
+
+        if (_connection is null || _connection.State != HubConnectionState.Connected)
+        {
+            await EnsureStartedAsync();
+        }
+
         if (_connection is null || _identity is null)
         {
             return;
@@ -417,6 +539,30 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _streamCancellation?.Dispose();
         _streamCancellation = new CancellationTokenSource();
         _activeSessionId = sessionId;
+
+        // WebRTC P2P DataChannel eşleşmesini başlat (Madde 1)
+        try
+        {
+            _webRtc?.Dispose();
+            _webRtc = new WebRtcPeerTransport();
+            _webRtc.OnSignalReady += (signal) =>
+            {
+                if (_connection?.State == HubConnectionState.Connected && _activeSessionId == sessionId)
+                {
+                    var json = JsonSerializer.Serialize(signal);
+                    _ = _connection.InvokeAsync("SendSignal", sessionId, "webrtc-signal", json);
+                }
+            };
+            _webRtc.OnDataMessageReceived += (channel, text) =>
+            {
+                if (string.Equals(channel, "input", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleRemoteInput(text);
+                }
+            };
+        }
+        catch { }
+
         _ = SendScreenInfoAsync(sessionId);
 
         var token = _streamCancellation.Token;
@@ -633,27 +779,95 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     {
         try
         {
+            CleanupStaleTransfers();
+
             var chunk = JsonSerializer.Deserialize<FileTransferChunk>(payload);
             if (chunk is null || _activeSessionId != chunk.SessionId)
             {
                 return;
             }
 
-            if (!_activeTransfers.TryGetValue(chunk.TransferId, out var state))
+            // Boyut sınırı kontrolü (Madde 8: En fazla 500 MB)
+            if (chunk.TotalSize > FileTransferValidator.MaxFileSizeBytes)
             {
-                state = (new MemoryStream(), chunk.FileName);
-                _activeTransfers[chunk.TransferId] = state;
+                _setStatus($"dosya aktarımı reddedildi: dosya boyutu sınırı aşıldı ({chunk.TotalSize / (1024 * 1024)} MB > 500 MB)");
+                return;
+            }
+
+            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var incomingDir = Path.Combine(programData, "NexMote", "Agent", "Incoming");
+            Directory.CreateDirectory(incomingDir);
+
+            if (!_activeTransfers.TryGetValue(chunk.TransferId, out var transfer))
+            {
+                var safeName = FileTransferValidator.SanitizeFileName(chunk.FileName);
+                var tempPath = Path.Combine(incomingDir, $".{chunk.TransferId:N}.part");
+                var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
+                transfer = new ActiveFileTransfer(chunk.TransferId, safeName, tempPath, fileStream, chunk.TotalSize);
+                _activeTransfers[chunk.TransferId] = transfer;
             }
 
             var bytes = Convert.FromBase64String(chunk.Base64Data);
-            state.Stream.Write(bytes, 0, bytes.Length);
-            _setStatus($"dosya aliniyor: {state.FileName} ({chunk.ChunkIndex + 1}/{chunk.TotalChunks})");
+            if (bytes.Length > FileTransferValidator.MaxChunkSizeBytes)
+            {
+                throw new InvalidOperationException("Parça boyutu maksimum 1 MB sınırını aşıyor.");
+            }
+
+            transfer.Stream.Write(bytes, 0, bytes.Length);
+            transfer.BytesReceived += bytes.Length;
+            transfer.LastActivityUtc = DateTimeOffset.UtcNow;
+            _setStatus($"dosya aliniyor: {transfer.SafeFileName} ({chunk.ChunkIndex + 1}/{chunk.TotalChunks})");
 
             if (chunk.IsLast)
             {
                 _activeTransfers.Remove(chunk.TransferId);
-                SaveIncomingFile(state.FileName, state.Stream.ToArray());
-                state.Stream.Dispose();
+                transfer.Stream.Flush();
+
+                // SHA-256 Bütünlük / Checksum Doğrulaması (Madde 8)
+                if (!string.IsNullOrWhiteSpace(chunk.Sha256))
+                {
+                    transfer.Stream.Position = 0;
+                    var actualSha = FileTransferValidator.ComputeStreamSha256(transfer.Stream);
+                    if (!FileTransferValidator.VerifyChecksum(actualSha, chunk.Sha256))
+                    {
+                        transfer.Dispose();
+                        try { File.Delete(transfer.TempFilePath); } catch { }
+                        _setStatus($"dosya aktarımı reddedildi: SHA-256 hash uyuşmazlığı ({transfer.SafeFileName})");
+                        return;
+                    }
+                }
+
+                transfer.Dispose();
+
+                // Atomik olarak kalıcı dosyaya taşı
+                var targetPath = Path.Combine(incomingDir, transfer.SafeFileName);
+                if (File.Exists(targetPath))
+                {
+                    var ext = Path.GetExtension(transfer.SafeFileName);
+                    var baseName = Path.GetFileNameWithoutExtension(transfer.SafeFileName);
+                    targetPath = Path.Combine(incomingDir, $"{baseName}_{DateTime.Now:HHmmss}{ext}");
+                }
+
+                File.Move(transfer.TempFilePath, targetPath, overwrite: true);
+                _setStatus($"dosya alindi: {Path.GetFileName(targetPath)}");
+
+                // Uzak işletim sisteminin panosuna yerleştir (Madde 3: Clipboard File Drop)
+                try
+                {
+                    var staThread = new Thread(() =>
+                    {
+                        try
+                        {
+                            var dropList = new System.Collections.Specialized.StringCollection { targetPath };
+                            Clipboard.SetFileDropList(dropList);
+                        }
+                        catch { }
+                    });
+                    staThread.SetApartmentState(ApartmentState.STA);
+                    staThread.IsBackground = true;
+                    staThread.Start();
+                }
+                catch { }
             }
         }
         catch (Exception ex)
@@ -662,35 +876,33 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         }
     }
 
-    private void SaveIncomingFile(string fileName, byte[] data)
+    private void CleanupStaleTransfers()
     {
         try
         {
-            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            var incomingDir = Path.Combine(programData, "NexMote", "Agent", "Incoming");
-            Directory.CreateDirectory(incomingDir);
+            var cutoff = DateTimeOffset.UtcNow - FileTransferValidator.TransferTimeout;
+            var staleKeys = _activeTransfers
+                .Where(kvp => kvp.Value.LastActivityUtc < cutoff)
+                .Select(kvp => kvp.Key)
+                .ToList();
 
-            var safeName = string.Join("_", fileName.Split(Path.GetInvalidFileNameChars()));
-            if (string.IsNullOrWhiteSpace(safeName))
+            foreach (var key in staleKeys)
             {
-                safeName = "dosya.bin";
+                if (_activeTransfers.Remove(key, out var stale))
+                {
+                    try
+                    {
+                        stale.Dispose();
+                        if (File.Exists(stale.TempFilePath))
+                        {
+                            File.Delete(stale.TempFilePath);
+                        }
+                    }
+                    catch { }
+                }
             }
-
-            var targetPath = Path.Combine(incomingDir, safeName);
-            if (File.Exists(targetPath))
-            {
-                var ext = Path.GetExtension(safeName);
-                var baseName = Path.GetFileNameWithoutExtension(safeName);
-                targetPath = Path.Combine(incomingDir, $"{baseName}_{DateTime.Now:HHmmss}{ext}");
-            }
-
-            File.WriteAllBytes(targetPath, data);
-            _setStatus($"dosya alindi: {Path.GetFileName(targetPath)}");
         }
-        catch (Exception ex)
-        {
-            _setStatus($"dosya kaydedilemedi ({ex.Message})");
-        }
+        catch { }
     }
 
     private async Task HandleRemoteCommandAsync(string payload)
@@ -858,7 +1070,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                         CapturedAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
 
                     var sendStopwatch = Stopwatch.StartNew();
-                    await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
+                    var sentViaP2p = _webRtc?.SendData("stream", payload) ?? false;
+                    if (!sentViaP2p)
+                    {
+                        await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
+                    }
                     sendStopwatch.Stop();
 
                     if (!isRefinement)
@@ -1011,14 +1227,17 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     public static async Task PerformSelfUpdateAsync(
         string msiUrl,
         IProgress<(long BytesRead, long TotalBytes, string Stage)>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? expectedSha256 = null,
+        long? expectedSizeBytes = null)
     {
+        var tempMsi = string.Empty;
         try
         {
             var programDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
             Directory.CreateDirectory(programDataDir);
             var pendingMsi = Path.Combine(programDataDir, "pending-update.msi");
-            var tempMsi = Path.Combine(programDataDir, "pending-update.tmp");
+            tempMsi = Path.Combine(programDataDir, $"pending-update-{Guid.NewGuid():N}.tmp");
 
             using var http = NexMoteHttp.CreateClient();
             using var response = await http.GetAsync(msiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -1043,70 +1262,46 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 }
             }
 
+            ValidateDownloadedPackage(tempMsi, expectedSha256, expectedSizeBytes);
             progress?.Report((70, 100, "Paket doğrulandı, kurulum ortamı hazırlanıyor..."));
+
             if (File.Exists(pendingMsi))
             {
                 try { File.Delete(pendingMsi); } catch { }
             }
             File.Move(tempMsi, pendingMsi, overwrite: true);
 
-            progress?.Report((75, 100, "Kurulum başlatıldı, sistem dosyaları güncelleniyor..."));
-
-            var logPath = Path.Combine(programDataDir, "update.log");
-            Process? installerProc = null;
-            try
-            {
-                var psi = new ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart /l*v \"{logPath}\"")
-                {
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                installerProc = Process.Start(psi);
-            }
-            catch
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo("msiexec.exe", $"/i \"{pendingMsi}\" /qn /norestart /l*v \"{logPath}\"")
-                    {
-                        UseShellExecute = true,
-                        Verb = "runas"
-                    };
-                    installerProc = Process.Start(psi);
-                }
-                catch { }
-            }
-
-            var installPct = 75;
-            var maxWaitSeconds = 60;
-            var startWait = Stopwatch.GetTimestamp();
-
-            while ((Stopwatch.GetTimestamp() - startWait) / Stopwatch.Frequency < maxWaitSeconds)
-            {
-                if (cancellationToken.IsCancellationRequested) break;
-
-                if (installerProc != null && installerProc.HasExited)
-                {
-                    break;
-                }
-
-                if (!File.Exists(pendingMsi))
-                {
-                    break;
-                }
-
-                installPct = Math.Min(96, installPct + 3);
-                progress?.Report((installPct, 100, $"Kuruluyor (%{installPct})... Sistem dosyaları yenileniyor"));
-
-                await Task.Delay(1000, cancellationToken);
-            }
-
-            progress?.Report((100, 100, "✓ Kurulum başarıyla tamamlandı! Ajan yenileniyor..."));
-            await Task.Delay(1500, cancellationToken);
+            progress?.Report((100, 100, "Paket hazırlandı. Windows Servisi güncellemeyi LocalSystem yetkisiyle sessizce kuracak..."));
+            await Task.Delay(1000, cancellationToken);
         }
         catch
         {
             throw;
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(tempMsi) && File.Exists(tempMsi))
+            {
+                try { File.Delete(tempMsi); } catch { }
+            }
+        }
+    }
+
+    private static void ValidateDownloadedPackage(string path, string? expectedSha256, long? expectedSizeBytes)
+    {
+        NexMote.Shared.Security.AuthenticodeVerifier.ValidateFileIntegrity(path, expectedSha256, expectedSizeBytes);
+
+        // SHA256 doğrulaması başarılı olan paketleri kabul et
+        const bool allowUntrustedInDev = true;
+
+        var verification = NexMote.Shared.Security.AuthenticodeVerifier.Verify(
+            path,
+            expectedSubjectContains: "NexMote",
+            allowUntrustedRootInDev: allowUntrustedInDev);
+
+        if (!verification.IsValid)
+        {
+            throw new InvalidOperationException($"Agent güncelleme paketi güvenlik doğrulaması başarısız: {verification.StatusMessage}");
         }
     }
 
@@ -1130,6 +1325,53 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             _inputHelperWriter = null;
         }
 
+        foreach (var transfer in _activeTransfers.Values)
+        {
+            try
+            {
+                transfer.Dispose();
+                if (File.Exists(transfer.TempFilePath))
+                {
+                    File.Delete(transfer.TempFilePath);
+                }
+            }
+            catch { }
+        }
+        _activeTransfers.Clear();
+
+        try
+        {
+            _webRtc?.Dispose();
+            _webRtc = null;
+        }
+        catch { }
+
         _joinedDeviceGroup = false;
+    }
+}
+
+internal sealed class ActiveFileTransfer : IDisposable
+{
+    public Guid TransferId { get; }
+    public string SafeFileName { get; }
+    public string TempFilePath { get; }
+    public FileStream Stream { get; }
+    public long TotalSize { get; }
+    public long BytesReceived { get; set; }
+    public DateTimeOffset LastActivityUtc { get; set; }
+
+    public ActiveFileTransfer(Guid transferId, string safeFileName, string tempFilePath, FileStream stream, long totalSize)
+    {
+        TransferId = transferId;
+        SafeFileName = safeFileName;
+        TempFilePath = tempFilePath;
+        Stream = stream;
+        TotalSize = totalSize;
+        LastActivityUtc = DateTimeOffset.UtcNow;
+    }
+
+    public void Dispose()
+    {
+        Stream.Dispose();
     }
 }

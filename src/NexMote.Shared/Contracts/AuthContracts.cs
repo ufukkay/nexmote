@@ -82,7 +82,8 @@ public sealed record ActivityLogEntry(
     string? DetailsJson,
     string? IpAddress,
     bool Success,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? CorrelationId = null);
 
 /// <summary>
 /// Sunucu genel konfigürasyon ayarları (URL, ortak kayıt anahtarı, heartbeat sıklığı, varsayılan lokasyon) kontratı.

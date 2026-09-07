@@ -10,7 +10,7 @@ using NexMote.Api.Data;
 namespace NexMote.Api.Auth;
 
 /// <summary>
-/// "Authorization: Bearer {token}" başlığındaki opak oturum token'ını <see cref="Data.UserSessionEntity"/>
+/// HttpOnly oturum cookie'sindeki veya geriye uyumluluk için "Authorization: Bearer {token}" başlığındaki opak token'ı <see cref="Data.UserSessionEntity"/>
 /// tablosunda hash'i üzerinden doğrulayıp, kullanıcı kimliği/rolü içeren bir <see cref="ClaimsPrincipal"/> üretir.
 /// Eski statik "Admin:ApiKey" karşılaştırmasının (<c>AdminAuthFilter</c>) yerini alır.
 /// </summary>
@@ -31,16 +31,23 @@ public sealed class SessionTokenAuthHandler : AuthenticationHandler<Authenticati
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        var header = Request.Headers.Authorization.ToString();
-        if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        var (token, fromCookie) = SessionCookie.ReadWithSource(Context);
+        if (string.IsNullOrWhiteSpace(token))
         {
             return Task.FromResult(AuthenticateResult.NoResult());
         }
 
-        var token = header["Bearer ".Length..].Trim();
-        if (string.IsNullOrEmpty(token))
+        // Anti-CSRF: Cookie tabanlı oturumlarda state-changing (POST, PUT, DELETE, PATCH) isteklerde
+        // tarayıcıların otomatik form gönderimlerini önlemek için X-NexMote-Client başlığı zorunludur.
+        if (fromCookie && !HttpMethods.IsGet(Context.Request.Method) &&
+            !HttpMethods.IsHead(Context.Request.Method) &&
+            !HttpMethods.IsOptions(Context.Request.Method))
         {
-            return Task.FromResult(AuthenticateResult.NoResult());
+            var clientHeader = Context.Request.Headers["X-NexMote-Client"].ToString();
+            if (!string.Equals(clientHeader, "Web", StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(AuthenticateResult.Fail("Geçersiz istek: Anti-CSRF koruma başlığı (X-NexMote-Client) eksik veya geçersiz."));
+            }
         }
 
         var tokenHash = SessionTokens.Hash(token);

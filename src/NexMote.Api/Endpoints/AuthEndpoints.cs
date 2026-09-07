@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using NexMote.Api.Auth;
 using NexMote.Api.Data;
 using NexMote.Api.Services;
 using NexMote.Shared.Contracts;
@@ -14,6 +15,11 @@ public static class AuthEndpoints
         {
             var ip = http.Connection.RemoteIpAddress?.ToString();
             var response = auth.LoginStep1(request.Email, request.Password, rememberMe ?? false, ip, http.Request.Headers.UserAgent.ToString());
+            if (response?.Token is not null)
+            {
+                SessionCookie.Set(http, response.Token, rememberMe ?? false);
+            }
+
             return response is null ? Results.Unauthorized() : Results.Ok(response);
         }).RequireRateLimiting("login");
 
@@ -21,6 +27,11 @@ public static class AuthEndpoints
         {
             var ip = http.Connection.RemoteIpAddress?.ToString();
             var response = auth.VerifyMfaStep2(request.ChallengeToken, request.Code, rememberMe ?? false, ip, http.Request.Headers.UserAgent.ToString());
+            if (response?.Token is not null)
+            {
+                SessionCookie.Set(http, response.Token, rememberMe ?? false);
+            }
+
             return response is null ? Results.Unauthorized() : Results.Ok(response);
         }).RequireRateLimiting("login");
 
@@ -35,21 +46,28 @@ public static class AuthEndpoints
         app.MapPost("/api/invite/{token}/accept", (string token, AcceptInviteRequest request, HttpContext http, UserAuthService auth) =>
         {
             var ip = http.Connection.RemoteIpAddress?.ToString();
-            var response = auth.AcceptInvite(token, request.Password, ip, http.Request.Headers.UserAgent.ToString());
+            var (response, error) = auth.AcceptInvite(token, request.Password, ip, http.Request.Headers.UserAgent.ToString());
+            if (response?.Token is not null)
+            {
+                SessionCookie.Set(http, response.Token, rememberMe: true);
+            }
+
             return response is null
-                ? Results.BadRequest(new { message = "Davet geçersiz, süresi dolmuş veya zaten kullanılmış." })
+                ? Results.BadRequest(new { message = error ?? "Davet geçersiz, süresi dolmuş veya zaten kullanılmış." })
                 : Results.Ok(response);
         }).RequireRateLimiting("login");
 
         app.MapPost("/api/auth/logout", (HttpContext http, UserAuthService auth) =>
         {
-            var header = http.Request.Headers.Authorization.ToString();
-            if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            var token = SessionCookie.Read(http);
+            if (!string.IsNullOrWhiteSpace(token))
             {
-                auth.Logout(header["Bearer ".Length..].Trim(), http.Connection.RemoteIpAddress?.ToString());
+                auth.Logout(token, http.Connection.RemoteIpAddress?.ToString());
             }
+
+            SessionCookie.Clear(http);
             return Results.NoContent();
-        }).RequireAuthorization("AnyUser");
+        });
 
         app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
         {
@@ -65,9 +83,10 @@ public static class AuthEndpoints
         authed.MapPost("/account/password", (ChangePasswordRequest request, ClaimsPrincipal user, UserAuthService auth) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return auth.ChangePassword(userId, request.CurrentPassword, request.NewPassword)
+            var (success, error) = auth.ChangePassword(userId, request.CurrentPassword, request.NewPassword);
+            return success
                 ? Results.NoContent()
-                : Results.BadRequest(new { message = "Mevcut şifre hatalı." });
+                : Results.BadRequest(new { message = error ?? "Mevcut şifre hatalı." });
         });
 
         authed.MapPost("/account/mfa/setup", (ClaimsPrincipal user, UserAuthService auth) =>

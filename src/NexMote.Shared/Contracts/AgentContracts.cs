@@ -150,6 +150,7 @@ public sealed record DeviceSummary(
     long MemoryTotalMb = 0,
     long MemoryUsedMb = 0,
     long DiskFreeMb = 0,
+    long UptimeSeconds = 0,
     List<NetworkAdapterInfo>? NetworkAdapters = null,
     List<InstalledAppInfo>? InstalledApps = null,
     List<WindowsUpdateInfo>? WindowsUpdates = null,
@@ -174,6 +175,29 @@ public sealed record CommandAuditEntry(
     DateTimeOffset ExecutedAt);
 
 /// <summary>
+/// Agent'ın sunucudan çektiği kalıcı komut kuyruğu girdisi.
+/// </summary>
+public sealed record AgentQueuedCommand(
+    Guid RequestId,
+    string Kind,
+    string Shell,
+    string Command,
+    int TimeoutSeconds,
+    DateTimeOffset CreatedAt);
+
+/// <summary>
+/// Agent'ın kalıcı komut kuyruğundan aldığı işin sonucunu sunucuya bildirdiği gövde.
+/// </summary>
+public sealed record AgentQueuedCommandResult(
+    string AgentToken,
+    int ExitCode,
+    string StdOut,
+    string StdErr,
+    long DurationMs,
+    bool TimedOut,
+    bool ElevationDenied);
+
+/// <summary>
 /// Şu an açık (çözülmemiş) olan bir cihaz uyarısını temsil eder — web konsolunda "Dikkat" filtresi
 /// ve cihaz detay panelindeki uyarı rozeti için kullanılır.
 /// </summary>
@@ -182,3 +206,47 @@ public sealed record ActiveDeviceAlert(
     string AlertType,
     DateTimeOffset TriggeredAt);
 
+/// <summary>
+/// Sunucu taraflı cihaz listeleme, filtreleme, sıralama ve sayfalama parametreleri (Madde 7).
+/// </summary>
+public sealed record DeviceQueryOptions(
+    int Page = 1,
+    int PageSize = 50,
+    string? Search = null,
+    string? Status = null,
+    Guid? GroupId = null,
+    string? SortBy = null,
+    string? SortDir = null);
+
+/// <summary>
+/// Genel sayfalanmış liste yanıt sarmalayıcısı (Madde 7).
+/// </summary>
+public sealed record PagedResult<T>(
+    IReadOnlyList<T> Items,
+    int TotalCount,
+    int Page,
+    int PageSize,
+    int TotalPages,
+    int OnlineCount,
+    int OfflineCount);
+
+/// <summary>
+/// SignalR üzerinden teknisyen konsoluna ve web paneline anlık iletilen hafif cihaz canlılık ve telemetri delta güncellemesi (Madde 7).
+/// </summary>
+public sealed record DeviceDeltaUpdate(
+    Guid DeviceId,
+    bool IsOnline,
+    string? ActiveUser,
+    string? IpAddress,
+    double CpuUsagePercent,
+    long MemoryTotalMb,
+    long MemoryUsedMb,
+    long DiskFreeMb,
+    long UptimeSeconds,
+    string? AgentVersion,
+    DateTimeOffset LastSeenAt);
+
+/// <summary>
+/// Web konsolu veya yöneticiden cihaza gönderilen güç eylemi (yeniden başlat, kapat, kilitle, oturumu kapat) isteği.
+/// </summary>
+public sealed record DevicePowerRequest(string Action);

@@ -4,7 +4,146 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.7.0] - 2026-09-01 (Güncel Sürüm)
+## 🏷️ [v0.7.3] - 2026-09-07 (Güncel Sürüm)
+### ⚡ Kesintisiz Canlı Masaüstü Akışı, Sonsuz Yeniden Bağlanma & Çift Katmanlı Oturum Uyandırma
+- **Sonsuz ve Kararlı SignalR Yeniden Bağlanma Politikası (`InfiniteRetryPolicy`):**
+  - İstemcilerin (Ajan, Windows Servisi ve Teknisyen Konsolu) geçici ağ dalgalanmaları veya sunucu servis yeniden başlatmalarında 4 deneme sonra kalıcı olarak düşmesini engelleyen `InfiniteRetryPolicy` (0s, 2s, 5s, 10s döngüsü) devreye alındı.
+  - Bağlantı tamamen kopsa dahi `Closed` olayında arka plan otomatik ayağa kaldırma döngüsü eklendi.
+- **Çift Katmanlı Ajan Uyandırma (Dual-Layer Session Wakeup):**
+  - Teknisyen canlı masaüstü bağlantısı başlattığında sunucu, bildirimi hem kullanıcı oturumundaki Tray uygulamasına (`device:{id}`) hem de LocalSystem yetkili Windows Servisine (`device:{id}:service`) eşzamanlı iletir.
+  - Windows Servisi, aktif kullanıcı oturumundaki Tray uygulamasına yerel Named Pipe (`NexMote_Session_Wakeup_{session}`) üzerinden anında sinyal göndererek Tray uygulamasını uyandırır ve oturuma dahil eder.
+- **SignalingHub Oturum Yarış Durumu (Race Condition) Otomatik Onarımı:**
+  - `SignalingHub.SendSignal` metodunda, yeniden bağlanma esnasında istemcinin yeni ConnectionId alması sebebiyle oluşan geçici erişim hatası giderildi.
+  - Doğrulanmış cihaz bağlantıları oturum odasına otomatik dahil edilerek akışın kesintiye uğraması engellendi; detaylı yapısal hata günlükleri eklendi.
+- **Nginx WebSocket ve Ters Proxy Optimizasyonu:**
+  - Canlı sunucuda Nginx `proxy_read_timeout` ve `proxy_send_timeout` 3600 saniyeye çıkarıldı, `proxy_buffering off` yapıldı ve `$connection_upgrade` map direktifiyle WebSocket el sıkışması kararlı hale getirildi.
+
+## 🏷️ [v0.7.2] - 2026-09-02
+### ⚡ WebRTC P2P, Pano Dosya Aktarımı, Uptime & Canlı Dağıtım
+- **WebRTC P2P Doğrudan Veri Kanalı (Ultra Düşük Gecikme):**
+  - Teknisyen (`NexMote.TechnicianApp`) ve Ajan (`NexMote.Agent.Tray`) arasında STUN/ICE protokolü ve SIPSorcery kütüphanesiyle doğrudan uçtan uca (P2P) UDP veri kanalları (`stream` ve `input`) devreye alındı.
+  - Sinyalleşme `SignalingHub` üzerinden WebSocket ile yürütülür; simetrik NAT veya güvenlik duvarı durumunda sistem kesintisiz olarak SignalR WebSocket sunucu rölesine geri düşer.
+  - Ekran kareleri ve uzak girdi sinyalleri (fare/klavye) P2P kanalından doğrudan iletilerek sunucu bant genişliği yükü ortadan kaldırıldı ve tepki süresi minimize edildi.
+- **Pano Üzerinden Dosya Kopyalama / Yapıştırma (Clipboard File Drop):**
+  - Teknisyen bilgisayarında bir veya birden fazla dosya kopyalandığında, uzak masaüstü penceresinde "Panoyu Gönder" butonuyla veya pano eşitlemesiyle dosyalar otomatik olarak SHA-256 bütünlük doğrulamasıyla aktarılır.
+  - Hedef bilgisayarda dosya tamamlandığında işletim sisteminin panosuna (`Clipboard.SetFileDropList`) yerleştirilir ve uzak Windows Gezgini'nde `Ctrl+V` ile anında yapıştırılabilir.
+- **Web Konsolunda Cihaz Açık Kalma Süresi (Uptime) Gösterimi:**
+  - `DeviceSummary` ve `DeviceRegistry` sözleşmelerine `UptimeSeconds` alanı eklendi.
+  - Web panelinde hem **Genel Bakış (Sistem & Donanım)** hem de **Cihaz Özellikleri (Specs)** sekmelerinde donanım özelliklerinin hemen altına cihazın kaç gün, kaç saat ve dakikadır kesintisiz açık olduğu (`formatUptime`) entegre edildi.
+- **Platformlar Arası Yerel Dağıtım Otomasyonu (`deploy-server.ps1`):**
+  - `tar.gz` paketleme mimarisiyle Windows ve Linux uyumluluğu sağlandı; `publish-linux.tar.gz` arşivi SSH/SCP üzerinden canlı sunucuya (`186.241.21.133`) otomatik olarak aktarılıp `/health` doğrulandı.
+
+### 🛡️ Güvenlik, Bütünlük ve Kurumsal İzlenebilirlik Paketi
+- **İstemci Tarafı Native Authenticode İmza ve Yayıncı Doğrulaması (`AuthenticodeVerifier`):**
+  - Windows `wintrust.dll` yerel API'si (`WinVerifyTrust`, `WINTRUST_ACTION_GENERIC_VERIFY_V2`) ve X509 sertifika kütüphanesi kullanılarak indirilen tüm MSI/EXE güncelleme paketleri için işletim sistemi düzeyinde kriptografik imza doğrulayıcısı geliştirildi (`NexMote.Shared/Security/AuthenticodeVerifier.cs`).
+  - `NexMote.Agent.Windows` (`Worker.cs`), `NexMote.Agent.Tray` (`RemoteScreenStreamer.cs`) ve `NexMote.TechnicianApp` (`MainWindow.xaml.cs`) artık sunucudan indirilen yükleyicileri çalıştırmadan önce:
+    1. Dosya boyutu ve SHA-256 hash doğrulaması,
+    2. Authenticode geçerlilik kontrolü (tamponlama/bozulma/imzasız PE tespiti),
+    3. Yayıncı kimliği (Subject: "NexMote") ve parmak izi (Thumbprint) denetimini zorunlu kılar.
+  - Geçersiz, imzasız veya kurcalanmış paketler anında diskten silinir ve kurulum engellenir.
+- **Web Auth Cookie & Anti-CSRF Savunması:**
+  - `SessionCookie.cs` ve `SessionTokenAuthHandler.cs` entegrasyonuyla, oturum cookie'si (`nexmote_session`) ile gelen tüm durum değiştirici (`POST`, `PUT`, `DELETE`, `PATCH`) isteklerde özel `X-NexMote-Client: Web` başlığı zorunlu kılındı.
+  - Tarayıcıların çapraz site form veya script yönlendirmeleriyle yapabileceği CSRF saldırıları sunucu seviyesinde tamamen engellendi.
+  - Frontend `api.ts`'teki tüm API isteklerine bu başlık eklendi; eski `localStorage`/`sessionStorage` token kalıntıları temizlendi.
+- **Uçtan Uca Tam Actor, Audit ve Correlation ID Altyapısı:**
+  - **Correlation ID:** Gelen HTTP isteklerini, veritabanı işlemlerini ve SignalR sinyallerini birbirine bağlayan `CorrelationIdMiddleware` (`X-Correlation-Id`) eklendi.
+  - **Merkezi Denetim Servisi (`AuditLogService`):** Yüksek riskli tüm operasyonlar için aktör (User ID, Email), IP adresi, hedef kimlik ve korelasyon izini `ActivityLogs` tablosuna otomatik kaydeden servis devreye alındı.
+  - **Yüksek Riskli Endpoint Entegrasyonu:**
+    - `POST /remote-sessions`: Hangi teknisyenin hangi cihaza bağlandığı (`session.start`).
+    - `POST /devices/{id}/execute-command`: Hangi teknisyenin hangi komutu çalıştırdığı (`command.execute`) ve `CommandAudits` / `DeviceCommands` tablolarına doğrudan `InitiatorUserId`, `InitiatorEmail` ve `CorrelationId` yazımı.
+    - `POST /devices/{id}/uninstall-app`: Uygulama kaldıran teknisyen (`device.uninstall_app`).
+    - `DELETE /devices/{id}`: Cihazı veya ajanını silen yönetici (`device.delete`, `device.uninstall_agent`).
+    - `POST /settings` & `/admin/settings/smtp/test`: Sunucu ayarlarını değiştiren yönetici (`settings.update`, `settings.smtp_test`).
+  - **Modernize Edilmiş Aktivite Günlüğü Arayüzü (`AuditLogView.tsx`):**
+    - Renkli işlem rozetleri (Uzak Bağlantı, Terminal Komutu, Uygulama Kaldırma vb.).
+    - Aktör e-postası ve IP adresi görünürlüğü.
+    - Tek tıkla panoya kopyalanabilir Korelasyon ID çipi.
+    - Genişletilebilir JSON detay ve bağlam inceleme çekmecesi.
+- **Parola Karmaşıklığı ve Girdi Sınırları Doğrulaması (Madde 13):**
+  - Merkezi `PasswordValidator.cs` kütüphanesi devreye alındı: Parolaların en az 8, en fazla 128 karakterden oluşması, harf ile rakam/özel karakter kombinasyonu içermesi ve boşluklardan ibaret olmaması zorunlu kılındı.
+  - Şifre değiştirme (`/account/password`), davet kabul etme (`/invite/{token}/accept`) ve kullanıcı yönetimi bu standartlarla koruma altına alındı.
+  - Kullanıcı e-postaları için RFC uyumlu `MailAddress.TryCreate` denetimi ve 256 karakter sınırı getirildi.
+  - Uzak terminal komutları için 16,384 karakter üst sınır ve kabuk allowlist'i (`powershell`, `cmd`, `pwsh`) zorunlu kılındı; uygulama adı için 256 karakter sınırı eklendi.
+- **Sunucu Tarafı Güvenlik Profili İzin Zorlaması (Madde 15):**
+  - Güvenlik profili kısıtlamaları yalnızca Ajan üzerinde değil, doğrudan sunucu katmanında (`SignalingHub.cs` ve `DeviceEndpoints.cs`) zorunlu hale getirildi:
+    1. `AllowRemoteTerminal == false`: Hem web konsolundan (`POST /devices/{id}/execute-command`) hem canlı oturum SignalR kanalından (`remote-command`) komut yürütme 403 Forbidden ve HubException ile engellenir.
+    2. `ViewOnlyMode == true`: Teknisyenden gelen fare ve klavye sinyalleri (`remote-input`) sunucu tarafından hedefe iletilmeden düşürülür.
+    3. `AllowClipboard == false`: İki yönlü pano metin iletimi (`clipboard-text`) engellenir.
+    4. `AllowFileTransfer == false`: Dosya aktarımı (`file-chunk`) engellenir.
+- **Agent Token & Kayıt Anahtarı SHA-256 Hash Mimarisi (Madde 17):**
+  - İstemci cihazların kimlik doğrulama token'ları (`AgentToken`) artık veritabanında asla düz metin (plaintext) olarak tutulmamaktadır; `SHA-256` kriptografik hash'i ile saklanır (`DeviceRegistry.cs`).
+  - **Sıfır Kesintili Şeffaf Geçiş:** Daha önce kaydedilmiş mevcut cihazlar ilk heartbeat veya yetkilendirme isteklerinde otomatik olarak algılanır ve düz metin token'ları şeffaf bir şekilde SHA-256 hash'ine dönüştürülür.
+  - Grup kayıt anahtarları için hem hashli hem düz metin geriye uyumlu karşılaştırma mekanizması (`EnrollmentKeyValidator.cs`) uygulandı.
+- **Modüler Şema Başlatıcı ve DDL İyileştirmesi (Madde 5):**
+  - `Program.cs` içerisindeki 200+ satırlık ham SQL ve boş try-catch blokları temizlendi; merkezi [DatabaseInitializer.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Api/Data/DatabaseInitializer.cs) oluşturuldu.
+  - `PRAGMA foreign_keys = ON;`, `PRAGMA journal_mode = WAL;`, `PRAGMA synchronous = NORMAL;` ve `PRAGMA busy_timeout = 5000;` yönergeleri standart hale getirildi.
+  - Tablo, indeks ve kolon geçişleri (migrations) idempotent ve güvenli bir mimariye kavuşturuldu.
+- **Veri Saklama Politikası (Retention), Canlı SQLite Yedekleme ve Cascade Temizliği (Madde 6):**
+  - [DatabaseMaintenanceService.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Api/Services/DatabaseMaintenanceService.cs) arka plan servisi devreye alındı:
+    - Süresi 14 günden önce dolmuş kullanıcı oturumları (`UserSessions`),
+    - Tamamlanmış ve 14 günden eski kuyruk komutları (`DeviceCommands`),
+    - Çözülmüş ve 30 günden eski cihaz uyarıları (`DeviceAlerts`),
+    - 90 günden eski komut denetim kayıtları (`CommandAudits`),
+    - 180 günden eski aktivite logları (`ActivityLogs`) otomatik olarak periyodik temizlenir.
+  - **Canlı Sıfır-Kesintili Nokta-Zamanlı Yedekleme:** SQLite `VACUUM INTO` komutuyla çalışan veritabanı kilitlenmeden `backups/nexmote-backup-*.db` dosyasına atomik ve sıkıştırılmış yedek alınır; en güncel 7 yedek tutulur (otomatik rotasyon).
+  - Cihaz silindiğinde ilişkili komut, uyarı ve oturum kayıtlarının yetim kalmasını engelleyen kademeli (cascade) temizleme eklendi (`DeviceRegistry.Delete`).
+  - Yönetici için API uçları eklendi: `GET /admin/database/backups`, `POST /admin/database/backup`, `POST /admin/database/maintenance`.
+- **Deep-Link Güvenliği ve Server URL Spoofing Koruması (Madde 18):**
+  - [DeepLinkValidator.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Shared/Security/DeepLinkValidator.cs) kütüphanesi geliştirildi.
+  - `nexmote://` şeması, `sessionId` (Guid) ve `token` (min 16 karakter) parametreleri zorunlu kılındı.
+  - Harici / düz metin HTTP sunucu yönlendirmeleri (`http://evil.com`) engellendi (yalnızca HTTPS veya yerel geliştirme için localhost kabul edilir).
+  - Teknisyen istemcisinde ([MainWindow.xaml.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.TechnicianApp/MainWindow.xaml.cs)), bağlantı isteği bilinmeyen bir üçüncü taraf sunucudan geldiğinde teknisyene onay diyaloğu gösterilerek yetkisiz sunucu yönlendirmesi (spoofing) engellendi.
+- **Güvenli Dosya Transferi, Disk Streaming, Checksum ve Zaman Aşımı Temizliği (Madde 8):**
+  - Bellek tükenmesi (OOM DoS) açığı kapatıldı: Dosya parçacıkları artık RAM'de (`MemoryStream`) tutulmayıp doğrudan disk üzerindeki geçici dosyalara (`.part`) akıtılmaktadır (`RemoteScreenStreamer.cs`).
+  - Merkezi [FileTransferValidator.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Shared/Security/FileTransferValidator.cs) oluşturuldu:
+    - Maksimum 500 MB dosya boyutu ve 1 MB parça boyutu tavanı getirildi.
+    - Dizin geçişi (Path Traversal - `../`, `/`, `\`) ve geçersiz dosya adı karakterleri engellendi (`SanitizeFileName`).
+    - Dosya transfer kontratına (`FileTransferChunk`) `Sha256` eklendi; gönderici tarafından hesaplanan SHA-256 özeti alıcı tarafında montaj sonrası kriptografik olarak doğrulanır, uyuşmazlık halinde dosya derhal silinip reddedilir.
+    - 5 dakikadan uzun süre atıl kalan yarım kalmış dosya transferleri (`CleanupStaleTransfers`) diskten otomatik temizlenir.
+- **Input-Helper Named Pipe ACL, Oturum İzolasyonu ve Authenticode Doğrulaması (Madde 21):**
+  - SYSTEM yetkisiyle çalışan [InputHelperServer.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Agent.Tray/Input/InputHelperServer.cs) Named Pipe sunucusu sıkılaştırıldı:
+    - Pipe ACL'i geniş `InteractiveSid` yerine yalnızca `LocalSystem`, `Administrators` ve aktif oturum sahibinin `Current User SID`'sine sınırlandırıldı.
+    - Gelen bağlantıların mutlaka aynı Windows Oturum Numarası (`SessionId`) içerisinde çalışan bir süreçten geldiği doğrulandı (farklı oturumlardan ve terminal server kullanıcılarından gelen müdahaleler engellendi).
+    - İstemci sürecin imza geçerliliği [AuthenticodeVerifier.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Shared/Security/AuthenticodeVerifier.cs) ile denetlenerek sahte iksir/enjeksiyon saldırıları kapatıldı.
+- **Device List Performansı: Sayfalama, Sunucu Taraflı Arama/Filtreleme & SignalR Delta Telemetri (Madde 7):**
+  - Bellek tahsisi ve ağ yükü optimize edildi: [DeviceRegistry.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Api/Services/DeviceRegistry.cs) içine `ListPaged` eklendi. Binlerce cihazlık envanterlerde tüm listeyi belleğe ve JSON'a çevirmek yerine sayfalanmış (`Page`, `PageSize`, `TotalPages`, `TotalCount`, `OnlineCount`, `OfflineCount`) mimariye geçildi.
+  - Sunucu taraflı arama (`Search`), durum filtresi (`Status`: online/offline), grup filtresi (`GroupId`) ve çoklu kriter sıralama (`SortBy`: name, lastSeen, cpu, memory, os, user, uptime - `SortDir`: asc/desc) entegre edildi.
+  - Geriye uyumluluk korundu: `/api/devices` parametresiz çağrıldığında mevcut array kontratını korurken, sayfalama talep edildiğinde veya `/api/devices/paged` çağrıldığında `PagedResult<DeviceSummary>` döndürür.
+  - **SignalR Canlı Delta Yayını:** Periyodik ağır polling yerine [SignalingHub.cs](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/src/NexMote.Api/Hubs/SignalingHub.cs) üzerinde `devices:feed` grubu oluşturuldu. Her heartbeat döngüsünde hafif `DeviceTelemetryDelta`, yeni kayıtta `DeviceEnrolledDelta` ve cihaz silmede `DeviceDeletedDelta` olayları yayınlanarak canlı panel ve teknisyen konsolu gerçek zamanlı reaktif yapıya kavuşturuldu.
+- **CI/CD Kalite Kapıları ve Otomasyon Pipeline'ı (Madde 10):**
+  - GitHub Actions iş akışı [.github/workflows/ci.yml](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/.github/workflows/ci.yml) kuruldu:
+    - **.NET 8 Windows Runner:** Çözüm restore, Release derleme, 76/76 xUnit testi (`--collect:"XPlat Code Coverage"`) ve NuGet bağımlılık güvenlik açığı taraması (`dotnet list package --vulnerable`).
+    - **React Web Runner:** Node.js 22 ile `npm ci`, `tsc --noEmit` tip denetimi, Vite production build ve `npm audit --audit-level=high` güvenlik taraması.
+    - **Gizli Bilgi & Secret Taraması:** Git geçmişinde ve commit'lerde sızdırılmış anahtar/token taraması (`gitleaks-action`).
+- **Canlı ve Staging Sunucu Dağıtım Otomasyonu (Madde 11):**
+  - [scripts/deploy-server.ps1](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/scripts/deploy-server.ps1) geliştirildi:
+    - React web konsolu derlemesi, linux-x64 .NET 8 publish, versions manifest senkronizasyonu ve `publish-linux.zip` paketleme.
+    - SSH/SCP ile hedef sunucuya (`186.241.21.133` veya staging) güvenli aktarım.
+    - Canlı veritabanı (`nexmote.db`), SQLite yedekleri (`backups/`) ve Data Protection anahtarlarını (`dpkeys/`) koruyarak atomik güncelleme (`rsync`).
+    - `systemctl restart nexmote.service` sonrası `/health` uç noktasını otomatik sorgulayan sağlık doğrulama döngüsü.
+- **Güvenlik Açığı Taraması (Madde 9):**
+  - Proje paketleri denetlenmiş, `Microsoft.EntityFrameworkCore.Sqlite 8.0.11` ile tüm bağımlılıkların güncel ve **0 güvenlik açığına** sahip olduğu doğrulanmıştır.
+
+---
+
+## 🏷️ [v0.7.1] - 2026-09-01
+### 🚀 Yeni Özellikler & Araçlar
+- **NexMote Uzaktan Toplu Ajan Dağıtım Aracı (`NexMote.Deployer` / WPF .NET 8):**
+  - Yerel ağdaki bilgisayarlara tekli IP (`192.168.0.126`), IP aralığı (`192.168.0.10-50`) veya CIDR blokları (`192.168.0.0/24`) üzerinden uzaktan yönetici kimlik bilgileriyle (`.\ITDestek` / `DOMAIN\admin`) tek tıkla sessiz Ajan kurulumu.
+  - `https://nexmote.com` üzerinden en güncel `NexMote-Agent-Setup.msi` paketini otomatik indirme veya yerel MSI seçebilme.
+  - Multi-threaded paralel dağıtım (5 eşzamanlı makine), canlı ping/SMB port 445 kontrolü, WMI (`Win32_Process.Create`) ve RPC/SC fallback mekanizması.
+  - Canlı ilerleme çubuğu, özet metrik kartları (Toplam, Başarılı, Hatalı, Kuyrukta), durum rozetleri, detaylı hata açıklamaları, CSV olarak dışa aktarma ve tek tıkla "Hatalıları Yeniden Dene" özelliği.
+  - Web Paneli İndirme Merkezi'ne **`NexMote-Deployer-Setup.msi`** ve taşınabilir **`NexMote-Deployer.exe`** olarak eklendi.
+- **Kilit ve Giriş Ekranı (Winlogon) Fare & Klavye Donanım Giriş Motoru:**
+  - `DesktopHelper.cs` üzerinde `EnsureWindowStation("winsta0")` ve `[ThreadStatic]` aktif masaüstü handle yaşam döngüsü koruması getirildi; kilit ekranı ve şifre kutusunda fare/klavye olaylarının (`SendInput`, `mouse_event`, `keybd_event`) boşa düşmesi kalıcı olarak önlendi.
+  - `InputInjector.cs` WinForms bağımlılıklarından arındırılarak Win32 `GetSystemMetrics` (SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN / SM_CXVIRTUALSCREEN / SM_CYVIRTUALSCREEN) ile %100 donanımsal koordinat haritasına geçirildi.
+- **Teknisyen Uygulamasına `🔒 Kilit Aç` Butonu & `Ctrl+Alt+End` Kısayolu:**
+  - Teknisyen üst ada araç çubuğuna tek tıkla `sas.dll` üzerinden çekirdek seviyesinde `Ctrl+Alt+Del` (Secure Attention Sequence - SAS) gönderen **`🔒 Kilit Aç`** butonu eklendi.
+  - Canlı oturum sırasında uzak makineye anında SAS göndermek için **`Ctrl+Alt+End`** evrensel klavye kısayolu entegre edildi.
+
+---
+
+## 🏷️ [v0.7.0] - 2026-09-01
 ### 🏗️ Kapsamlı Mimari Yenileme ve Modüler Refactoring
 - **Backend Minimal API Modüler Routing Katmanı (`NexMote.Api/Endpoints/`):** Tek parça 1,300 satırlık `Program.cs` dosyası, `AuthEndpoints.cs`, `DeviceEndpoints.cs`, `OrganizationEndpoints.cs`, `SecurityProfileEndpoints.cs` ve `SettingsEndpoints.cs` olmak üzere 5 ayrı izole uzantı sınıfına bölündü. `Program.cs` 355 satıra indirildi.
 - **SQLite WAL Modu ve Eşzamanlılık Optimizasyonu:** Backend başlangıcında `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;` aktif edilerek yoğun eşzamanlı cihaz canlılık sinyallerinde (heartbeat) veritabanı kilitlenmeleri (database is locked) kalıcı olarak önlendi.

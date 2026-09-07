@@ -24,6 +24,7 @@ import {
   Package,
   Play,
   PlugZap,
+  Power,
   Radio,
   RefreshCw,
   Save,
@@ -32,6 +33,7 @@ import {
   Server,
   Settings,
   Shield,
+  ShieldAlert,
   ShieldCheck,
   Sliders,
   Sparkles,
@@ -93,7 +95,6 @@ import {
   getInvitePreview,
   getServerMetrics,
   getServerSettings,
-  getStoredAdminToken,
   InstalledAppInfo,
   inviteUser,
   listDeviceGroups,
@@ -106,6 +107,8 @@ import {
   resetUserMfa,
   SecurityProfile,
   SecurityProfileInput,
+  sendDevicePowerAction,
+  PowerActionType,
   ServerMetrics,
   ServerSettings,
   setStoredAdminToken,
@@ -202,8 +205,18 @@ export function App() {
   const [appSearchQuery, setAppSearchQuery] = useState("");
   const [updateSearchQuery, setUpdateSearchQuery] = useState("");
 
+  // Uzaktan Güç ve Oturum Yönetimi State
+  const [powerMenuOpen, setPowerMenuOpen] = useState(false);
+  const powerMenuRef = useRef<HTMLDivElement>(null);
+  const [powerConfirmModal, setPowerConfirmModal] = useState<{
+    deviceId: string;
+    deviceName: string;
+    action: PowerActionType;
+  } | null>(null);
+  const [powerActionLoading, setPowerActionLoading] = useState(false);
+
   // Authentication State
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => Boolean(getStoredAdminToken()));
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -488,8 +501,8 @@ export function App() {
         setMfaChallengeToken(result.challengeToken);
         setMfaCode("");
         setMfaError("");
-      } else if (result.token) {
-        setStoredAdminToken(result.token, rememberMe);
+      } else {
+        setStoredAdminToken(result.token ?? "", rememberMe);
         setIsAuthenticated(true);
         addActivityLog("Oturum açıldı", "success");
       }
@@ -508,13 +521,11 @@ export function App() {
 
     try {
       const result = await verifyMfa(mfaChallengeToken, mfaCode.trim(), rememberMe);
-      if (result.token) {
-        setStoredAdminToken(result.token, rememberMe);
-        setIsAuthenticated(true);
-        setMfaChallengeToken(null);
-        setMfaCode("");
-        addActivityLog("Oturum açıldı (MFA doğrulandı)", "success");
-      }
+      setStoredAdminToken(result.token ?? "", rememberMe);
+      setIsAuthenticated(true);
+      setMfaChallengeToken(null);
+      setMfaCode("");
+      addActivityLog("Oturum açıldı (MFA doğrulandı)", "success");
     } catch {
       setMfaError("Kod hatalı veya süresi dolmuş.");
     } finally {
@@ -675,16 +686,14 @@ export function App() {
     setInviteSubmitting(true);
     try {
       const result = await acceptInvite(inviteToken, invitePassword);
-      if (result.token) {
-        setStoredAdminToken(result.token, true);
-        window.history.replaceState(null, "", "/");
-        // isAuthenticated zaten true olabilir (aynı tarayıcıda eski bir oturum varsa) — bu durumda state
-        // değişmediği için kimlik yenileme effect'i tetiklenmez, o yüzden burada elle tazeliyoruz.
-        const me = await getCurrentUser();
-        setCurrentUser(me);
-        setInviteAccepted(true);
-        setIsAuthenticated(true);
-      }
+      setStoredAdminToken(result.token ?? "", true);
+      window.history.replaceState(null, "", "/");
+      // isAuthenticated zaten true olabilir (aynı tarayıcıda eski bir oturum varsa) — bu durumda state
+      // değişmediği için kimlik yenileme effect'i tetiklenmez, o yüzden burada elle tazeliyoruz.
+      const me = await getCurrentUser();
+      setCurrentUser(me);
+      setInviteAccepted(true);
+      setIsAuthenticated(true);
     } catch (error) {
       setInviteError(error instanceof Error ? error.message : "Davet kabul edilemedi.");
     } finally {
@@ -1443,6 +1452,48 @@ export function App() {
     await refresh();
   }
 
+  // Güç Eylemleri Dış Tıklama Dinleyicisi
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (powerMenuRef.current && !powerMenuRef.current.contains(event.target as Node)) {
+        setPowerMenuOpen(false);
+      }
+    }
+    if (powerMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [powerMenuOpen]);
+
+  function handlePromptPowerAction(action: PowerActionType) {
+    if (!selectedDevice) return;
+    setPowerMenuOpen(false);
+    setPowerConfirmModal({
+      deviceId: selectedDevice.id,
+      deviceName: selectedDevice.deviceName,
+      action
+    });
+  }
+
+  async function handleExecutePowerAction() {
+    if (!powerConfirmModal) return;
+    const { deviceId, deviceName, action } = powerConfirmModal;
+    setPowerActionLoading(true);
+    try {
+      const res = await sendDevicePowerAction(deviceId, action);
+      showToast(res.message || `${deviceName} için ${action} komutu iletildi.`);
+      addActivityLog(`${deviceName} için "${action}" güç komutu gönderildi`, "success");
+      setPowerConfirmModal(null);
+    } catch (err: any) {
+      showToast(err?.message || "Güç komutu gönderilemedi.");
+      addActivityLog(`${deviceName} için "${action}" güç komutu başarısız: ${err?.message || ""}`, "warn");
+    } finally {
+      setPowerActionLoading(false);
+    }
+  }
+
   function handleDeleteDevice(deviceId: string, deviceName?: string, isOnline = true) {
     const name = deviceName || "Seçilen cihaz";
     setDeleteModal({
@@ -2096,6 +2147,93 @@ export function App() {
                     </button>
                   )}
 
+                  {/* Güç ve Oturum Yönetimi Menüsü */}
+                  <div className="power-menu-container" ref={powerMenuRef}>
+                    <button
+                      className="detail-nav-action-btn power"
+                      onClick={() => setPowerMenuOpen(!powerMenuOpen)}
+                      disabled={!selectedDevice.isOnline}
+                      title={selectedDevice.isOnline ? "Güç ve Oturum Yönetimi" : "Cihaz çevrimdışı (Güç işlemleri kullanılamaz)"}
+                    >
+                      <Power size={13} />
+                      <span>Güç</span>
+                      <ChevronDown size={11} className={powerMenuOpen ? "rotate-180" : ""} />
+                    </button>
+
+                    {powerMenuOpen && (
+                      <div className="power-dropdown-menu">
+                        <button
+                          className="power-dropdown-item"
+                          onClick={() => handlePromptPowerAction("reboot")}
+                        >
+                          <div className="power-item-icon amber">
+                            <RotateCcw size={14} />
+                          </div>
+                          <div className="power-item-text">
+                            <span className="power-item-title">Yeniden Başlat</span>
+                            <span className="power-item-desc">Bilgisayarı derhal yeniden başlatır</span>
+                          </div>
+                        </button>
+
+                        <button
+                          className="power-dropdown-item"
+                          onClick={() => handlePromptPowerAction("shutdown")}
+                        >
+                          <div className="power-item-icon danger">
+                            <Power size={14} />
+                          </div>
+                          <div className="power-item-text">
+                            <span className="power-item-title">Bilgisayarı Kapat</span>
+                            <span className="power-item-desc">Sistemi güvenli şekilde kapatır</span>
+                          </div>
+                        </button>
+
+                        <div className="power-dropdown-divider" />
+
+                        <button
+                          className="power-dropdown-item"
+                          onClick={() => handlePromptPowerAction("lock")}
+                        >
+                          <div className="power-item-icon blue">
+                            <Lock size={14} />
+                          </div>
+                          <div className="power-item-text">
+                            <span className="power-item-title">Ekranı Kilitle</span>
+                            <span className="power-item-desc">Aktif oturumu kilit ekranına alır</span>
+                          </div>
+                        </button>
+
+                        <button
+                          className="power-dropdown-item"
+                          onClick={() => handlePromptPowerAction("logoff")}
+                        >
+                          <div className="power-item-icon purple">
+                            <LogOut size={14} />
+                          </div>
+                          <div className="power-item-text">
+                            <span className="power-item-title">Oturumu Kapat</span>
+                            <span className="power-item-desc">Kullanıcının oturumunu sonlandırır</span>
+                          </div>
+                        </button>
+
+                        <div className="power-dropdown-divider" />
+
+                        <button
+                          className="power-dropdown-item"
+                          onClick={() => handlePromptPowerAction("reboot-safe")}
+                        >
+                          <div className="power-item-icon orange">
+                            <ShieldAlert size={14} />
+                          </div>
+                          <div className="power-item-text">
+                            <span className="power-item-title">Güvenli Modda Başlat</span>
+                            <span className="power-item-desc">Ağ destekli güvenli modda açar</span>
+                          </div>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   <button
                     className="detail-nav-action-btn"
                     onClick={() => refresh(true)}
@@ -2274,6 +2412,12 @@ export function App() {
                           {selectedDevice.isOnline ? "🟢 Şimdi (Çevrimiçi)" : `⚪ ${formatLastSeen(selectedDevice.lastSeenAt)}`}
                         </span>
                       </div>
+                      <div className="bento-spec-item">
+                        <span className="bento-spec-label">Açık Kalma Süresi (Uptime)</span>
+                        <span className="bento-spec-value font-bold" style={{ color: "var(--primary)" }}>
+                          ⏱️ {formatUptime(selectedDevice.uptimeSeconds)}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -2439,6 +2583,21 @@ export function App() {
                         </div>
                         <span className="mini-gauge-subtext">Sistem sürücüsü alanı sağlıklı</span>
                       </div>
+
+                      {/* Uptime Mini Info Card */}
+                      <div className="mini-gauge-card" style={{ gridColumn: "1 / -1", background: "var(--bg-hover)", border: "1px solid var(--border-subtle)", padding: "10px 14px", borderRadius: "8px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: "12.5px", fontWeight: 600, color: "var(--text-main)", display: "flex", alignItems: "center", gap: "6px" }}>
+                            ⏱️ Kesintisiz Çalışma Süresi (Uptime)
+                          </span>
+                          <span className="font-bold" style={{ fontSize: "13px", color: "var(--primary)" }}>
+                            {formatUptime(selectedDevice.uptimeSeconds)}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "4px", display: "block" }}>
+                          Sistemin son yeniden başlatmadan bu yana açık kaldığı toplam süre
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -2578,6 +2737,12 @@ export function App() {
                             </span>
                           </div>
                         )}
+                        <div className="specs-row">
+                          <span className="specs-lbl">Açık Kalma Süresi (Uptime)</span>
+                          <span className="specs-val font-bold" style={{ color: "var(--primary)" }}>
+                            ⏱️ {formatUptime(selectedDevice.uptimeSeconds)}
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -5619,7 +5784,7 @@ export function App() {
       {/* Modal: Sessiz Uygulama Kaldırma (Silent Uninstall Modal) */}
       {uninstallingApp && selectedDevice && (
         <div className="modal-backdrop" onClick={() => !isUninstalling && setUninstallingApp(null)}>
-          <div className="modal-card modal-md" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-dialog modal-uninstall-app" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div className="modal-title-with-icon">
                 <div className="modal-icon-badge danger">
@@ -5714,6 +5879,119 @@ export function App() {
                   )}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Power Action Confirmation Modal */}
+      {powerConfirmModal && (
+        <div className="modal-backdrop" onClick={() => !powerActionLoading && setPowerConfirmModal(null)}>
+          <div className="modal-dialog power-modal-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-with-icon">
+                <div className={`modal-icon-badge ${
+                  powerConfirmModal.action === "shutdown" ? "danger" :
+                  powerConfirmModal.action.startsWith("reboot") ? "warn" :
+                  powerConfirmModal.action === "lock" ? "primary" : "purple"
+                }`}>
+                  {powerConfirmModal.action === "shutdown" ? <Power size={20} /> :
+                   powerConfirmModal.action.startsWith("reboot") ? <RotateCcw size={20} /> :
+                   powerConfirmModal.action === "lock" ? <Lock size={20} /> : <LogOut size={20} />}
+                </div>
+                <div>
+                  <h3 className="modal-title">
+                    {powerConfirmModal.action === "reboot" ? "Bilgisayarı Yeniden Başlat" :
+                     powerConfirmModal.action === "reboot-safe" ? "Güvenli Modda Yeniden Başlat" :
+                     powerConfirmModal.action === "reboot-normal" ? "Normal Modda Yeniden Başlat" :
+                     powerConfirmModal.action === "shutdown" ? "Bilgisayarı Kapat" :
+                     powerConfirmModal.action === "lock" ? "Ekranı Kilitle" : "Oturumu Kapat"}
+                  </h3>
+                  <p className="modal-subtitle">
+                    Hedef Cihaz: <strong>{powerConfirmModal.deviceName}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                className="modal-close-btn"
+                onClick={() => setPowerConfirmModal(null)}
+                disabled={powerActionLoading}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="power-warning-card">
+                <div className="power-warning-text">
+                  {powerConfirmModal.action === "reboot" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarı anında yeniden başlatılacaktır. 
+                      Hedef kullanıcının açık programları ve kaydedilmemiş verileri kaybolabilir.
+                    </p>
+                  )}
+                  {powerConfirmModal.action === "reboot-safe" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarı Ağ Destekli Güvenli Modda (Safe Mode with Networking) başlatılacaktır.
+                    </p>
+                  )}
+                  {powerConfirmModal.action === "reboot-normal" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarı Normal Modda başlatılacak şekilde ayarlanıp yeniden başlatılacaktır.
+                    </p>
+                  )}
+                  {powerConfirmModal.action === "shutdown" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarı tamamen kapatılacaktır. 
+                      <span className="text-danger font-semibold"> Bilgisayar fiziksel olarak açılana kadar uzaktan bağlantı kurulamaz.</span>
+                    </p>
+                  )}
+                  {powerConfirmModal.action === "lock" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarının aktif ekranı anında kilitlenecektir. 
+                      Kullanıcı şifresini girerek oturumuna kaldığı yerden devam edebilir.
+                    </p>
+                  )}
+                  {powerConfirmModal.action === "logoff" && (
+                    <p>
+                      <strong>{powerConfirmModal.deviceName}</strong> bilgisayarındaki aktif kullanıcının oturumu kapatılacaktır. 
+                      Açık belgeler kaydedilmeden sonlandırılabilir.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="btn-secondary"
+                onClick={() => setPowerConfirmModal(null)}
+                disabled={powerActionLoading}
+              >
+                Vazgeç
+              </button>
+              <button
+                className={`btn-action-execute ${
+                  powerConfirmModal.action === "shutdown" ? "btn-danger" :
+                  powerConfirmModal.action.startsWith("reboot") ? "btn-warning" : "btn-primary"
+                }`}
+                onClick={handleExecutePowerAction}
+                disabled={powerActionLoading}
+              >
+                {powerActionLoading ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" />
+                    <span>İşleniyor...</span>
+                  </>
+                ) : (
+                  <>
+                    {powerConfirmModal.action === "shutdown" ? <Power size={14} /> :
+                     powerConfirmModal.action.startsWith("reboot") ? <RotateCcw size={14} /> :
+                     powerConfirmModal.action === "lock" ? <Lock size={14} /> : <LogOut size={14} />}
+                    <span>Onayla ve Gönder</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

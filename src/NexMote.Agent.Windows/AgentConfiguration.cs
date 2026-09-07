@@ -16,6 +16,12 @@ public sealed class AgentOptions
 
     /// <summary>Sunucuya heartbeat gönderme sıklığı (Saniye).</summary>
     public int HeartbeatSeconds { get; set; } = 20;
+
+    /// <summary>Geliştirme ortamında test/öz-imzalı kök sertifikalı güncellemelere izin verilip verilmeyeceği.</summary>
+    public bool AllowUntrustedUpdates { get; set; } = false;
+
+    /// <summary>İsteğe bağlı beklenen imzalayan sertifika parmak izi (Thumbprint).</summary>
+    public string? ExpectedSigningCertificateThumbprint { get; set; }
 }
 
 // DeviceIdentity / DeviceIdentityStore artık NexMote.Shared.Identity içinde tanımlı: Windows Servisi VE

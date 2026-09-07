@@ -52,7 +52,7 @@ Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan 
 - **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
 - **Sağlık Endpoint:** `https://nexmote.com/health` -> `{"product":"NexMote","status":"ok"}`
 - **Erişim Dokümanı:** [docs/server-credentials.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/docs/server-credentials.md) (git'te takip edilmiyor, sadece yerel)
-- **Güncel Client Sürümü:** `0.7.0` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
+- **Güncel Client Sürümü:** `0.7.3` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
 
 ---
 
@@ -359,7 +359,7 @@ Cihazlar `DeviceGroups` tablosuyla **keyfi derinlikte iç içe gruplar** halinde
 
 ## 🖥️ Teknisyen Masaüstü Uygulaması (WPF) Kuralları
 
-1. **Gerçek Login Ekranı (2026-08-23'te değişti):** Çoklu kullanıcı + MFA mimarisiyle birlikte "sabit admin/admin123 ile sessiz giriş" kuralı kaldırıldı — artık her teknisyen **kendi hesabıyla** giriş yapar. Uygulama açılışta yerelde DPAPI (`DataProtectionScope.CurrentUser`) ile şifreli saklanan bir oturum token'ı varsa `/api/auth/me` ile geçerliliğini sessizce doğrular ve login sormadan devam eder; token yok/süresi dolmuşsa `ServerLoginWindow` gösterilir (e-posta/şifre, ardından hesapta MFA açıksa 6 haneli kod adımı). **Parola hiçbir zaman diske yazılmaz** — sadece üretilen opak oturum token'ı (`MainWindow.TechnicianAppSettings`, `%AppData%\NexMote\TechnicianApp\settings.json`) saklanır.
+1. **Gerçek Login Ekranı (2026-08-23'te değişti):** Çoklu kullanıcı + MFA mimarisiyle birlikte sabit paylaşımlı admin parolasıyla sessiz giriş kuralı kaldırıldı — artık her teknisyen **kendi hesabıyla** giriş yapar. Uygulama açılışta yerelde DPAPI (`DataProtectionScope.CurrentUser`) ile şifreli saklanan bir oturum token'ı varsa `/api/auth/me` ile geçerliliğini sessizce doğrular ve login sormadan devam eder; token yok/süresi dolmuşsa `ServerLoginWindow` gösterilir (e-posta/şifre, ardından hesapta MFA açıksa 6 haneli kod adımı). **Parola hiçbir zaman diske yazılmaz** — sadece üretilen opak oturum token'ı (`MainWindow.TechnicianAppSettings`, `%AppData%\NexMote\TechnicianApp\settings.json`) saklanır.
 2. **Local IP Engelleme:** Sunucu bağlantı adreslerinde `192.168...`, `127.0.0.1` veya `http://` tespiti halinde otomatik `https://nexmote.com` adresine zorlama yapılır.
 3. **Çoklu Ekran Yönetimi (Soldan Sağa Sıralı & Esnek Seçim):** Monitörler `Bounds.Left` değerine göre **kesin olarak soldan sağa** sıralanır. Teknisyen üst bardaki monitör seçiciden `🖥️ Tüm Ekranlar` (yan yana eş zamanlı akış) modunu veya tek tek `🖥️ Ekran 1`, `🖥️ Ekran 2` seçerek o ekranı tam boyutta izlemeyi seçebilir.
 4. **Otomatik Görüntü Kalitesi:** Manuel kalite butonu ve rozetler kaldırıldı. Agent, her karenin SignalR gönderim süresine bakarak JPEG kalitesini (20-80 aralığında) kendiliğinden ayarlar.
@@ -425,7 +425,7 @@ cmd /c "npm --prefix web run build"
 ```powershell
 .\.dotnet\dotnet.exe run --project src/NexMote.Api/NexMote.Api.csproj --urls "http://127.0.0.1:5080"
 ```
-Yerel geliştirmede bootstrap Admin: `admin@nexmote.com` / `admin123` (`Admin:Email`/`Admin:Password`, appsettings.json'da tanımlı, sadece `Users` tablosu boşken ilk açılışta kullanılır), `Enrollment:Key` = `dev-enrollment-key` (production'da KULLANILMAZ).
+Yerel geliştirmede bootstrap Admin e-postası `admin@nexmote.com` değeridir; parola `Admin:Password` ile açıkça verilmelidir. Bu değer yoksa development ortamında tek seferlik rastgele parola konsola yazılır. `Enrollment:Key` = `dev-enrollment-key` yalnızca yerel geliştirme içindir, production'da KULLANILMAZ.
 
 ### 4. MSI Paketlerini Yeniden Oluşturma (Agent + Teknisyen)
 ```powershell
@@ -494,4 +494,3 @@ scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi down
 ---
 
 *Gelecekte projeye müdahale edecek tüm AI geliştiriciler bu master rehberdeki mimariye, veritabanı şemasına ve tasarım kurallarına bağlı kalmalıdır.*
-

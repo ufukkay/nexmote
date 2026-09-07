@@ -6,6 +6,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using NexMote.Shared.Contracts;
+using NexMote.Shared.Security;
 
 namespace NexMote.Agent.Tray;
 
@@ -128,6 +129,21 @@ internal static class InputHelperServer
                 return false;
             }
 
+            // 1. İstemcinin aynı Windows Oturumunda (SessionId) çalıştığını doğrula (Madde 21)
+            var currentSessionId = Process.GetCurrentProcess().SessionId;
+            try
+            {
+                using var clientProc = Process.GetProcessById((int)pid);
+                if (clientProc.SessionId != currentSessionId)
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
             const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
             hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (int)pid);
             if (hProcess == IntPtr.Zero)
@@ -142,10 +158,23 @@ internal static class InputHelperServer
                 return false;
             }
 
+            // 2. İstemci dosya yolunun kendi yürütülebilir dosyamızla eşleştiğini doğrula
             var clientPath = sb.ToString();
             var selfPath = Process.GetCurrentProcess().MainModule?.FileName;
-            return !string.IsNullOrEmpty(clientPath) && !string.IsNullOrEmpty(selfPath) &&
-                   string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(clientPath) || string.IsNullOrEmpty(selfPath) ||
+                !string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // 3. Kod imza (Authenticode) bütünlük doğrulaması (Madde 21)
+#if DEBUG
+            const bool allowUntrustedInDev = true;
+#else
+            const bool allowUntrustedInDev = false;
+#endif
+            var verification = AuthenticodeVerifier.Verify(clientPath, expectedSubjectContains: "NexMote", allowUntrustedRootInDev: allowUntrustedInDev);
+            return verification.IsValid;
         }
         catch
         {
@@ -163,10 +192,22 @@ internal static class InputHelperServer
     private static PipeSecurity BuildPipeSecurity()
     {
         var security = new PipeSecurity();
-        var interactiveSid = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
-        security.AddAccessRule(new PipeAccessRule(interactiveSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         security.AddAccessRule(new PipeAccessRule(systemSid, PipeAccessRights.FullControl, AccessControlType.Allow));
+
+        var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        security.AddAccessRule(new PipeAccessRule(adminSid, PipeAccessRights.FullControl, AccessControlType.Allow));
+
+        try
+        {
+            var currentUser = WindowsIdentity.GetCurrent().User;
+            if (currentUser is not null)
+            {
+                security.AddAccessRule(new PipeAccessRule(currentUser, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            }
+        }
+        catch { }
+
         return security;
     }
 

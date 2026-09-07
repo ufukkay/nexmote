@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using NexMote.Shared.Commands;
 using NexMote.Shared.Contracts;
 using NexMote.Shared.Identity;
 using NexMote.Shared.Network;
@@ -121,6 +122,40 @@ public sealed class AgentClient
         {
             // Audit iletimi best-effort'tur; komut zaten çalıştı ve sonucu teknisyene döndürüldü.
         }
+    }
+
+    public async Task<AgentQueuedCommand?> GetNextQueuedCommandAsync(DeviceIdentity identity, CancellationToken cancellationToken)
+    {
+        var options = _optionsMonitor.CurrentValue;
+        var cleanServerUrl = GetCleanServerUrl(options.ServerUrl);
+        var agentToken = Uri.EscapeDataString(identity.AgentToken);
+        var url = BuildUrl(cleanServerUrl, $"api/agents/{identity.DeviceId}/commands/next?agentToken={agentToken}");
+        var response = await _httpClient.GetAsync(url, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<AgentQueuedCommand>(cancellationToken);
+    }
+
+    public async Task PostQueuedCommandResultAsync(DeviceIdentity identity, AgentQueuedCommand command, CommandRunResult result, CancellationToken cancellationToken)
+    {
+        var options = _optionsMonitor.CurrentValue;
+        var cleanServerUrl = GetCleanServerUrl(options.ServerUrl);
+        var url = BuildUrl(cleanServerUrl, $"api/agents/{identity.DeviceId}/commands/{command.RequestId}/result");
+        var body = new AgentQueuedCommandResult(
+            identity.AgentToken,
+            result.ExitCode,
+            result.StdOut,
+            result.StdErr,
+            result.DurationMs,
+            result.TimedOut,
+            result.ElevationDenied);
+
+        var response = await _httpClient.PostAsJsonAsync(url, body, cancellationToken);
+        response.EnsureSuccessStatusCode();
     }
 
     private static string Truncate(string? value, int max)

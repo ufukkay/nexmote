@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using NexMote.Api.Auth;
 using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
+using NexMote.Shared.Security;
 
 namespace NexMote.Api.Services;
 
@@ -186,24 +188,29 @@ public sealed class UserAuthService
 
     // ----------------------------------------------------------------- Hesap (kendi şifre/MFA yönetimi)
 
-    public bool ChangePassword(Guid userId, string currentPassword, string newPassword)
+    public (bool Success, string? Error) ChangePassword(Guid userId, string currentPassword, string newPassword)
     {
+        if (!PasswordValidator.Validate(newPassword, out var pwdError))
+        {
+            return (false, pwdError);
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var user = db.Users.FirstOrDefault(u => u.Id == userId);
         if (user is null)
         {
-            return false;
+            return (false, "Kullanıcı bulunamadı.");
         }
 
         if (_passwordHasher.VerifyHashedPassword(user, user.PasswordHash, currentPassword) == PasswordVerificationResult.Failed)
         {
-            return false;
+            return (false, "Mevcut şifre hatalı.");
         }
 
         user.PasswordHash = _passwordHasher.HashPassword(user, newPassword);
         LogActivity(db, user.Id, user.Email, "account.password_change", null, null, null, null, success: true);
         db.SaveChanges();
-        return true;
+        return (true, null);
     }
 
     public MfaSetupResponse SetupMfa(Guid userId)
@@ -278,6 +285,11 @@ public sealed class UserAuthService
             return null;
         }
 
+        if (string.IsNullOrWhiteSpace(email) || email.Length > 256 || !MailAddress.TryCreate(email.Trim(), out _))
+        {
+            return null;
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var normalizedEmail = email.Trim().ToLowerInvariant();
         if (db.Users.Any(u => u.Email == normalizedEmail))
@@ -285,12 +297,15 @@ public sealed class UserAuthService
             return null;
         }
 
+        var cleanDisplayName = string.IsNullOrWhiteSpace(displayName) ? normalizedEmail : displayName.Trim();
+        if (cleanDisplayName.Length > 128) cleanDisplayName = cleanDisplayName.Substring(0, 128);
+
         var tempPassword = GenerateTemporaryPassword();
         var user = new UserEntity
         {
             Id = Guid.NewGuid(),
             Email = normalizedEmail,
-            DisplayName = string.IsNullOrWhiteSpace(displayName) ? normalizedEmail : displayName.Trim(),
+            DisplayName = cleanDisplayName,
             Role = role,
             IsActive = true,
             CreatedAt = DateTimeOffset.UtcNow
@@ -317,9 +332,17 @@ public sealed class UserAuthService
             return null;
         }
 
+        if (string.IsNullOrWhiteSpace(email) || email.Length > 256 || !MailAddress.TryCreate(email.Trim(), out _))
+        {
+            return null;
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var normalizedEmail = email.Trim().ToLowerInvariant();
         var existing = db.Users.FirstOrDefault(u => u.Email == normalizedEmail);
+
+        var cleanDisplayName = string.IsNullOrWhiteSpace(displayName) ? normalizedEmail : displayName.Trim();
+        if (cleanDisplayName.Length > 128) cleanDisplayName = cleanDisplayName.Substring(0, 128);
 
         UserEntity user;
         if (existing is null)
@@ -397,21 +420,26 @@ public sealed class UserAuthService
     /// Daveti kabul eder: kullanıcının gerçek şifresini ayarlar, daveti "kullanılmış" işaretler
     /// ve otomatik olarak bir oturum açar (kabul eden kişi doğrudan uygulamaya giriş yapmış olur).
     /// </summary>
-    public LoginResponse? AcceptInvite(string token, string password, string? ip, string? userAgent)
+    public (LoginResponse? Response, string? Error) AcceptInvite(string token, string password, string? ip, string? userAgent)
     {
+        if (!PasswordValidator.Validate(password, out var pwdError))
+        {
+            return (null, pwdError);
+        }
+
         using var db = _dbFactory.CreateDbContext();
         var now = DateTimeOffset.UtcNow;
         var hash = SessionTokens.Hash(token);
         var invite = db.UserInvites.FirstOrDefault(i => i.TokenHash == hash);
         if (invite is null || invite.AcceptedAt != null || invite.ExpiresAt <= now)
         {
-            return null;
+            return (null, "Davet geçersiz, süresi dolmuş veya zaten kullanılmış.");
         }
 
         var user = db.Users.FirstOrDefault(u => u.Id == invite.UserId);
         if (user is null || !user.IsActive)
         {
-            return null;
+            return (null, "Kullanıcı hesabı bulunamadı veya pasif durumda.");
         }
 
         user.PasswordHash = _passwordHasher.HashPassword(user, password);
@@ -421,7 +449,7 @@ public sealed class UserAuthService
         var sessionToken = IssueSession(db, user, rememberMe: true, ip, userAgent);
         LogActivity(db, user.Id, user.Email, "user.invite_accepted", null, null, null, ip, success: true);
         db.SaveChanges();
-        return new LoginResponse(RequiresMfa: false, Token: sessionToken, ChallengeToken: null);
+        return (new LoginResponse(RequiresMfa: false, Token: sessionToken, ChallengeToken: null), null);
     }
 
     public bool SetRole(Guid userId, string role, Guid actingUserId)
@@ -552,7 +580,7 @@ public sealed class UserAuthService
             .OrderByDescending(a => a.CreatedAt)
             .Skip(Math.Max(0, page - 1) * pageSize)
             .Take(Math.Clamp(pageSize, 1, 200))
-            .Select(a => new ActivityLogEntry(a.Id, a.UserId, a.UserEmailSnapshot, a.Action, a.TargetType, a.TargetId, a.DetailsJson, a.IpAddress, a.Success, a.CreatedAt))
+            .Select(a => new ActivityLogEntry(a.Id, a.UserId, a.UserEmailSnapshot, a.Action, a.TargetType, a.TargetId, a.DetailsJson, a.IpAddress, a.Success, a.CreatedAt, a.CorrelationId))
             .ToList();
 
         return (items, total);

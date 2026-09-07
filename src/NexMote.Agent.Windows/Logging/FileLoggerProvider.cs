@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 
 namespace NexMote.Agent.Windows.Logging;
 
@@ -20,7 +21,7 @@ public sealed class FileLoggerProvider : ILoggerProvider
             Directory.CreateDirectory(directory);
         }
 
-        _writer = new StreamWriter(new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+        _writer = new StreamWriter(new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8)
         {
             AutoFlush = true
         };

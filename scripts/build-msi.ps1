@@ -1,15 +1,25 @@
 param(
     [string]$ServerUrl = "https://nexmote.com",
-    [string]$EnrollmentKey = "dev-enrollment-key",
+    [string]$EnrollmentKey = "",
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [string]$Version,
+    [string]$SigningCertificateThumbprint = "",
+    [string]$SigningCertificatePath = "",
+    [string]$SigningCertificatePassword = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
+    [switch]$SkipCodeSigning
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($EnrollmentKey) -or $EnrollmentKey -eq "dev-enrollment-key" -or $EnrollmentKey.StartsWith("CHANGE-ME")) {
+    throw "Refusing to build Agent MSI with an empty, dev, or placeholder EnrollmentKey."
+}
+
 $rootDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PSScriptRoot, ".."))
 $agentPkgDir = [System.IO.Path]::Combine($rootDir, "artifacts", "package", "agent")
 $techPkgDir = [System.IO.Path]::Combine($rootDir, "artifacts", "package", "technician")
 $cleanerPkgDir = [System.IO.Path]::Combine($rootDir, "artifacts", "package", "cleaner")
+$deployerPkgDir = [System.IO.Path]::Combine($rootDir, "artifacts", "package", "deployer")
 $downloadsDir = [System.IO.Path]::Combine($rootDir, "downloads")
 $wixDir = [System.IO.Path]::Combine($rootDir, "artifacts", "wix")
 $assetsDir = [System.IO.Path]::Combine($rootDir, "assets")
@@ -18,6 +28,23 @@ $iconPath = [System.IO.Path]::Combine($assetsDir, "nexmote.ico")
 $dialogBmp = [System.IO.Path]::Combine($installerAssetsDir, "dialog.bmp")
 $bannerBmp = [System.IO.Path]::Combine($installerAssetsDir, "banner.bmp")
 $licenseRtf = [System.IO.Path]::Combine($installerAssetsDir, "license.rtf")
+$signingScript = [System.IO.Path]::Combine($PSScriptRoot, "signing.ps1")
+
+if (-not (Test-Path -LiteralPath $signingScript)) {
+    throw "Signing helper script not found: $signingScript"
+}
+
+. $signingScript
+
+$signingCertificate = $null
+if ($SkipCodeSigning.IsPresent) {
+    Write-Warning "Code signing skipped by explicit -SkipCodeSigning. Do not publish these MSI files to production."
+} else {
+    $signingCertificate = Resolve-NexMoteSigningCertificate `
+        -CertificateThumbprint $SigningCertificateThumbprint `
+        -CertificatePath $SigningCertificatePath `
+        -CertificatePassword $SigningCertificatePassword
+}
 
 function Ensure-InstallerGraphics {
     param([string]$targetDir, [string]$icoPath)
@@ -101,13 +128,15 @@ function Generate-AgentWxs {
            UpgradeCode="A76F12C0-94A1-420E-B6D7-90E0F3628101"
            Scope="perMachine">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Agent uygulamasının daha yeni bir sürümü zaten kurulu." />
+    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Agent uygulamasının daha yeni bir sürümü zaten kurulu." />
     <!-- MaximumUncompressedMediaSize açıkça büyük tutulur: paket ~380MB (üç adet self-contained/PublishSingleFile
          .NET 8 exe, her biri ~70-165MB), varsayılan WiX eşiği (200MB) aşılınca otomatik çoklu-CAB bölme devreye
          giriyor. Bu bölme, tek dosyası zaten eşiğe yakın/üzerinde olan bir paketle birleşince Windows Installer'ın
          CostFinalize/DiskCostDlg hesaplamasını bozup gerçekte 500+ GB boş alan olsa bile YANLIŞ "diskte yeterli
          alan yok" uyarısı gösteriyordu. Tek CAB'da tutmak bu hesaplama hatasını tamamen ortadan kaldırır. -->
     <MediaTemplate EmbedCab="yes" MaximumUncompressedMediaSize="1000" />
+
+    <Property Id="MSIFASTINSTALL" Value="7" />
 
     <!-- Icon & Control Panel (Add/Remove Programs) Branding -->
     <Icon Id="NexMoteIco" SourceFile="$iconPath" />
@@ -155,7 +184,7 @@ function Generate-AgentWxs {
                   Return="ignore" />
 
     <InstallExecuteSequence>
-      <Custom Action="KillAgentTrayProcess" Before="InstallValidate" Condition="REMOVE=&quot;ALL&quot; or (NOT Installed and PREVIOUSVERSIONSINSTALLED)" />
+      <Custom Action="KillAgentTrayProcess" Before="InstallValidate" />
       <Custom Action="CleanAgentProgramData" After="InstallFinalize" Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
@@ -297,8 +326,10 @@ function Generate-TechnicianWxs {
            UpgradeCode="B87F12C0-94A1-420E-B6D7-90E0F3628102"
            Scope="perMachine">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Technician Console uygulamasının daha yeni bir sürümü zaten kurulu." />
+    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Technician Console uygulamasının daha yeni bir sürümü zaten kurulu." />
     <MediaTemplate EmbedCab="yes" MaximumUncompressedMediaSize="1000" />
+
+    <Property Id="MSIFASTINSTALL" Value="7" />
 
     <!-- Icon & Control Panel (Add/Remove Programs) Branding -->
     <Icon Id="NexMoteTechIco" SourceFile="$iconPath" />
@@ -334,7 +365,7 @@ function Generate-TechnicianWxs {
                   Return="ignore" />
 
     <InstallExecuteSequence>
-      <Custom Action="KillTechProcess" Before="InstallValidate" Condition="REMOVE=&quot;ALL&quot; or (NOT Installed and PREVIOUSVERSIONSINSTALLED)" />
+      <Custom Action="KillTechProcess" Before="InstallValidate" />
     </InstallExecuteSequence>
 
     <UI>
@@ -423,6 +454,13 @@ Generate-AgentWxs -pkgDir $agentPkgDir -outputWxs $agentWxs
 Write-Host "Building NexMote-Agent-Setup.msi..."
 $agentMsi = [System.IO.Path]::Combine($downloadsDir, "NexMote-Agent-Setup.msi")
 wix build $agentWxs -arch x64 -ext $wixUiExtRef -ext $wixUtilExtRef -o $agentMsi
+if ($LASTEXITCODE -ne 0) {
+    throw "Agent MSI build failed."
+}
+if ($null -ne $signingCertificate) {
+    Invoke-NexMoteAuthenticodeSigning -Paths @($agentMsi) -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+    Assert-NexMoteAuthenticodeSignature -Paths @($agentMsi) -ExpectedThumbprint $signingCertificate.Thumbprint
+}
 
 Write-Host "Generating Technician WXS..."
 $techWxs = [System.IO.Path]::Combine($wixDir, "NexMote.Technician.wxs")
@@ -431,6 +469,13 @@ Generate-TechnicianWxs -pkgDir $techPkgDir -outputWxs $techWxs
 Write-Host "Building NexMote-Technician-Setup.msi..."
 $techMsi = [System.IO.Path]::Combine($downloadsDir, "NexMote-Technician-Setup.msi")
 wix build $techWxs -arch x64 -ext $wixUiExtRef -o $techMsi
+if ($LASTEXITCODE -ne 0) {
+    throw "Technician MSI build failed."
+}
+if ($null -ne $signingCertificate) {
+    Invoke-NexMoteAuthenticodeSigning -Paths @($techMsi) -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+    Assert-NexMoteAuthenticodeSignature -Paths @($techMsi) -ExpectedThumbprint $signingCertificate.Thumbprint
+}
 
 function Generate-CleanerWxs {
     param([string]$pkgDir, [string]$outputWxs)
@@ -444,8 +489,10 @@ function Generate-CleanerWxs {
            UpgradeCode="C98F12C0-94A1-420E-B6D7-90E0F3628103"
            Scope="perMachine">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Deep Cleaner uygulamasının daha yeni bir sürümü zaten kurulu." />
+    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Deep Cleaner uygulamasının daha yeni bir sürümü zaten kurulu." />
     <MediaTemplate EmbedCab="yes" MaximumUncompressedMediaSize="1000" />
+
+    <Property Id="MSIFASTINSTALL" Value="7" />
 
     <!-- Icon & Control Panel (Add/Remove Programs) Branding -->
     <Icon Id="NexMoteCleanerIco" SourceFile="$iconPath" />
@@ -509,6 +556,116 @@ if (Test-Path $cleanerPkgDir) {
     Write-Host "Building NexMote-Cleanup-Setup.msi..."
     $cleanerMsi = [System.IO.Path]::Combine($downloadsDir, "NexMote-Cleanup-Setup.msi")
     wix build $cleanerWxs -arch x64 -ext $wixUiExtRef -o $cleanerMsi
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cleaner MSI build failed."
+    }
+    if ($null -ne $signingCertificate) {
+        Invoke-NexMoteAuthenticodeSigning -Paths @($cleanerMsi) -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+        Assert-NexMoteAuthenticodeSignature -Paths @($cleanerMsi) -ExpectedThumbprint $signingCertificate.Thumbprint
+    }
+}
+
+function Generate-DeployerWxs {
+    param([string]$pkgDir, [string]$outputWxs)
+
+    $wxsContent = @"
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="NexMote Remote Deployer"
+           Manufacturer="NexMote Inc."
+           Version="$Version"
+           UpgradeCode="A8912A4F-821B-4190-84E1-912A09B2E805"
+           Scope="perMachine">
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="NexMote Remote Deployer uygulamasının daha yeni bir sürümü zaten kurulu." />
+    <MediaTemplate EmbedCab="yes" MaximumUncompressedMediaSize="1000" />
+
+    <!-- Icon & Control Panel (Add/Remove Programs) Branding -->
+    <Icon Id="NexMoteDeployerIco" SourceFile="$iconPath" />
+    <Property Id="ARPPRODUCTICON" Value="NexMoteDeployerIco" />
+    <Property Id="ARPHELPLINK" Value="https://nexmote.com" />
+    <Property Id="ARPURLINFOABOUT" Value="https://nexmote.com" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://nexmote.com/downloads" />
+    <Property Id="ARPCONTACT" Value="destek@nexmote.com" />
+    <Property Id="ARPCOMMENTS" Value="NexMote Uzaktan Toplu Ajan Dağıtım Aracı" />
+
+    <UI>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
+    </UI>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUIDialogBmp" Value="$dialogBmp" />
+    <WixVariable Id="WixUIBannerBmp" Value="$bannerBmp" />
+    <WixVariable Id="WixUILicenseRtf" Value="$licenseRtf" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="NexMoteDeployerBaseFolder" Name="NexMote">
+        <Directory Id="INSTALLFOLDERDEPLOYER" Name="Deployer" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu Shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="NexMoteDeployerProgramsFolder" Name="NexMote">
+        <Component Id="DeployerStartMenuComp" Guid="A8912A4F-821B-4190-84E1-912A09B2E806">
+          <Shortcut Id="DeployerStartMenuShortcut"
+                    Name="NexMote Remote Deployer"
+                    Description="NexMote Uzaktan Toplu Ajan Dağıtım Aracı"
+                    Target="[INSTALLFOLDERDEPLOYER]NexMote.Deployer.exe"
+                    WorkingDirectory="INSTALLFOLDERDEPLOYER"
+                    Icon="NexMoteDeployerIco" />
+          <RemoveFolder Id="CleanNexMoteDeployerProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="Software\NexMote\Deployer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Desktop Shortcut -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DeployerDesktopShortcutComp" Guid="A8912A4F-821B-4190-84E1-912A09B2E807">
+        <Shortcut Id="DeployerDesktopShortcut"
+                  Name="NexMote Remote Deployer"
+                  Description="NexMote Uzaktan Ajan Dağıtım Aracı"
+                  Target="[INSTALLFOLDERDEPLOYER]NexMote.Deployer.exe"
+                  WorkingDirectory="INSTALLFOLDERDEPLOYER"
+                  Icon="NexMoteDeployerIco" />
+        <RegistryValue Root="HKLM" Key="Software\NexMote\Deployer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <ComponentGroup Id="DeployerComponents" Directory="INSTALLFOLDERDEPLOYER">
+      <Component Id="DeployerExeComponent">
+        <File Id="DeployerExe" Source="$pkgDir\NexMote.Deployer.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="DeployerMainFeature" Title="NexMote Remote Deployer" Level="1">
+      <ComponentGroupRef Id="DeployerComponents" />
+      <ComponentRef Id="DeployerDesktopShortcutComp" />
+      <ComponentRef Id="DeployerStartMenuComp" />
+    </Feature>
+  </Package>
+</Wix>
+"@
+
+    Set-Content -Path $outputWxs -Value $wxsContent -Encoding UTF8
+}
+
+if (Test-Path $deployerPkgDir) {
+    Write-Host "Generating Deployer WXS..."
+    $deployerWxs = [System.IO.Path]::Combine($wixDir, "NexMote.Deployer.wxs")
+    Generate-DeployerWxs -pkgDir $deployerPkgDir -outputWxs $deployerWxs
+
+    Write-Host "Building NexMote-Deployer-Setup.msi..."
+    $deployerMsi = [System.IO.Path]::Combine($downloadsDir, "NexMote-Deployer-Setup.msi")
+    wix build $deployerWxs -arch x64 -ext $wixUiExtRef -o $deployerMsi
+    if ($LASTEXITCODE -ne 0) {
+        throw "Deployer MSI build failed."
+    }
+    if ($null -ne $signingCertificate) {
+        Invoke-NexMoteAuthenticodeSigning -Paths @($deployerMsi) -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+        Assert-NexMoteAuthenticodeSignature -Paths @($deployerMsi) -ExpectedThumbprint $signingCertificate.Thumbprint
+    }
 }
 
 Write-Host "MSI Packages built successfully with Enterprise UI:"
@@ -516,4 +673,7 @@ Write-Host "  - $agentMsi"
 Write-Host "  - $techMsi"
 if (Test-Path (Join-Path $downloadsDir "NexMote-Cleanup-Setup.msi")) {
     Write-Host "  - $(Join-Path $downloadsDir 'NexMote-Cleanup-Setup.msi')"
+}
+if (Test-Path (Join-Path $downloadsDir "NexMote-Deployer-Setup.msi")) {
+    Write-Host "  - $(Join-Path $downloadsDir 'NexMote-Deployer-Setup.msi')"
 }

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using NexMote.Api.Auth;
 using NexMote.Api.Data;
 using NexMote.Shared.Contracts;
 
@@ -32,29 +33,57 @@ public sealed class DeviceRegistry
     {
         using var db = _dbFactory.CreateDbContext();
 
-        var nameLower = request.DeviceName.ToLowerInvariant();
-        var domainLower = request.DomainName.ToLowerInvariant();
+        var nameLower = request.DeviceName.Trim().ToLower();
+        var domainLower = request.DomainName.Trim().ToLower();
+        var serial = request.SerialNumber?.Trim();
 
         // Eğer bu cihaz daha önce DeletedDevices listesindeyse, yeni kurulumla kaydolurken bu engeli kaldır
         var deletedEntries = db.DeletedDevices
-            .Where(d => d.DeviceName.ToLower() == nameLower && d.DomainName.ToLower() == domainLower)
+            .Where(d => d.DeviceName.ToLower() == nameLower &&
+                       (d.DomainName.ToLower() == domainLower ||
+                        d.DomainName.ToLower() == "workgroup" ||
+                        domainLower == "workgroup" ||
+                        d.DomainName.ToLower() == nameLower ||
+                        domainLower == nameLower))
             .ToList();
         if (deletedEntries.Count > 0)
         {
             db.DeletedDevices.RemoveRange(deletedEntries);
         }
 
+        // 1. Önce tam eşleşme (DeviceName ve DomainName birebir aynı)
         var existing = db.Devices.FirstOrDefault(device =>
             device.DeviceName.ToLower() == nameLower &&
             device.DomainName.ToLower() == domainLower);
 
+        // 2. Seri numarasıyla eşleşme (Donanım seri numarası varsa ve jenerik değilse aynı fiziksel makinedir)
+        if (existing is null && !string.IsNullOrWhiteSpace(serial) && !IsGenericSerial(serial))
+        {
+            existing = db.Devices.FirstOrDefault(device =>
+                device.SerialNumber != null &&
+                device.SerialNumber.ToLower() == serial.ToLower());
+        }
+
+        // 3. Bilgisayar adı (DeviceName) esnek eşleşmesi:
+        //    Domainlerden biri WORKGROUP ise veya Domain adı bilgisayar adına eşitse (yerel workgroup oturumu)
+        //    mükerrer oluşturma; var olan kaydı güncelle.
+        if (existing is null)
+        {
+            existing = db.Devices.FirstOrDefault(device =>
+                device.DeviceName.ToLower() == nameLower &&
+                (device.DomainName.ToLower() == domainLower ||
+                 device.DomainName.ToLower() == "workgroup" ||
+                 domainLower == "workgroup" ||
+                 device.DomainName.ToLower() == nameLower ||
+                 domainLower == nameLower));
+        }
+
         var now = DateTimeOffset.UtcNow;
-        string token;
+        string rawToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        string tokenHash = SessionTokens.Hash(rawToken);
 
         if (existing is null)
         {
-            // Cihaza özgü 64-karakter hex token üret (kriptografik olarak güçlü)
-            token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
             existing = new DeviceEntity
             {
                 Id = Guid.NewGuid(),
@@ -64,7 +93,7 @@ public sealed class DeviceRegistry
                 AgentVersion = request.AgentVersion,
                 SerialNumber = request.SerialNumber,
                 LocationCode = request.LocationCode,
-                AgentToken = token,
+                AgentToken = tokenHash, // DB'de yalnızca SHA-256 hash saklanır
                 LastSeenAt = now,
                 EnrolledAt = now,
                 GroupId = groupId
@@ -73,16 +102,24 @@ public sealed class DeviceRegistry
         }
         else
         {
-            // Mevcut cihaz yeniden kaydoluyorsa mevcut token'ı koru (böylece servis ve tray arasındaki token senkronizasyonu bozulmaz)
-            token = string.IsNullOrWhiteSpace(existing.AgentToken)
-                ? Convert.ToHexString(RandomNumberGenerator.GetBytes(32))
-                : existing.AgentToken;
-
+            // Yeniden kayıt, yalnızca bilgisayar adı/domain bilgisine güvenerek mevcut token'ı geri vermemeli.
+            // Bu yüzden mevcut cihaz kaydı korunur ama agent token'ı rotate edilir.
             existing.OperatingSystem = request.OperatingSystem;
             existing.AgentVersion = request.AgentVersion;
-            existing.SerialNumber = request.SerialNumber;
-            existing.LocationCode = request.LocationCode;
-            existing.AgentToken = token;
+            if (!string.IsNullOrWhiteSpace(request.SerialNumber))
+            {
+                existing.SerialNumber = request.SerialNumber;
+            }
+            if (!string.IsNullOrWhiteSpace(request.LocationCode))
+            {
+                existing.LocationCode = request.LocationCode;
+            }
+            // Eğer yeni gelen Domain adı gerçek bir kurumsal domain ise (WORKGROUP veya bilgisayar adı değilse) domain'i güncelle
+            if (domainLower != "workgroup" && domainLower != nameLower)
+            {
+                existing.DomainName = request.DomainName;
+            }
+            existing.AgentToken = tokenHash;
             existing.LastSeenAt = now;
             db.Devices.Update(existing);
         }
@@ -91,7 +128,7 @@ public sealed class DeviceRegistry
 
         return new AgentEnrollmentResponse(
             existing.Id,
-            token,
+            rawToken,
             new Uri("/hubs/signaling", UriKind.Relative),
             TimeSpan.FromSeconds(20));
     }
@@ -99,6 +136,7 @@ public sealed class DeviceRegistry
     /// <summary>
     /// Cihazdan gelen periyodik heartbeat sinyalini ve CPU/RAM/Disk donanım telemetrisini işler.
     /// Token karşılaştırması timing-safe (CryptographicOperations.FixedTimeEquals) yöntemiyle yapılır.
+    /// DB'de SHA-256 hash'lenmiş token kontrol edilir; eski düz metin token varsa otomatik hash'e yükseltilir.
     /// </summary>
     /// <param name="deviceId">Cihaz kimliği.</param>
     /// <param name="request">Heartbeat verisi ve donanım metrikleri.</param>
@@ -108,13 +146,22 @@ public sealed class DeviceRegistry
         using var db = _dbFactory.CreateDbContext();
         var device = db.Devices.FirstOrDefault(d => d.Id == deviceId);
 
-        if (device is null)
+        if (device is null || string.IsNullOrWhiteSpace(request.AgentToken))
         {
             return false;
         }
 
-        // Timing-safe karşılaştırma: == operatörü yan-kanal saldırısına açıktır
-        if (!TokenEquals(device.AgentToken, request.AgentToken))
+        var providedHash = SessionTokens.Hash(request.AgentToken);
+        if (TokenEquals(device.AgentToken, providedHash))
+        {
+            // Hash doğrulaması başarılı
+        }
+        else if (TokenEquals(device.AgentToken, request.AgentToken))
+        {
+            // Geriye uyumluluk: Eski düz metin token bulundu, derhal hash'e yükselt
+            device.AgentToken = providedHash;
+        }
+        else
         {
             return false;
         }
@@ -133,7 +180,7 @@ public sealed class DeviceRegistry
             device.AgentVersion = request.AgentVersion;
         }
 
-        if (request.NetworkAdapters != null && request.NetworkAdapters.Count > 0)
+        if (request.NetworkAdapters != null)
         {
             try
             {
@@ -142,7 +189,7 @@ public sealed class DeviceRegistry
             catch { }
         }
 
-        if (request.InstalledApps != null && request.InstalledApps.Count > 0)
+        if (request.InstalledApps != null)
         {
             try
             {
@@ -151,7 +198,7 @@ public sealed class DeviceRegistry
             catch { }
         }
 
-        if (request.WindowsUpdates != null && request.WindowsUpdates.Count > 0)
+        if (request.WindowsUpdates != null)
         {
             try
             {
@@ -194,6 +241,87 @@ public sealed class DeviceRegistry
             .OrderByDescending(device => device.LastSeenAt)
             .Select(device => ToSummary(device))
             .ToArray();
+    }
+
+    /// <summary>
+    /// Cihazları sunucu tarafında filtreleyerek, sıralayarak ve sayfalayarak döner (Madde 7).
+    /// </summary>
+    public PagedResult<DeviceSummary> ListPaged(DeviceQueryOptions options)
+    {
+        using var db = _dbFactory.CreateDbContext();
+
+        var page = Math.Max(1, options.Page);
+        var pageSize = Math.Clamp(options.PageSize, 1, 200);
+
+        var query = db.Devices.AsNoTracking().AsQueryable();
+
+        // 1. Grup filtresi
+        if (options.GroupId.HasValue)
+        {
+            query = query.Where(d => d.GroupId == options.GroupId.Value);
+        }
+
+        // 2. Arama filtresi
+        if (!string.IsNullOrWhiteSpace(options.Search))
+        {
+            var search = options.Search.Trim().ToLowerInvariant();
+            query = query.Where(d =>
+                d.DeviceName.ToLower().Contains(search) ||
+                d.DomainName.ToLower().Contains(search) ||
+                (d.IpAddress != null && d.IpAddress.ToLower().Contains(search)) ||
+                (d.ActiveUser != null && d.ActiveUser.ToLower().Contains(search)) ||
+                (d.SerialNumber != null && d.SerialNumber.ToLower().Contains(search)) ||
+                (d.LocationCode != null && d.LocationCode.ToLower().Contains(search)));
+        }
+
+        // SQLite DateTimeOffset kısıtlaması nedeniyle entity'leri belleğe çek
+        var allMatching = query.ToList();
+        var now = DateTimeOffset.UtcNow;
+        var onlineCutoff = now.AddSeconds(-60);
+
+        var onlineCount = allMatching.Count(d => d.LastSeenAt >= onlineCutoff);
+        var offlineCount = allMatching.Count - onlineCount;
+
+        // 3. Durum filtresi (Online / Offline)
+        if (string.Equals(options.Status, "online", StringComparison.OrdinalIgnoreCase))
+        {
+            allMatching = allMatching.Where(d => d.LastSeenAt >= onlineCutoff).ToList();
+        }
+        else if (string.Equals(options.Status, "offline", StringComparison.OrdinalIgnoreCase))
+        {
+            allMatching = allMatching.Where(d => d.LastSeenAt < onlineCutoff).ToList();
+        }
+
+        // 4. Sıralama (In-Memory)
+        var isDesc = !string.Equals(options.SortDir, "asc", StringComparison.OrdinalIgnoreCase);
+        IEnumerable<DeviceEntity> sorted = (options.SortBy?.ToLowerInvariant()) switch
+        {
+            "name" => isDesc ? allMatching.OrderByDescending(d => d.DeviceName, StringComparer.OrdinalIgnoreCase) : allMatching.OrderBy(d => d.DeviceName, StringComparer.OrdinalIgnoreCase),
+            "cpu" => isDesc ? allMatching.OrderByDescending(d => d.CpuUsagePercent) : allMatching.OrderBy(d => d.CpuUsagePercent),
+            "memory" => isDesc ? allMatching.OrderByDescending(d => d.MemoryUsedMb) : allMatching.OrderBy(d => d.MemoryUsedMb),
+            "os" => isDesc ? allMatching.OrderByDescending(d => d.OperatingSystem, StringComparer.OrdinalIgnoreCase) : allMatching.OrderBy(d => d.OperatingSystem, StringComparer.OrdinalIgnoreCase),
+            "user" => isDesc ? allMatching.OrderByDescending(d => d.ActiveUser, StringComparer.OrdinalIgnoreCase) : allMatching.OrderBy(d => d.ActiveUser, StringComparer.OrdinalIgnoreCase),
+            "uptime" => isDesc ? allMatching.OrderByDescending(d => d.UptimeSeconds) : allMatching.OrderBy(d => d.UptimeSeconds),
+            _ => isDesc ? allMatching.OrderByDescending(d => d.LastSeenAt) : allMatching.OrderBy(d => d.LastSeenAt)
+        };
+
+        var filteredCount = allMatching.Count;
+        var totalPages = Math.Max(1, (int)Math.Ceiling(filteredCount / (double)pageSize));
+
+        var pagedItems = sorted
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(d => ToSummary(d))
+            .ToList();
+
+        return new PagedResult<DeviceSummary>(
+            pagedItems,
+            filteredCount,
+            page,
+            pageSize,
+            totalPages,
+            onlineCount,
+            offlineCount);
     }
 
     /// <summary>
@@ -245,6 +373,16 @@ public sealed class DeviceRegistry
             });
         }
 
+        // İlişkili kayıtları temizle (Cascade Cleanup)
+        var relatedCommands = db.DeviceCommands.Where(c => c.DeviceId == id);
+        db.DeviceCommands.RemoveRange(relatedCommands);
+
+        var relatedAlerts = db.DeviceAlerts.Where(a => a.DeviceId == id);
+        db.DeviceAlerts.RemoveRange(relatedAlerts);
+
+        var relatedSessions = db.RemoteSessions.Where(s => s.DeviceId == id);
+        db.RemoteSessions.RemoveRange(relatedSessions);
+
         db.Devices.Remove(device);
         db.SaveChanges();
         return true;
@@ -286,8 +424,31 @@ public sealed class DeviceRegistry
         }
 
         using var db = _dbFactory.CreateDbContext();
-        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
-        return device is not null && TokenEquals(device.AgentToken, agentToken);
+        var device = db.Devices.FirstOrDefault(d => d.Id == deviceId);
+        if (device is null)
+        {
+            return false;
+        }
+
+        var providedHash = SessionTokens.Hash(agentToken);
+        if (TokenEquals(device.AgentToken, providedHash))
+        {
+            return true;
+        }
+
+        // Geriye uyumluluk: DB'de eski düz metin token kayıtlıysa
+        if (TokenEquals(device.AgentToken, agentToken))
+        {
+            device.AgentToken = providedHash;
+            try
+            {
+                db.SaveChanges();
+            }
+            catch { }
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -350,6 +511,7 @@ public sealed class DeviceRegistry
             device.MemoryTotalMb,
             device.MemoryUsedMb,
             device.DiskFreeMb,
+            device.UptimeSeconds,
             adapters,
             apps,
             updates,
@@ -396,5 +558,12 @@ public sealed class DeviceRegistry
         }
 
         return CryptographicOperations.FixedTimeEquals(storedBytes, providedBytes);
+    }
+
+    private static bool IsGenericSerial(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return true;
+        var t = s.Trim().ToLowerInvariant();
+        return t is "0" or "none" or "default string" or "to be filled by o.e.m." or "system serial number" or "chassis serial number";
     }
 }

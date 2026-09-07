@@ -14,7 +14,9 @@ public sealed class SignalingHub : Hub
     private readonly DeviceRegistry _devices;
     private readonly SignalSessionAccess _access;
     private readonly DeviceCommandManager _commandManager;
+    private readonly DeviceCommandQueue _commandQueue;
     private readonly SecurityProfileService _securityProfiles;
+    private readonly ILogger<SignalingHub> _logger;
 
     /// <summary>
     /// Mesaj tipine göre maksimum payload boyutu (byte).
@@ -50,13 +52,17 @@ public sealed class SignalingHub : Hub
         DeviceRegistry devices,
         SignalSessionAccess access,
         DeviceCommandManager commandManager,
-        SecurityProfileService securityProfiles)
+        DeviceCommandQueue commandQueue,
+        SecurityProfileService securityProfiles,
+        ILogger<SignalingHub> logger)
     {
         _sessions = sessions;
         _devices = devices;
         _access = access;
         _commandManager = commandManager;
+        _commandQueue = commandQueue;
         _securityProfiles = securityProfiles;
+        _logger = logger;
     }
 
     /// <summary>
@@ -70,11 +76,13 @@ public sealed class SignalingHub : Hub
         var session = _sessions.Activate(sessionId, token);
         if (session is null)
         {
+            _logger.LogWarning("[Signaling] JoinTechnicianSession basarisiz: Gecersiz veya suresi dolmus oturum. SessionId: {SessionId}", sessionId);
             throw new HubException("Geçersiz veya süresi dolmuş oturum.");
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, $"session:{sessionId}");
         _access.Add(Context.ConnectionId, sessionId, SignalSessionRole.Technician);
+        _logger.LogInformation("[Signaling] Teknisyen katildi: SessionId={SessionId}, Hedef Cihaz={DeviceId}, ConnectionId={ConnectionId}", sessionId, session.DeviceId, Context.ConnectionId);
 
         // Cihazın etkin güvenlik profilini kontrol et
         var profile = _securityProfiles.GetEffectiveProfile(session.DeviceId);
@@ -98,6 +106,7 @@ public sealed class SignalingHub : Hub
 
         if (consentRequired && profile is not null)
         {
+            _logger.LogInformation("[Signaling] Baglanti onayi gerekiyor: SessionId={SessionId}, TargetDeviceId={DeviceId}", sessionId, session.DeviceId);
             // Teknisyene onay beklendiğini bildir
             await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "waiting_consent");
             // Hedef cihaza onay diyaloğunu açma sinyali ilet
@@ -110,8 +119,10 @@ public sealed class SignalingHub : Hub
         }
         else
         {
-            // Doğrudan bağlan (Unattended)
+            // Doğrudan bağlan (Unattended) - Çift katmanlı iletim: Hem Tray hem Windows Service'e gönder
+            _logger.LogInformation("[Signaling] Canli oturum istegi iletiliyor: SessionId={SessionId}, TargetDeviceId={DeviceId}", sessionId, session.DeviceId);
             await Clients.Group($"device:{session.DeviceId}").SendAsync("RemoteSessionRequested", sessionId);
+            await Clients.Group($"device:{session.DeviceId}:service").SendAsync("RemoteSessionRequested", sessionId);
         }
     }
 
@@ -122,6 +133,7 @@ public sealed class SignalingHub : Hub
     {
         if (!_devices.ValidateAgent(deviceId, agentToken))
         {
+            _logger.LogWarning("[Signaling] SubmitConsentResponse basarisiz: Gecersiz token. DeviceId={DeviceId}", deviceId);
             throw new HubException("Geçersiz cihaz token'ı.");
         }
 
@@ -133,11 +145,14 @@ public sealed class SignalingHub : Hub
 
         if (accepted)
         {
+            _logger.LogInformation("[Signaling] Kullanici onayi kabul edildi: SessionId={SessionId}, DeviceId={DeviceId}", sessionId, deviceId);
             await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "consent_accepted");
             await Clients.Group($"device:{deviceId}").SendAsync("RemoteSessionRequested", sessionId);
+            await Clients.Group($"device:{deviceId}:service").SendAsync("RemoteSessionRequested", sessionId);
         }
         else
         {
+            _logger.LogInformation("[Signaling] Kullanici onayi reddedildi: SessionId={SessionId}, Reason={Reason}", sessionId, reason);
             await Clients.Group($"session:{sessionId}").SendAsync("ConsentRejected", reason ?? "Hedef kullanıcı bağlantı isteğini reddetti.");
             await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "consent_rejected");
             _sessions.Expire(sessionId);
@@ -150,14 +165,27 @@ public sealed class SignalingHub : Hub
     /// </summary>
     /// <param name="deviceId">Cihazın benzersiz kimliği.</param>
     /// <param name="agentToken">Cihazın kimlik doğrulama token'ı.</param>
-    public async Task JoinDevice(Guid deviceId, string agentToken)
+    /// <param name="clientType">İstemci türü ("service" veya "tray").</param>
+    public async Task JoinDevice(Guid deviceId, string agentToken, string? clientType = null)
     {
         if (!_devices.ValidateAgent(deviceId, agentToken))
         {
+            _logger.LogWarning("[Signaling] JoinDevice reddedildi: Gecersiz token. DeviceId={DeviceId}, ConnectionId={ConnectionId}", deviceId, Context.ConnectionId);
             throw new HubException("Geçersiz cihaz token'ı.");
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, $"device:{deviceId}");
+        if (string.Equals(clientType, "service", StringComparison.OrdinalIgnoreCase))
+        {
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"device:{deviceId}:service");
+            _access.AddServiceConnection(Context.ConnectionId, deviceId);
+        }
+        else
+        {
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"device:{deviceId}:tray");
+        }
+        _access.AddDeviceConnection(Context.ConnectionId, deviceId);
+        _logger.LogInformation("[Signaling] Cihaz dinleme kanalina baglandi: DeviceId={DeviceId}, ClientType={ClientType}, ConnectionId={ConnectionId}", deviceId, clientType ?? "tray", Context.ConnectionId);
     }
 
     /// <summary>
@@ -172,11 +200,14 @@ public sealed class SignalingHub : Hub
         var session = _sessions.Get(sessionId);
         if (session is null || session.DeviceId != deviceId || !_devices.ValidateAgent(deviceId, agentToken))
         {
+            _logger.LogWarning("[Signaling] JoinDeviceSession reddedildi: SessionId={SessionId}, DeviceId={DeviceId}, HasSession={HasSession}", sessionId, deviceId, session is not null);
             throw new HubException("Geçersiz veya süresi dolmuş cihaz oturumu.");
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, $"session:{sessionId}");
         _access.Add(Context.ConnectionId, sessionId, SignalSessionRole.Agent);
+        _access.AddDeviceConnection(Context.ConnectionId, deviceId);
+        _logger.LogInformation("[Signaling] Cihaz oturum odasina katildi: DeviceId={DeviceId} -> SessionId={SessionId}, ConnectionId={ConnectionId}. Teknisyene bildirim iletiliyor.", deviceId, sessionId, Context.ConnectionId);
         await Clients.Group($"session:{sessionId}").SendAsync("DeviceJoinedSession");
     }
 
@@ -190,9 +221,28 @@ public sealed class SignalingHub : Hub
     /// <param name="payload">Sinyalin JSON veri gövdesi.</param>
     public async Task SendSignal(Guid sessionId, string type, string payload)
     {
-        if (!_access.Has(Context.ConnectionId, sessionId) || _sessions.Get(sessionId) is null)
+        var session = _sessions.Get(sessionId);
+        if (session is null)
         {
+            _logger.LogWarning("[Signaling] SendSignal reddedildi: Oturum bulunamadi veya suresi dolmus. SessionId={SessionId}, Type={Type}, ConnectionId={ConnectionId}", sessionId, type, Context.ConnectionId);
             throw new HubException("Geçersiz veya süresi dolmuş oturum.");
+        }
+
+        if (!_access.Has(Context.ConnectionId, sessionId))
+        {
+            // Eğer bu bağlantı JoinDevice ile bu oturumun hedef cihazına ait olarak kaydedilmişse,
+            // yeniden bağlanma yarış durumunu (race condition) önlemek için otomatik olarak oturum odasına dahil et
+            if (_access.IsDeviceConnection(Context.ConnectionId, session.DeviceId))
+            {
+                _access.Add(Context.ConnectionId, sessionId, SignalSessionRole.Agent);
+                await Groups.AddToGroupAsync(Context.ConnectionId, $"session:{sessionId}");
+                _logger.LogInformation("[Signaling] SendSignal: Ajan bağlantısı otomatik olarak oturum odasına dahil edildi. SessionId={SessionId}, DeviceId={DeviceId}, ConnectionId={ConnectionId}, Type={Type}", sessionId, session.DeviceId, Context.ConnectionId, type);
+            }
+            else
+            {
+                _logger.LogWarning("[Signaling] SendSignal reddedildi: Yetkisiz bağlantı. SessionId={SessionId}, Type={Type}, ConnectionId={ConnectionId}", sessionId, type, Context.ConnectionId);
+                throw new HubException("Geçersiz veya süresi dolmuş oturum.");
+            }
         }
 
         if (string.IsNullOrWhiteSpace(type) || payload is null)
@@ -200,10 +250,41 @@ public sealed class SignalingHub : Hub
             throw new HubException("Sinyal türü ve veri gövdesi gereklidir.");
         }
 
+        // Sunucu tarafı güvenlik profili kısıtlamaları (Madde 15)
+        var role = _access.GetRole(Context.ConnectionId, sessionId);
+        if (role == SignalSessionRole.Technician)
+        {
+            var profile = _securityProfiles.GetEffectiveProfile(session.DeviceId);
+            if (profile != null)
+            {
+                if (profile.ViewOnlyMode && string.Equals(type, "remote-input", StringComparison.OrdinalIgnoreCase))
+                {
+                    // View-Only modunda klavye/fare girdisi hedefe iletilmez
+                    return;
+                }
+
+                if (!profile.AllowRemoteTerminal && string.Equals(type, "remote-command", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new HubException("Bu cihaz için uzak terminal komut yürütme yetkisi kapalıdır.");
+                }
+
+                if (!profile.AllowClipboard && string.Equals(type, "clipboard-text", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new HubException("Bu cihaz için pano senkronizasyonu kapalıdır.");
+                }
+
+                if (!profile.AllowFileTransfer && string.Equals(type, "file-chunk", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new HubException("Bu cihaz için dosya aktarımı kapalıdır.");
+                }
+            }
+        }
+
         // Mesaj tipine göre diferansiyel payload boyut sınırı uygula
         var limit = PayloadLimits.TryGetValue(type, out var configured) ? configured : DefaultPayloadLimit;
         if (payload.Length > limit)
         {
+            _logger.LogWarning("[Signaling] Sinyal boyutu limiti asti: Type={Type}, Boyut={Length}, Limit={Limit}, SessionId={SessionId}", type, payload.Length, limit, sessionId);
             throw new HubException(
                 $"'{type}' sinyali izin verilen maksimum boyutu ({limit:N0} karakter) aşıyor. " +
                 $"Gelen: {payload.Length:N0} karakter.");
@@ -216,15 +297,42 @@ public sealed class SignalingHub : Hub
     /// <summary>
     /// Ajan tarafından doğrudan web konsolu için yürütülen komutun sonucunu sunucuya iletir.
     /// </summary>
-    public Task SubmitCommandResult(Guid requestId, int exitCode, string stdOut, string stdErr, long durationMs, bool timedOut, bool elevationDenied)
+    public Task SubmitCommandResult(Guid deviceId, Guid requestId, int exitCode, string stdOut, string stdErr, long durationMs, bool timedOut, bool elevationDenied)
     {
-        _commandManager.CompleteCommand(new DeviceCommandExecutionResult(
-            requestId, exitCode, stdOut ?? string.Empty, stdErr ?? string.Empty, durationMs, timedOut, elevationDenied));
+        if (!_access.IsDeviceConnection(Context.ConnectionId, deviceId))
+        {
+            throw new HubException("Geçersiz cihaz bağlantısı.");
+        }
+
+        var result = new DeviceCommandExecutionResult(
+            requestId, exitCode, stdOut ?? string.Empty, stdErr ?? string.Empty, durationMs, timedOut, elevationDenied);
+        if (!_commandQueue.Complete(deviceId, result))
+        {
+            throw new HubException("Command result is unknown or conflicts with the recorded result.");
+        }
+        _commandManager.CompleteCommand(deviceId, result);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Teknisyen istemcisinin veya web konsolunun canlı cihaz telemetri delta akışına abone olmasını sağlar (Madde 7).
+    /// </summary>
+    public Task SubscribeToDeviceFeed()
+    {
+        return Groups.AddToGroupAsync(Context.ConnectionId, "devices:feed");
+    }
+
+    /// <summary>
+    /// Canlı cihaz telemetri delta akışı aboneliğinden ayrılır.
+    /// </summary>
+    public Task UnsubscribeFromDeviceFeed()
+    {
+        return Groups.RemoveFromGroupAsync(Context.ConnectionId, "devices:feed");
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
+        _logger.LogInformation("[Signaling] Istemci baglantisi kesildi: ConnectionId={ConnectionId}, Exception={Exception}", Context.ConnectionId, exception?.Message ?? "Normal kapanis");
         _access.RemoveConnection(Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
