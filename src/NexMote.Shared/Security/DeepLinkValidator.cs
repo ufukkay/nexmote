@@ -73,12 +73,11 @@ public static class DeepLinkValidator
                 return false;
             }
 
-            // Güvenlik: Yalnızca HTTPS veya localhost/127.0.0.1 için HTTP kabul edilir
-            var isLocalhost = string.Equals(serverUri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
-                              string.Equals(serverUri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase);
+            // Güvenlik: Yalnızca HTTPS veya localhost/özel yerel ağ IP'leri için HTTP kabul edilir
+            var isLocalOrPrivate = NexMote.Shared.Network.NexMoteHttp.IsPrivateOrLocalHost(serverUri.Host);
 
             if (!string.Equals(serverUri.Scheme, "https", StringComparison.OrdinalIgnoreCase) &&
-                !(string.Equals(serverUri.Scheme, "http", StringComparison.OrdinalIgnoreCase) && isLocalhost))
+                !(string.Equals(serverUri.Scheme, "http", StringComparison.OrdinalIgnoreCase) && isLocalOrPrivate))
             {
                 errorMessage = "Sunucu adresi güvenli HTTPS protokolü kullanmalıdır.";
                 return false;
@@ -90,7 +89,7 @@ public static class DeepLinkValidator
                 finalServerUrl = "https://nexmote.com";
             }
 
-            // Bilinmeyen üçüncü taraf sunucu kontrolü (nexmote.com ve www.nexmote.com otomatik güvenilir)
+            // Bilinmeyen üçüncü taraf sunucu kontrolü (nexmote.com, www.nexmote.com ve yerel ağlar otomatik güvenilir)
             if (!IsTrustedHost(serverUri.Host, trustedServerUrl))
             {
                 requiresHostConfirmation = true;
@@ -139,9 +138,8 @@ public static class DeepLinkValidator
     {
         var cleanHost = StripWww(host);
 
-        // Localhost kontrolü
-        if (string.Equals(cleanHost, "localhost", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(cleanHost, "127.0.0.1", StringComparison.OrdinalIgnoreCase))
+        // Localhost ve yerel/özel ağ IP kontrolü (192.168.x.x, 10.x.x.x vb.)
+        if (NexMote.Shared.Network.NexMoteHttp.IsPrivateOrLocalHost(cleanHost))
         {
             return true;
         }

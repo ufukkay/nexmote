@@ -18,6 +18,11 @@ internal static class PowerHelper
     {
         try
         {
+            var systemDir = Environment.SystemDirectory;
+            var shutdownExe = Path.Combine(systemDir, "shutdown.exe");
+            var bcdeditExe = Path.Combine(systemDir, "bcdedit.exe");
+            var logoffExe = Path.Combine(systemDir, "logoff.exe");
+
             switch (action.ToLowerInvariant())
             {
                 case "lock":
@@ -25,20 +30,19 @@ internal static class PowerHelper
                     break;
                 case "logoff":
                     ExitWindowsEx(0x00000000 | 0x00000004, 0); // EWX_LOGOFF | EWX_FORCE
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{logoffExe}\"\"") { CreateNoWindow = true, UseShellExecute = false });
                     break;
                 case "reboot":
-                    Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
                     break;
                 case "reboot-safe":
-                    Process.Start(new ProcessStartInfo("bcdedit.exe", "/set {current} safeboot network") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
-                    Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{bcdeditExe}\" /set {{current}} safeboot network & \"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
                     break;
                 case "reboot-normal":
-                    Process.Start(new ProcessStartInfo("bcdedit.exe", "/deletevalue {current} safeboot") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
-                    Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{bcdeditExe}\" /deletevalue {{current}} safeboot & \"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
                     break;
                 case "shutdown":
-                    Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{shutdownExe}\" /s /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
                     break;
             }
         }

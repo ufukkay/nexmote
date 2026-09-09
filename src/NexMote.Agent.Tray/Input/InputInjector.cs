@@ -50,7 +50,7 @@ internal static class InputInjector
 
     public static void MoveMouse(int displayIndex, int x, int y)
     {
-        DesktopHelper.AttachToActiveDesktop();
+        DesktopHelper.AttachToActiveDesktop(force: false);
 
         var displayBounds = ScreenCapture.GetDisplayBoundsPublic(displayIndex);
         var globalX = displayBounds.Left + x;
@@ -60,10 +60,24 @@ internal static class InputInjector
         var clampedX = Math.Clamp(globalX, virtualBounds.Left, virtualBounds.Right - 1);
         var clampedY = Math.Clamp(globalY, virtualBounds.Top, virtualBounds.Bottom - 1);
 
-        SetCursorPos(clampedX, clampedY);
+        if (SetCursorPos(clampedX, clampedY))
+        {
+            // SetCursorPos doğrudan başarılı olduysa çakışan ve titremeye yol açan mükerrer SendInput çağrısı yapma!
+            return;
+        }
 
-        var normalizedX = (int)Math.Round((double)(clampedX - virtualBounds.Left) * 65535 / Math.Max(1, virtualBounds.Width - 1));
-        var normalizedY = (int)Math.Round((double)(clampedY - virtualBounds.Top) * 65535 / Math.Max(1, virtualBounds.Height - 1));
+        // SetCursorPos başarısız olduysa (UAC veya masaüstü geçişi olabilir) masaüstünü zorla yenile ve tekrar dene
+        DesktopHelper.AttachToActiveDesktop(force: true);
+        if (SetCursorPos(clampedX, clampedY))
+        {
+            return;
+        }
+
+        // SetCursorPos hala başarısızsa standart Win32 sanal masaüstü normalizasyon formülü ile SendInput'a düş
+        var vWidth = Math.Max(1, virtualBounds.Width);
+        var vHeight = Math.Max(1, virtualBounds.Height);
+        var normalizedX = Math.Clamp((int)Math.Round((double)(clampedX - virtualBounds.Left) * 65536.0 / vWidth), 0, 65535);
+        var normalizedY = Math.Clamp((int)Math.Round((double)(clampedY - virtualBounds.Top) * 65536.0 / vHeight), 0, 65535);
 
         var input = new INPUT
         {
@@ -92,7 +106,7 @@ internal static class InputInjector
 
     public static void MouseButton(string? button, bool isDown)
     {
-        DesktopHelper.AttachToActiveDesktop();
+        DesktopHelper.AttachToActiveDesktop(force: false);
 
         var flags = (button?.ToLowerInvariant(), isDown) switch
         {
@@ -113,7 +127,7 @@ internal static class InputInjector
 
     public static void MouseWheel(int delta)
     {
-        DesktopHelper.AttachToActiveDesktop();
+        DesktopHelper.AttachToActiveDesktop(force: false);
 
         if (delta != 0)
         {
@@ -132,7 +146,7 @@ internal static class InputInjector
 
     public static void Keyboard(int keyCode, bool isDown)
     {
-        DesktopHelper.AttachToActiveDesktop();
+        DesktopHelper.AttachToActiveDesktop(force: false);
 
         if (keyCode is <= 0 or > ushort.MaxValue)
         {
@@ -161,11 +175,24 @@ internal static class InputInjector
 
         if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
         {
-            try
+            DesktopHelper.AttachToActiveDesktop(force: true);
+            if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
             {
-                keybd_event((byte)keyCode, (byte)scanCode, flags, UIntPtr.Zero);
+                try
+                {
+                    keybd_event((byte)keyCode, (byte)scanCode, flags, UIntPtr.Zero);
+                }
+                catch { }
             }
-            catch { }
+        }
+    }
+
+    public static void ReleaseAllModifiers()
+    {
+        int[] modifierKeys = [160, 161, 162, 163, 164, 165, 91, 92]; // L/R Shift, Ctrl, Alt, Win
+        foreach (var vk in modifierKeys)
+        {
+            Keyboard(vk, false);
         }
     }
 
@@ -191,11 +218,15 @@ internal static class InputInjector
 
         if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
         {
-            try
+            DesktopHelper.AttachToActiveDesktop(force: true);
+            if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
             {
-                mouse_event(flags, 0, 0, mouseData, UIntPtr.Zero);
+                try
+                {
+                    mouse_event(flags, 0, 0, mouseData, UIntPtr.Zero);
+                }
+                catch { }
             }
-            catch { }
         }
     }
 

@@ -2161,8 +2161,9 @@ export function App() {
                     </button>
 
                     {powerMenuOpen && (
-                      <div className="power-dropdown-menu">
+                      <div className="power-dropdown-menu" onMouseDown={(e) => e.stopPropagation()}>
                         <button
+                          type="button"
                           className="power-dropdown-item"
                           onClick={() => handlePromptPowerAction("reboot")}
                         >
@@ -2176,6 +2177,7 @@ export function App() {
                         </button>
 
                         <button
+                          type="button"
                           className="power-dropdown-item"
                           onClick={() => handlePromptPowerAction("shutdown")}
                         >
@@ -2191,6 +2193,7 @@ export function App() {
                         <div className="power-dropdown-divider" />
 
                         <button
+                          type="button"
                           className="power-dropdown-item"
                           onClick={() => handlePromptPowerAction("lock")}
                         >
@@ -2204,6 +2207,7 @@ export function App() {
                         </button>
 
                         <button
+                          type="button"
                           className="power-dropdown-item"
                           onClick={() => handlePromptPowerAction("logoff")}
                         >
@@ -2219,6 +2223,7 @@ export function App() {
                         <div className="power-dropdown-divider" />
 
                         <button
+                          type="button"
                           className="power-dropdown-item"
                           onClick={() => handlePromptPowerAction("reboot-safe")}
                         >

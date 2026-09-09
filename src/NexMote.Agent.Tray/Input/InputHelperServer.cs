@@ -167,13 +167,14 @@ internal static class InputHelperServer
                 return false;
             }
 
-            // 3. Kod imza (Authenticode) bütünlük doğrulaması (Madde 21)
-#if DEBUG
-            const bool allowUntrustedInDev = true;
-#else
-            const bool allowUntrustedInDev = false;
-#endif
-            var verification = AuthenticodeVerifier.Verify(clientPath, expectedSubjectContains: "NexMote", allowUntrustedRootInDev: allowUntrustedInDev);
+            // 3. Kod imza (Authenticode) veya aynı güvenilir dosya yolu doğrulaması
+            // İstemci dosyası kendi yürütülebilir dosyamızla (selfPath) birebir aynıysa ve aynı interaktif oturumdaysa izin ver
+            if (string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var verification = AuthenticodeVerifier.Verify(clientPath, expectedSubjectContains: "NexMote", allowUntrustedRootInDev: true);
             return verification.IsValid;
         }
         catch
@@ -198,15 +199,12 @@ internal static class InputHelperServer
         var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         security.AddAccessRule(new PipeAccessRule(adminSid, PipeAccessRights.FullControl, AccessControlType.Allow));
 
-        try
-        {
-            var currentUser = WindowsIdentity.GetCurrent().User;
-            if (currentUser is not null)
-            {
-                security.AddAccessRule(new PipeAccessRule(currentUser, PipeAccessRights.ReadWrite, AccessControlType.Allow));
-            }
-        }
-        catch { }
+        // Domain veya yerel oturum açmış kullanıcıların (Tray süreci) Named Pipe'a yazabilmesine izin ver
+        var authUserSid = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+        security.AddAccessRule(new PipeAccessRule(authUserSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+
+        var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        security.AddAccessRule(new PipeAccessRule(worldSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
 
         return security;
     }

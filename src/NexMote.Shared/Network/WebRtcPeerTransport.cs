@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using System.Threading.Tasks;
 using NexMote.Shared.Contracts;
@@ -97,9 +98,97 @@ public sealed class WebRtcPeerTransport : IDisposable
             if (data is { Length: > 0 })
             {
                 var text = Encoding.UTF8.GetString(data);
-                OnDataMessageReceived?.Invoke(channel.label, text);
+                if (text.StartsWith(ChunkPrefix, StringComparison.Ordinal))
+                {
+                    var reassembled = ProcessIncomingChunk(text);
+                    if (reassembled is not null)
+                    {
+                        OnDataMessageReceived?.Invoke(channel.label, reassembled);
+                    }
+                }
+                else
+                {
+                    OnDataMessageReceived?.Invoke(channel.label, text);
+                }
             }
         };
+    }
+
+    private const int MaxChunkSize = 32_768; // 32 KB per SCTP packet
+    private const string ChunkPrefix = "__CHK__|";
+    private long _chunkMsgCounter;
+    private readonly ConcurrentDictionary<long, ChunkAssembly> _chunkAssemblies = new();
+
+    private sealed class ChunkAssembly
+    {
+        public string[] Chunks { get; }
+        public int TotalChunks { get; }
+        private int _receivedCount;
+        public long CreatedTicks { get; }
+
+        public ChunkAssembly(int totalChunks)
+        {
+            TotalChunks = totalChunks;
+            Chunks = new string[totalChunks];
+            CreatedTicks = Stopwatch.GetTimestamp();
+        }
+
+        public bool AddChunk(int index, string data)
+        {
+            if (index >= 0 && index < TotalChunks && Chunks[index] == null)
+            {
+                Chunks[index] = data;
+                return Interlocked.Increment(ref _receivedCount) == TotalChunks;
+            }
+            return false;
+        }
+
+        public string Reassemble() => string.Concat(Chunks);
+    }
+
+    private string? ProcessIncomingChunk(string text)
+    {
+        try
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (_chunkAssemblies.Count > 60)
+            {
+                foreach (var kvp in _chunkAssemblies)
+                {
+                    if ((now - kvp.Value.CreatedTicks) * 1000 / Stopwatch.Frequency > 5000)
+                    {
+                        _chunkAssemblies.TryRemove(kvp.Key, out _);
+                    }
+                }
+            }
+
+            var p1 = text.IndexOf('|', ChunkPrefix.Length);
+            if (p1 < 0) return null;
+            var p2 = text.IndexOf('|', p1 + 1);
+            if (p2 < 0) return null;
+            var p3 = text.IndexOf('|', p2 + 1);
+            if (p3 < 0) return null;
+
+            if (!long.TryParse(text.AsSpan(ChunkPrefix.Length, p1 - ChunkPrefix.Length), out var msgId) ||
+                !int.TryParse(text.AsSpan(p1 + 1, p2 - p1 - 1), out var chunkIdx) ||
+                !int.TryParse(text.AsSpan(p2 + 1, p3 - p2 - 1), out var totalChunks) ||
+                totalChunks <= 0 || totalChunks > 1000)
+            {
+                return null;
+            }
+
+            var chunkData = text.Substring(p3 + 1);
+            var assembly = _chunkAssemblies.GetOrAdd(msgId, _ => new ChunkAssembly(totalChunks));
+            if (assembly.AddChunk(chunkIdx, chunkData))
+            {
+                _chunkAssemblies.TryRemove(msgId, out _);
+                return assembly.Reassemble();
+            }
+        }
+        catch
+        {
+        }
+        return null;
     }
 
     /// <summary>
@@ -182,7 +271,8 @@ public sealed class WebRtcPeerTransport : IDisposable
 
     /// <summary>
     /// Açık olan belirtilen etiketli veri kanalından doğrudan P2P metin mesajı gönderir.
-    /// Başarılıysa true, veri kanalı açık değilse false (böylece SignalR rölesine dönülebilir) döner.
+    /// Büyük mesajlar (örneğin yüksek çözünürlüklü ekran kareleri) otomatik olarak parçalanarak (chunking) iletilir.
+    /// Başarılıysa true, veri kanalı açık değilse veya arabellek tıkalıysa false döner.
     /// </summary>
     public bool SendData(string channelLabel, string message)
     {
@@ -193,7 +283,31 @@ public sealed class WebRtcPeerTransport : IDisposable
         {
             try
             {
-                channel.send(message);
+                // Arabellek taşma koruması (Bufferbloat guard): Bekleyen veri 512 KB'ı aşarsa gönderimi ertele
+                if (channel.bufferedAmount > 512 * 1024)
+                {
+                    return false;
+                }
+
+                if (message.Length <= MaxChunkSize)
+                {
+                    channel.send(message);
+                    return true;
+                }
+
+                // Büyük mesajı 32 KB'lık paketler halinde parçalayarak güvenle ilet
+                var msgId = Interlocked.Increment(ref _chunkMsgCounter);
+                var totalChunks = (message.Length + MaxChunkSize - 1) / MaxChunkSize;
+
+                for (var i = 0; i < totalChunks; i++)
+                {
+                    var offset = i * MaxChunkSize;
+                    var length = Math.Min(MaxChunkSize, message.Length - offset);
+                    var chunkData = message.Substring(offset, length);
+                    var chunkMsg = $"{ChunkPrefix}{msgId}|{i}|{totalChunks}|{chunkData}";
+                    channel.send(chunkMsg);
+                }
+
                 return true;
             }
             catch

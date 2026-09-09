@@ -29,8 +29,19 @@ internal static class DeviceIdentityFile
 
     public static async Task<DeviceIdentity?> EnsureEnrolledAsync(string serverUrl, string enrollmentKey)
     {
+        // 1. Önce diskteki mevcut kimliği kontrol et
         var existing = Load();
         if (existing is not null) return existing;
+
+        // 2. Windows Servisi (NexMote.Agent.Windows) ilk açılışta veya MSI kurulumunda kimliği
+        //    yazıyor olabilir. 10 saniye boyunca (500ms aralıklarla) servisin identity.dat dosyasını
+        //    yazmasını bekle; böylece mükerrer enroll yarışı %100 engellenir.
+        for (int i = 0; i < 20; i++)
+        {
+            await Task.Delay(500);
+            existing = Load();
+            if (existing is not null) return existing;
+        }
 
         try
         {

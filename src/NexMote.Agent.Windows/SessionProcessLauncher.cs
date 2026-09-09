@@ -240,7 +240,7 @@ internal static class SessionProcessLauncher
             }
 
             // Birincil yürütme belirtecini (Primary Token) çoğalt
-            if (!DuplicateTokenEx(processToken, TOKEN_ALL_ACCESS, IntPtr.Zero, SECURITY_IMPERSONATION_LEVEL.SecurityIdentification, TOKEN_TYPE.TokenPrimary, out var sessionToken))
+            if (!DuplicateTokenEx(processToken, TOKEN_ALL_ACCESS, IntPtr.Zero, SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation, TOKEN_TYPE.TokenPrimary, out var sessionToken))
             {
                 error = $"DuplicateTokenEx başarısız: {Marshal.GetLastWin32Error()}";
                 return false;

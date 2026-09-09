@@ -45,7 +45,6 @@ public partial class MainWindow : Window
     private Guid? _sessionId;
     private RemoteScreenInfo? _screenInfo;
     private WebRtcPeerTransport? _webRtc;
-    private long _lastMouseMoveTimestamp;
 
     // Multi-monitor view: display selection and stretch view modes
     private int _selectedDisplayIndex = 0; // 0 = Tüm Ekranlar, >0 = Seçili Ekran
@@ -53,6 +52,9 @@ public partial class MainWindow : Window
     private readonly Dictionary<int, Image> _displayImages = new();
     private readonly Dictionary<int, DisplayItem> _displayMeta = new();
     private readonly Dictionary<int, Point> _lastRemotePointPerDisplay = new();
+    private readonly Dictionary<int, long> _lastMouseMoveTicksPerDisplay = new();
+    private (int displayIndex, int x, int y)? _pendingMouseMove;
+    private readonly System.Windows.Threading.DispatcherTimer _mouseFlushTimer;
     private int _remoteInputSentCount;
 
     // Performance & Stats metrics
@@ -80,6 +82,15 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        _mouseFlushTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _mouseFlushTimer.Tick += (s, e) => FlushPendingMouseMove();
+        _mouseFlushTimer.Start();
+
+        this.Deactivated += Window_Deactivated;
 
         var (storedUrl, storedEmail, _) = TechnicianAppSettings.Load();
         if (!string.IsNullOrWhiteSpace(storedUrl))
@@ -522,6 +533,8 @@ public partial class MainWindow : Window
                 .WithUrl(hubUrl, options =>
                 {
                     options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+                    options.TransportMaxBufferSize = 10 * 1024 * 1024;
+                    options.ApplicationMaxBufferSize = 10 * 1024 * 1024;
                 })
                 .WithAutomaticReconnect(new InfiniteRetryPolicy())
                 .Build();
@@ -1227,56 +1240,102 @@ public partial class MainWindow : Window
         Keyboard.Focus(target);
     }
 
+    private void FlushPendingMouseMove()
+    {
+        if (_pendingMouseMove is { } pending && _sessionId.HasValue)
+        {
+            _pendingMouseMove = null;
+            _lastMouseMoveTicksPerDisplay[pending.displayIndex] = Stopwatch.GetTimestamp();
+            _lastRemotePointPerDisplay[pending.displayIndex] = new Point(pending.x, pending.y);
+            _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId.Value, "mouse-move", pending.x, pending.y, DisplayIndex: pending.displayIndex));
+        }
+    }
+
     private bool TryMapTileToRemote(int displayIndex, Image image, Point tilePoint, out int x, out int y)
     {
         x = 0;
         y = 0;
-        if (!_displayMeta.TryGetValue(displayIndex, out var meta) || image.ActualWidth <= 0 || image.ActualHeight <= 0 || meta.Width <= 0 || meta.Height <= 0)
+
+        double remoteWidth = 0;
+        double remoteHeight = 0;
+
+        // Öncelikli olarak o anda ekranda çizilen gerçek BitmapImage piksel boyutunu kullan (DPI ve çözünürlük bağımsız %100 kesinlik)
+        if (image.Source is BitmapSource bs && bs.PixelWidth > 0 && bs.PixelHeight > 0)
+        {
+            remoteWidth = bs.PixelWidth;
+            remoteHeight = bs.PixelHeight;
+        }
+        else if (_displayMeta.TryGetValue(displayIndex, out var meta) && meta.Width > 0 && meta.Height > 0)
+        {
+            remoteWidth = meta.Width;
+            remoteHeight = meta.Height;
+        }
+
+        if (remoteWidth <= 0 || remoteHeight <= 0 || image.ActualWidth <= 0 || image.ActualHeight <= 0)
         {
             return false;
         }
 
         if (image.Stretch == Stretch.Fill)
         {
-            var scaleX = image.ActualWidth / meta.Width;
-            var scaleY = image.ActualHeight / meta.Height;
+            var scaleX = image.ActualWidth / remoteWidth;
+            var scaleY = image.ActualHeight / remoteHeight;
             x = (int)Math.Round(tilePoint.X / scaleX);
             y = (int)Math.Round(tilePoint.Y / scaleY);
-            x = Math.Clamp(x, 0, meta.Width - 1);
-            y = Math.Clamp(y, 0, meta.Height - 1);
+            x = Math.Clamp(x, 0, (int)remoteWidth - 1);
+            y = Math.Clamp(y, 0, (int)remoteHeight - 1);
             return true;
         }
         else if (image.Stretch == Stretch.None)
         {
-            var offsetX = (image.ActualWidth - meta.Width) / 2.0;
-            var offsetY = (image.ActualHeight - meta.Height) / 2.0;
+            var offsetX = (image.ActualWidth - remoteWidth) / 2.0;
+            var offsetY = (image.ActualHeight - remoteHeight) / 2.0;
             var imageX = tilePoint.X - offsetX;
             var imageY = tilePoint.Y - offsetY;
-            var clampedX = Math.Clamp(imageX, 0, meta.Width);
-            var clampedY = Math.Clamp(imageY, 0, meta.Height);
-            x = (int)Math.Round(clampedX);
-            y = (int)Math.Round(clampedY);
-            x = Math.Clamp(x, 0, meta.Width - 1);
-            y = Math.Clamp(y, 0, meta.Height - 1);
+            x = (int)Math.Round(imageX);
+            y = (int)Math.Round(imageY);
+            x = Math.Clamp(x, 0, (int)remoteWidth - 1);
+            y = Math.Clamp(y, 0, (int)remoteHeight - 1);
             return true;
         }
-        else // Stretch.Uniform
+        else // Stretch.Uniform (Varsayılan ve en kararlı mod)
         {
-            var scale = Math.Min(image.ActualWidth / meta.Width, image.ActualHeight / meta.Height);
-            var renderedWidth = meta.Width * scale;
-            var renderedHeight = meta.Height * scale;
-            var offsetX = (image.ActualWidth - renderedWidth) / 2.0;
-            var offsetY = (image.ActualHeight - renderedHeight) / 2.0;
+            var sourceAspect = remoteWidth / remoteHeight;
+            var containerAspect = image.ActualWidth / image.ActualHeight;
+
+            double renderedWidth, renderedHeight, offsetX, offsetY;
+            if (containerAspect > sourceAspect)
+            {
+                // Pillarbox: sağda ve solda boşluklar var
+                renderedHeight = image.ActualHeight;
+                renderedWidth = image.ActualHeight * sourceAspect;
+                offsetX = (image.ActualWidth - renderedWidth) / 2.0;
+                offsetY = 0.0;
+            }
+            else
+            {
+                // Letterbox: üstte ve altta boşluklar var
+                renderedWidth = image.ActualWidth;
+                renderedHeight = image.ActualWidth / sourceAspect;
+                offsetX = 0.0;
+                offsetY = (image.ActualHeight - renderedHeight) / 2.0;
+            }
+
+            if (renderedWidth <= 0 || renderedHeight <= 0)
+            {
+                return false;
+            }
+
             var imageX = tilePoint.X - offsetX;
             var imageY = tilePoint.Y - offsetY;
 
-            var clampedX = Math.Clamp(imageX, 0, renderedWidth);
-            var clampedY = Math.Clamp(imageY, 0, renderedHeight);
+            var normX = Math.Clamp(imageX / renderedWidth, 0.0, 1.0);
+            var normY = Math.Clamp(imageY / renderedHeight, 0.0, 1.0);
 
-            x = (int)Math.Round(clampedX / scale);
-            y = (int)Math.Round(clampedY / scale);
-            x = Math.Clamp(x, 0, meta.Width - 1);
-            y = Math.Clamp(y, 0, meta.Height - 1);
+            x = (int)Math.Round(normX * (remoteWidth - 1));
+            y = (int)Math.Round(normY * (remoteHeight - 1));
+            x = Math.Clamp(x, 0, (int)remoteWidth - 1);
+            y = Math.Clamp(y, 0, (int)remoteHeight - 1);
             return true;
         }
     }
@@ -1288,18 +1347,28 @@ public partial class MainWindow : Window
             return;
         }
 
-        var now = Stopwatch.GetTimestamp();
-        var minimumTicks = Stopwatch.Frequency / 45;
         var lastPoint = _lastRemotePointPerDisplay.TryGetValue(displayIndex, out var lp) ? lp : new Point(-999, -999);
-        var moved = Math.Abs(x - lastPoint.X) >= 2 || Math.Abs(y - lastPoint.Y) >= 2;
-        if (_lastMouseMoveTimestamp != 0 && now - _lastMouseMoveTimestamp < minimumTicks && !moved)
+        if (x == (int)lastPoint.X && y == (int)lastPoint.Y)
         {
             return;
         }
 
-        _lastMouseMoveTimestamp = now;
-        _lastRemotePointPerDisplay[displayIndex] = new Point(x, y);
-        _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId ?? Guid.Empty, "mouse-move", x, y, DisplayIndex: displayIndex));
+        var now = Stopwatch.GetTimestamp();
+        var intervalTicks = Stopwatch.Frequency / 60; // Saniyede en fazla 60 güncelleme (16ms)
+        var lastTicks = _lastMouseMoveTicksPerDisplay.TryGetValue(displayIndex, out var lt) ? lt : 0L;
+
+        if (now - lastTicks >= intervalTicks)
+        {
+            _lastMouseMoveTicksPerDisplay[displayIndex] = now;
+            _lastRemotePointPerDisplay[displayIndex] = new Point(x, y);
+            _pendingMouseMove = null;
+            _ = SendRemoteInputAsync(new RemoteInputEvent(_sessionId ?? Guid.Empty, "mouse-move", x, y, DisplayIndex: displayIndex));
+        }
+        else
+        {
+            // Hız sınırına takılan hareketi sakla; fare durduğunda timer son pozisyonu kesin olarak iletecektir
+            _pendingMouseMove = (displayIndex, x, y);
+        }
     }
 
     private void HandleTileMouseButton(int displayIndex, Image image, MouseButtonEventArgs e, string button, bool isDown)
@@ -1314,6 +1383,9 @@ public partial class MainWindow : Window
             x = (int)Math.Round(lastKnown.X);
             y = (int)Math.Round(lastKnown.Y);
         }
+
+        // Tıklama sinyali gitmeden önce bekleyen fare hareketi varsa hemen gönder (tam isabet garantisi)
+        FlushPendingMouseMove();
 
         RemoteScrollViewer.Focus();
         _lastRemotePointPerDisplay[displayIndex] = new Point(x, y);
@@ -1339,6 +1411,9 @@ public partial class MainWindow : Window
             {
                 return;
             }
+
+            // Anında Hızlı Onay (Fast ACK): Ajanın boru hattını (Sliding Window) hiç bekletmeden açık tutar
+            _ = SendFrameAckAsync(frame);
 
             // Decode JPEG on background thread pool (Zero UI Dispatcher load!)
             var bytes = Convert.FromBase64String(frame.JpegBase64);
@@ -1373,6 +1448,10 @@ public partial class MainWindow : Window
             {
                 image = CreateFallbackDisplayImage(frame.DisplayIndex);
             }
+            else
+            {
+                image = _displayImages.Values.FirstOrDefault() ?? CreateFallbackDisplayImage(frame.DisplayIndex);
+            }
         }
 
         if (image is null) return;
@@ -1383,13 +1462,24 @@ public partial class MainWindow : Window
 
         image.Source = bitmap;
 
+        if (_displayMeta.TryGetValue(frame.DisplayIndex, out var currentMeta))
+        {
+            if (currentMeta.Width != bitmap.PixelWidth || currentMeta.Height != bitmap.PixelHeight)
+            {
+                _displayMeta[frame.DisplayIndex] = currentMeta with { Width = bitmap.PixelWidth, Height = bitmap.PixelHeight };
+            }
+        }
+        else
+        {
+            _displayMeta[frame.DisplayIndex] = new DisplayItem(frame.DisplayIndex, $"Ekran {frame.DisplayIndex}", bitmap.PixelWidth, bitmap.PixelHeight, 0, 0);
+        }
+
         if (PlaceholderPanel.Visibility == Visibility.Visible)
         {
             PlaceholderPanel.Visibility = Visibility.Collapsed;
         }
 
         CalculateMetrics();
-        _ = SendFrameAckAsync(frame);
     }
 
     private Image CreateFallbackDisplayImage(int displayIndex)
@@ -1891,14 +1981,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Fiziksel tuş basılı tutulduğunda işletim sisteminin ürettiği mükerrer KeyDown sinyallerini engelle.
-        // Uzak bilgisayar sürücüsü tuş basılı olduğu sürece kendi donanımsal tekrarını otomatik yönetir.
-        if (e.IsRepeat)
-        {
-            e.Handled = true;
-            return;
-        }
-
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var keyCode = KeyInterop.VirtualKeyFromKey(key);
         if (keyCode == 0)
@@ -1906,13 +1988,20 @@ public partial class MainWindow : Window
             return;
         }
 
+        var isModifier = key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin;
+
         lock (_downKeys)
         {
-            if (!_downKeys.Add(keyCode))
-            {
-                e.Handled = true;
-                return;
-            }
+            _downKeys.Add(keyCode);
+        }
+
+        // Niteleyici tuşlar (Ctrl, Alt, Shift, Win) basılı tutulduğunda işletim sisteminin mükerrer repeat sinyallerini engelle.
+        // Ancak metin ve navigasyon tuşlarında (Backspace, Oklar, Delete, harfler vb.) kullanıcının tuşu basılı tutarak
+        // otomatik silme/yazma yapabilmesi için tekrar sinyalleri uzak makineye iletilmelidir.
+        if (e.IsRepeat && isModifier)
+        {
+            e.Handled = true;
+            return;
         }
 
         SendKey(keyCode, true);
@@ -1938,6 +2027,27 @@ public partial class MainWindow : Window
 
         SendKey(keyCode, false);
         e.Handled = true;
+    }
+
+    private void Window_Deactivated(object? sender, EventArgs e)
+    {
+        ReleaseHeldKeys();
+    }
+
+    private void ReleaseHeldKeys()
+    {
+        int[] keysToRelease;
+        lock (_downKeys)
+        {
+            if (_downKeys.Count == 0) return;
+            keysToRelease = _downKeys.ToArray();
+            _downKeys.Clear();
+        }
+
+        foreach (var vk in keysToRelease)
+        {
+            SendKey(vk, false);
+        }
     }
 
     private void SendKey(int keyCode, bool isDown)

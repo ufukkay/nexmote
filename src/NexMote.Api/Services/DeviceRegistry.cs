@@ -21,6 +21,8 @@ public sealed class DeviceRegistry
         _dbFactory = dbFactory;
     }
 
+    private static readonly object _enrollLock = new();
+
     /// <summary>
     /// Yeni bir cihazı sisteme kaydeder veya mevcut cihazın işletim sistemi ve sürüm bilgilerini günceller.
     /// Cihaza özel 32-byte rastgele bir güvenlik token'ı üretir ve döner.
@@ -31,56 +33,52 @@ public sealed class DeviceRegistry
     /// <returns>Cihaz ID'si ve güvenlik token'ını içeren yanıt.</returns>
     public AgentEnrollmentResponse Enroll(AgentEnrollmentRequest request, Guid? groupId = null)
     {
-        using var db = _dbFactory.CreateDbContext();
-
-        var nameLower = request.DeviceName.Trim().ToLower();
-        var domainLower = request.DomainName.Trim().ToLower();
-        var serial = request.SerialNumber?.Trim();
-
-        // Eğer bu cihaz daha önce DeletedDevices listesindeyse, yeni kurulumla kaydolurken bu engeli kaldır
-        var deletedEntries = db.DeletedDevices
-            .Where(d => d.DeviceName.ToLower() == nameLower &&
-                       (d.DomainName.ToLower() == domainLower ||
-                        d.DomainName.ToLower() == "workgroup" ||
-                        domainLower == "workgroup" ||
-                        d.DomainName.ToLower() == nameLower ||
-                        domainLower == nameLower))
-            .ToList();
-        if (deletedEntries.Count > 0)
+        lock (_enrollLock)
         {
-            db.DeletedDevices.RemoveRange(deletedEntries);
-        }
+            using var db = _dbFactory.CreateDbContext();
 
-        // 1. Önce tam eşleşme (DeviceName ve DomainName birebir aynı)
-        var existing = db.Devices.FirstOrDefault(device =>
-            device.DeviceName.ToLower() == nameLower &&
-            device.DomainName.ToLower() == domainLower);
+            var nameTrimmed = request.DeviceName.Trim();
+            var nameLower = nameTrimmed.ToLowerInvariant();
+            var domainTrimmed = request.DomainName.Trim();
+            var domainLower = domainTrimmed.ToLowerInvariant();
+            var serial = request.SerialNumber?.Trim();
 
-        // 2. Seri numarasıyla eşleşme (Donanım seri numarası varsa ve jenerik değilse aynı fiziksel makinedir)
-        if (existing is null && !string.IsNullOrWhiteSpace(serial) && !IsGenericSerial(serial))
-        {
-            existing = db.Devices.FirstOrDefault(device =>
-                device.SerialNumber != null &&
-                device.SerialNumber.ToLower() == serial.ToLower());
-        }
+            // Eğer bu cihaz daha önce DeletedDevices listesindeyse, yeni kurulumla kaydolurken bu engeli kaldır
+            var deletedEntries = db.DeletedDevices
+                .Where(d => EF.Functions.Collate(d.DeviceName, "NOCASE") == nameTrimmed)
+                .ToList();
+            if (deletedEntries.Count > 0)
+            {
+                db.DeletedDevices.RemoveRange(deletedEntries);
+            }
 
-        // 3. Bilgisayar adı (DeviceName) esnek eşleşmesi:
-        //    Domainlerden biri WORKGROUP ise veya Domain adı bilgisayar adına eşitse (yerel workgroup oturumu)
-        //    mükerrer oluşturma; var olan kaydı güncelle.
-        if (existing is null)
-        {
-            existing = db.Devices.FirstOrDefault(device =>
-                device.DeviceName.ToLower() == nameLower &&
-                (device.DomainName.ToLower() == domainLower ||
-                 device.DomainName.ToLower() == "workgroup" ||
-                 domainLower == "workgroup" ||
-                 device.DomainName.ToLower() == nameLower ||
-                 domainLower == nameLower));
-        }
+            // 1. Önce tam eşleşme (DeviceName ve DomainName birebir aynı, büyük/küçük harf bağımsız)
+            var existing = db.Devices.FirstOrDefault(device =>
+                EF.Functions.Collate(device.DeviceName, "NOCASE") == nameTrimmed &&
+                EF.Functions.Collate(device.DomainName, "NOCASE") == domainTrimmed);
 
-        var now = DateTimeOffset.UtcNow;
-        string rawToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        string tokenHash = SessionTokens.Hash(rawToken);
+            // 2. Seri numarasıyla eşleşme (Donanım seri numarası varsa ve jenerik değilse aynı fiziksel makinedir)
+            if (existing is null && !string.IsNullOrWhiteSpace(serial) && !IsGenericSerial(serial))
+            {
+                existing = db.Devices.FirstOrDefault(device =>
+                    device.SerialNumber != null &&
+                    EF.Functions.Collate(device.SerialNumber, "NOCASE") == serial);
+            }
+
+            // 3. Bilgisayar adı (DeviceName) kesin eşleşmesi:
+            //    Kurumsal ağda bilgisayar adı (NetBIOS Name) tekildir. Domain adı NT AUTHORITY, WORKGROUP veya
+            //    etki alanı adı olarak farklı gelse bile aynı fiziksel makinedir.
+            //    Ajan Ana Yasası Madde 9 (Self-Healing Identity) ve Madde 4 (Zero-Mojibake / Invariant) uyarınca
+            //    COLLATE NOCASE ile tam tekillik garanti edilir; ASLA mükerrer satır açılamaz.
+            if (existing is null)
+            {
+                existing = db.Devices.FirstOrDefault(device =>
+                    EF.Functions.Collate(device.DeviceName, "NOCASE") == nameTrimmed);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            string rawToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            string tokenHash = SessionTokens.Hash(rawToken);
 
         if (existing is null)
         {
@@ -114,8 +112,8 @@ public sealed class DeviceRegistry
             {
                 existing.LocationCode = request.LocationCode;
             }
-            // Eğer yeni gelen Domain adı gerçek bir kurumsal domain ise (WORKGROUP veya bilgisayar adı değilse) domain'i güncelle
-            if (domainLower != "workgroup" && domainLower != nameLower)
+            // Eğer yeni gelen Domain adı gerçek bir kurumsal domain ise (WORKGROUP, NT AUTHORITY veya bilgisayar adı değilse) domain'i güncelle
+            if (domainLower != "workgroup" && domainLower != nameLower && domainLower != "nt authority")
             {
                 existing.DomainName = request.DomainName;
             }
@@ -126,11 +124,12 @@ public sealed class DeviceRegistry
 
         db.SaveChanges();
 
-        return new AgentEnrollmentResponse(
-            existing.Id,
-            rawToken,
-            new Uri("/hubs/signaling", UriKind.Relative),
-            TimeSpan.FromSeconds(20));
+            return new AgentEnrollmentResponse(
+                existing.Id,
+                rawToken,
+                new Uri("/hubs/signaling", UriKind.Relative),
+                TimeSpan.FromSeconds(20));
+        }
     }
 
     /// <summary>
@@ -566,4 +565,76 @@ public sealed class DeviceRegistry
         var t = s.Trim().ToLowerInvariant();
         return t is "0" or "none" or "default string" or "to be filled by o.e.m." or "system serial number" or "chassis serial number";
     }
+
+    /// <summary>
+    /// Ajan Ana Yasası Madde 9 (Self-Healing Identity) gereğince:
+    /// Sistem açılışında veya bakım sırasında aynı DeviceName'e sahip mükerrer cihaz kayıtlarını
+    /// otomatik olarak tekilleştirir. Donanım seri numarasına ve en güncel LastSeenAt'e sahip ana kaydı
+    /// korur, diğer mükerrer kayıtları ve oturum/komut/uyarı referanslarını güvenle birleştirir.
+    /// </summary>
+    public int DeduplicateDevices()
+    {
+        lock (_enrollLock)
+        {
+            using var db = _dbFactory.CreateDbContext();
+            var allDevices = db.Devices.ToList();
+            var grouped = allDevices.GroupBy(d => d.DeviceName.Trim(), StringComparer.OrdinalIgnoreCase)
+                                    .Where(g => g.Count() > 1);
+            int removedCount = 0;
+
+            foreach (var group in grouped)
+            {
+                var candidates = group.ToList();
+                // 1. Donanım seri numarası dolu ve jenerik olmayan
+                // 2. En güncel LastSeenAt
+                var primary = candidates
+                    .OrderByDescending(d => !string.IsNullOrWhiteSpace(d.SerialNumber) && !IsGenericSerial(d.SerialNumber))
+                    .ThenByDescending(d => d.LastSeenAt)
+                    .First();
+
+                foreach (var dup in candidates.Where(d => d.Id != primary.Id))
+                {
+                    // Bilgileri ana kayıtta zenginleştir (eğer boşsa)
+                    if (primary.GroupId is null && dup.GroupId is not null)
+                    {
+                        primary.GroupId = dup.GroupId;
+                    }
+                    if (primary.SecurityProfileId is null && dup.SecurityProfileId is not null)
+                    {
+                        primary.SecurityProfileId = dup.SecurityProfileId;
+                    }
+                    if (string.IsNullOrWhiteSpace(primary.SerialNumber) && !string.IsNullOrWhiteSpace(dup.SerialNumber))
+                    {
+                        primary.SerialNumber = dup.SerialNumber;
+                    }
+
+                    // İlişkili tabloların referanslarını ana kayda aktar
+                    var sessions = db.RemoteSessions.Where(s => s.DeviceId == dup.Id).ToList();
+                    foreach (var s in sessions) s.DeviceId = primary.Id;
+
+                    var audits = db.CommandAudits.Where(a => a.DeviceId == dup.Id).ToList();
+                    foreach (var a in audits) a.DeviceId = primary.Id;
+
+                    var alerts = db.DeviceAlerts.Where(a => a.DeviceId == dup.Id).ToList();
+                    foreach (var a in alerts) a.DeviceId = primary.Id;
+
+                    var commands = db.DeviceCommands.Where(c => c.DeviceId == dup.Id).ToList();
+                    foreach (var c in commands) c.DeviceId = primary.Id;
+
+                    db.Devices.Remove(dup);
+                    removedCount++;
+                }
+
+                db.Devices.Update(primary);
+            }
+
+            if (removedCount > 0)
+            {
+                db.SaveChanges();
+            }
+
+            return removedCount;
+        }
+    }
 }
+

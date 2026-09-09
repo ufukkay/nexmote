@@ -23,11 +23,7 @@ $deployerPkgDir = [System.IO.Path]::Combine($rootDir, "artifacts", "package", "d
 $downloadsDir = [System.IO.Path]::Combine($rootDir, "downloads")
 $wixDir = [System.IO.Path]::Combine($rootDir, "artifacts", "wix")
 $assetsDir = [System.IO.Path]::Combine($rootDir, "assets")
-$installerAssetsDir = [System.IO.Path]::Combine($assetsDir, "installer")
 $iconPath = [System.IO.Path]::Combine($assetsDir, "nexmote.ico")
-$dialogBmp = [System.IO.Path]::Combine($installerAssetsDir, "dialog.bmp")
-$bannerBmp = [System.IO.Path]::Combine($installerAssetsDir, "banner.bmp")
-$licenseRtf = [System.IO.Path]::Combine($installerAssetsDir, "license.rtf")
 $signingScript = [System.IO.Path]::Combine($PSScriptRoot, "signing.ps1")
 
 if (-not (Test-Path -LiteralPath $signingScript)) {
@@ -45,64 +41,6 @@ if ($SkipCodeSigning.IsPresent) {
         -CertificatePath $SigningCertificatePath `
         -CertificatePassword $SigningCertificatePassword
 }
-
-function Ensure-InstallerGraphics {
-    param([string]$targetDir, [string]$icoPath)
-    if ((Test-Path "$targetDir\dialog.bmp") -and (Test-Path "$targetDir\banner.bmp") -and (Test-Path "$targetDir\license.rtf")) {
-        return
-    }
-
-    Add-Type -AssemblyName System.Drawing
-    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-    $icon = if (Test-Path $icoPath) { New-Object System.Drawing.Icon($icoPath, 128, 128) } else { $null }
-
-    # 1. Dialog.bmp
-    $dialogBmp = New-Object System.Drawing.Bitmap(493, 312, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-    $g1 = [System.Drawing.Graphics]::FromImage($dialogBmp)
-    $g1.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g1.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-    $rect1 = New-Object System.Drawing.Rectangle(0, 0, 493, 312)
-    $brush1 = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect1, [System.Drawing.Color]::FromArgb(15, 23, 42), [System.Drawing.Color]::FromArgb(30, 58, 138), [System.Drawing.Drawing2D.LinearGradientMode]::ForwardDiagonal)
-    $g1.FillRectangle($brush1, $rect1)
-    $glowBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(25, 37, 99, 235))
-    $g1.FillEllipse($glowBrush, 80, 40, 320, 320)
-    if ($icon -ne $null) { $g1.DrawImage($icon.ToBitmap(), 32, 45, 72, 72) }
-    $fontTitle = New-Object System.Drawing.Font("Segoe UI", 20, [System.Drawing.FontStyle]::Bold)
-    $fontSub = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
-    $fontDesc = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
-    $whiteBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
-    $cyanBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(96, 165, 250))
-    $grayBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(203, 213, 225))
-    $g1.DrawString("NexMote", $fontTitle, $whiteBrush, 115, 45)
-    $g1.DrawString("Kurumsal Uzaktan Yönetim & Destek", $fontSub, $cyanBrush, 117, 85)
-    $g1.DrawString("Hızlı, güvenli ve yüksek performanslı uzaktan masaüstü`nkontrolü, donanım telemetrisi ve komut konsolu.", $fontDesc, $grayBrush, 32, 140)
-    $g1.Dispose()
-    $dialogBmp.Save("$targetDir\dialog.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
-    $dialogBmp.Dispose()
-
-    # 2. Banner.bmp
-    $bannerBmp = New-Object System.Drawing.Bitmap(493, 58, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-    $g2 = [System.Drawing.Graphics]::FromImage($bannerBmp)
-    $g2.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g2.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-    $rect2 = New-Object System.Drawing.Rectangle(0, 0, 493, 58)
-    $brush2 = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect2, [System.Drawing.Color]::FromArgb(15, 23, 42), [System.Drawing.Color]::FromArgb(37, 99, 235), [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal)
-    $g2.FillRectangle($brush2, $rect2)
-    if ($icon -ne $null) { $g2.DrawImage($icon.ToBitmap(), 445, 10, 36, 36) }
-    $fontBannerTitle = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-    $fontBannerSub = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Regular)
-    $g2.DrawString("NexMote Kurulum Sihirbazı", $fontBannerTitle, $whiteBrush, 15, 10)
-    $g2.DrawString("Lütfen kurulum adımlarını takip edin.", $fontBannerSub, $grayBrush, 15, 32)
-    $g2.Dispose()
-    $bannerBmp.Save("$targetDir\banner.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
-    $bannerBmp.Dispose()
-
-    # 3. License.rtf
-    $licenseRtf = "{\rtf1\ansi\ansicpg1254\deff0\nouicompat\deflang1055{\fonttbl{\f0\fnil\fcharset162 Segoe UI;}}{\colortbl ;\red15\green23\blue42;\red37\green99\blue235;\red100\green116\blue139;}\viewkind4\uc1\pard\sa200\sl276\slmult1\b\f0\fs24\cf1 NEXMOTE YAZILIM LISANS VE KULLANIM SOZLESMESI\par\b0\fs18\cf3 Surum 1.0 - Kurumsal ve Bireysel Kullanim\par\cf0\fs20\par\b 1. Lisans Hakki ve Kapsami\b0\par NexMote yazilimi, uzaktan bilgisayar yonetimi, canli masaustu destegi ve telemetri izleme amaclariyla gelistirilmistir.\par\par\b 2. Guvenlik ve Gizlilik\b0\par NexMote tum iletisim oturumlarinda TLS 1.3 ve uctan uca yetkilendirme standartlarini uygular.\par\par\b 3. Destek ve Guncellemeler\b0\par Guncellemeler ve destek icin \cf2\b https://nexmote.com\cf0\b0  adresini ziyaret edebilirsiniz.\par}"
-    [System.IO.File]::WriteAllText("$targetDir\license.rtf", $licenseRtf, [System.Text.Encoding]::ASCII)
-}
-
-Ensure-InstallerGraphics -targetDir $installerAssetsDir -icoPath $iconPath
 
 New-Item -ItemType Directory -Path $downloadsDir, $wixDir -Force | Out-Null
 
@@ -153,17 +91,10 @@ function Generate-AgentWxs {
     <Property Id="ENROLLMENTKEY" Value="$EnrollmentKey" />
     <Property Id="LOCATIONCODE" Value="OFFICE" />
 
-    <!-- Tek tıkla yükleyici: kurulum dizini seçme ekranı YOK (WixUI_InstallDir yerine WixUI_Minimal) —
-         kullanıcıya hangi diski/klasörü seçeceği sorulmadan doğrudan ProgramFiles64Folder (C:) altına kurulur.
-         Kurumsal GPO/SCCM dağıtımları hâlâ "msiexec /i ... INSTALLFOLDER=D:\..." ile geçersiz kılabilir. -->
+    <!-- Sade ve hızlı kurulum: WixUI_Minimal standart diyalogları. Lisans ve görsel ekranları atlanır. -->
     <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUIDialogBmp" Value="$dialogBmp" />
-    <WixVariable Id="WixUIBannerBmp" Value="$bannerBmp" />
-    <WixVariable Id="WixUILicenseRtf" Value="$licenseRtf" />
 
-    <!-- Auto-launch Tray after installation -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="NexMote Agent uygulamasını şimdi başlat" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <!-- Auto-launch Tray after installation (doğrudan başlama, tik/onay kutusu yok) -->
     <CustomAction Id="LaunchTrayAppExecSequence"
                   Directory="INSTALLFOLDER"
                   ExeCommand="&quot;[INSTALLFOLDER]NexMote.Agent.Tray.exe&quot; --tray"
@@ -189,13 +120,10 @@ function Generate-AgentWxs {
     </InstallExecuteSequence>
 
     <UI>
-      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır — Welcome ekranındaki "Kur" tıklaması
-           doğrudan kuruluma geçer (Order="2", kütüphanenin varsayılan WelcomeDlg->LicenseAgreementDlg
-           publish'inden [Order="1"] SONRA işlenip onu ezer — WiX'in License/ReadyDlg atlama için
-           standart tekniği). Lisans metni ve marka görselleri (dialog.bmp/banner.bmp) hâlâ üretiliyor
-           ama artık sadece Welcome/Bitiş ekranlarında kullanılıyor. -->
+      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır.
+           Kurulum tamamlandığında onay/tik kutusu olmadan doğrudan Ajan tepsisi başlatılır. -->
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTrayAppExecSequence" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTrayAppExecSequence" Condition="NOT Installed" />
     </UI>
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -341,15 +269,10 @@ function Generate-TechnicianWxs {
     <Property Id="ARPCOMMENTS" Value="NexMote Uzaktan Masaüstü Yönetim ve Teknisyen Konsolu" />
     <Property Id="ARPNOREPAIR" Value="yes" />
 
-    <!-- Tek tıkla yükleyici: kurulum dizini seçme ekranı yok, bkz. NexMote.Agent.wxs'teki aynı not. -->
+    <!-- Sade ve hızlı kurulum: WixUI_Minimal standart diyalogları. -->
     <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUIDialogBmp" Value="$dialogBmp" />
-    <WixVariable Id="WixUIBannerBmp" Value="$bannerBmp" />
-    <WixVariable Id="WixUILicenseRtf" Value="$licenseRtf" />
 
-    <!-- Auto-launch Technician Console after installation -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="NexMote Technician Console uygulamasını şimdi başlat" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <!-- Auto-launch Technician Console after installation (doğrudan başlama, tik/onay kutusu yok) -->
     <CustomAction Id="LaunchTechAppExecSequence"
                   Directory="INSTALLFOLDERTECH"
                   ExeCommand="&quot;[INSTALLFOLDERTECH]NexMote.TechnicianApp.exe&quot;"
@@ -369,9 +292,8 @@ function Generate-TechnicianWxs {
     </InstallExecuteSequence>
 
     <UI>
-      <!-- Sade kurulum: Lisans Sözleşmesi ekranı atlanır — bkz. NexMote.Agent.wxs'teki aynı tekniğin notu. -->
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ProgressDlg" Order="2" Condition="1" />
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTechAppExecSequence" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTechAppExecSequence" Condition="NOT Installed" />
     </UI>
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -522,9 +444,6 @@ function Generate-CleanerWxs {
     </UI>
 
     <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUIDialogBmp" Value="$dialogBmp" />
-    <WixVariable Id="WixUIBannerBmp" Value="$bannerBmp" />
-    <WixVariable Id="WixUILicenseRtf" Value="$licenseRtf" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="NexMoteCleanerBaseFolder" Name="NexMote">
@@ -594,9 +513,6 @@ function Generate-DeployerWxs {
     </UI>
 
     <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUIDialogBmp" Value="$dialogBmp" />
-    <WixVariable Id="WixUIBannerBmp" Value="$bannerBmp" />
-    <WixVariable Id="WixUILicenseRtf" Value="$licenseRtf" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="NexMoteDeployerBaseFolder" Name="NexMote">

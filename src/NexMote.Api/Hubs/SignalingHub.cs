@@ -221,6 +221,8 @@ public sealed class SignalingHub : Hub
     /// <param name="payload">Sinyalin JSON veri gövdesi.</param>
     public async Task SendSignal(Guid sessionId, string type, string payload)
     {
+        _logger.LogInformation("[Signaling] SendSignal: SessionId={SessionId}, Type={Type}, Length={Length}, ConnectionId={ConnectionId}", sessionId, type, payload?.Length ?? 0, Context.ConnectionId);
+
         var session = _sessions.Get(sessionId);
         if (session is null)
         {

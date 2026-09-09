@@ -2,42 +2,75 @@
 
 Bu doküman, **NexMote** projesini geliştiren, inceleyen veya projenin herhangi bir modülüne kod ekleyen tüm Yapay Zeka (AI) ajanları (Antigravity, Cursor, Claude Code, GitHub Copilot, Windsurf vb.) için hazırlanmış **Kapsamlı Master Rehber ve Teknik Mimarı Dokümanıdır**.
 
-## 📜 DEĞİŞTİRİLEMEZ AJAN ANA YASASI (4 TEMEL MADDE)
+## 📜 DEĞİŞTİRİLEMEZ AJAN ANA YASASI (10 TEMEL İLKE)
 
-Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan Servisi, Tray Uygulaması ve Teknisyen Konsolu) **asla taviz verilemeyecek, her zaman çalışması zorunlu olan 4 Temel Ana Yasa Maddesini** tanımlar. Proje üzerinde çalışan her Yapay Zeka (AI) geliştirici ve yazılımcı, herhangi bir kod değişikliği veya derleme yapmadan önce bu maddeleri kontrol etmek ve sistemin bu kurallara %100 uyduğunu garanti etmekle yükümlüdür.
+Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan Servisi, Tray Uygulaması ve Teknisyen Konsolu) **asla taviz verilemeyecek, her zaman çalışması zorunlu olan 10 Temel Ana Yasa Maddesini** tanımlar (Ayrıntılı kılavuz için bkz: [RULES.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/RULES.md)). Proje üzerinde çalışan her Yapay Zeka (AI) geliştirici ve yazılımcı, herhangi bir kod değişikliği veya derleme yapmadan önce bu maddeleri kontrol etmek ve sistemin bu kurallara %100 uyduğunu garanti etmekle yükümlüdür.
 
-### 📌 Madde 1: Ajan Windows Açılır Açılmaz Otomatik Başlayacaktır
-- **Kural:** Bilgisayar yeniden başlatıldığında, açıldığında veya herhangi bir kullanıcı oturum açtığında NexMote Ajanı hiçbir kullanıcı müdahalesine gerek kalmadan arka planda anında devreye girmelidir.
-- **Teknik Güvenceler (Çift Katmanlı Koruma):**
-  1. **Windows Servisi (`NexMote.Agent.Windows`):** `LocalSystem` yetkisiyle `Start="auto"` olarak çalışır. `RunSessionWatchdogAsync` gözlemcisi 1 saniyede bir aktif kullanıcı oturumunu denetler; oturum açıldığı an `NexMote.Agent.Tray.exe --tray` sürecini doğrudan kullanıcının masaüstüne enjekte eder.
-  2. **Kayıt Defteri (`HKLM\Software\Microsoft\Windows\CurrentVersion\Run`):** `NexMoteAgentTray` anahtarı ile Windows açılışında tüm kullanıcılar için otomatik başlatma tanımlıdır.
-
-### 📌 Madde 2: Ajan Alt Kısımda (Sistem Tepsisinde / Tray) Simge Olarak Gelecektir
-- **Kural:** Ajan başlatıldığında kullanıcının karşısına aniden büyük pencereler, formlar veya dikkat dağıtıcı ekranlar fırlatmayacaktır. Doğrudan sağ alt köşedeki Sistem Tepsisinde (Notification Tray) zarif ve yeşil kalkanlı durum simgesiyle sessizce yerini alacaktır.
+### 📌 Madde 1: Otomatik ve Kesintisiz Başlama (Zero-Touch Boot)
+- **Kural:** Bilgisayar yeniden başlatıldığında, açıldığında veya `NexMote-Agent-Setup.msi` kurulumu bittiği anda NexMote Ajanı hiçbir kullanıcı müdahalesine gerek kalmadan arka planda anında devreye girmelidir.
 - **Teknik Güvenceler:**
-  1. `NexMote.Agent.Tray.exe` varsayılan olarak `openDashboardOnStart = false` ile açılır.
-  2. Yalnızca kullanıcı tepsi simgesine çift tıkladığında veya Başlat menüsündeki kısayola bilerek bastığında antivirüs tarzı modern Durum Paneli (`DashboardForm`) açılır.
+  1. **Windows Servisi (`NexMote.Agent.Windows`):** `LocalSystem` yetkisiyle `Start="auto"` olarak çalışır. Service Recovery 0 saniye gecikmeyle çökme durumunda servisi yeniden başlatır. 1 saniyelik Watchdog aktif kullanıcı oturumunu denetler; oturum açıldığı an `NexMote.Agent.Tray.exe --tray` sürecini doğrudan kullanıcının masaüstüne enjekte eder.
+  2. **Kayıt Defteri:** `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` altında `NexMoteAgentTray` anahtarı tanımlıdır.
+  3. **Kurulum Anında Başlama:** WiX MSI paketi `ServiceControl Id="ServiceControl" Start="install"` ile kurulumun son adımında servisi anında ayağa kaldırır.
+  4. **Doğrudan Başlama (Tiksiz / Onaysız Kurulum):** MSI kurulum paketinde kullanıcıya "Uygulamayı şimdi başlat" gibi hiçbir onay kutusu (checkbox / tik işareti) gösterilmeyecektir. Kurulum tamamlandığı anda Ajan servisi ve masaüstü tepsisi hiçbir ek onay veya tıklama beklenmeksizin doğrudan ve otomatik olarak devreye girecektir.
 
-### 📌 Madde 3: Ajan Kurulumu (MSI) Biter Bitmez Otomatik Açılacaktır
-- **Kural:** Teknisyen veya son kullanıcı `NexMote-Agent-Setup.msi` paketini kurduğu anda (ister arayüzlü ister `/qn` sessiz kurulum olsun), bilgisayarı yeniden başlatmaya gerek kalmadan servis ve tepsi ajanı hemen çalışmaya başlayacaktır.
+### 📌 Madde 2: Her Zaman En Üst Düzey Yetki (Domain Admin / SYSTEM Eşdeğeri)
+- **Kural:** Bilgisayarda oturum açmış kullanıcı ister kısıtlı bir standart kullanıcı, ister Active Directory Domain kullanıcısı veya misafir olsun; Ajan ve uzaktan çalıştırılan tüm komutlar **her zaman `NT AUTHORITY\SYSTEM` (makinenin en üst düzey çekirdek yetkisi)** ile çalışacaktır.
 - **Teknik Güvenceler:**
-  1. WiX MSI paketi `ServiceControl Id="ServiceControl" Start="install"` ile kurulumun son adımında servisi anında ayağa kaldırır.
-  2. Servis başladığı saniye aktif oturumu algılayıp tepsi uygulamasını ekrana getirir.
-  3. MSI ExitDialog penceresi sonlandığında `LaunchTrayAppExecSequence` ile tepsi uygulaması `--tray` argümanıyla derhal tetiklenir.
+  1. **UIPI Aşımı:** Windows'ta standart kullanıcı oturumundaki süreçlerin yönetici pencerelerine tıklaması engellidir. NexMote, aktif oturuma SYSTEM yetkili Girdi Yardımcısı (`NexMote.Agent.Tray.exe --input-helper`) enjekte eder.
+  2. **Domain Kullanıcı İzni:** Girdi Yardımcısının Named Pipe (`NexMoteInputHelper_{sessionId}`) ACL kurallarına `AuthenticatedUserSid` ve `WorldSid` tanımlıdır; domain kullanıcılarının SYSTEM yardımcısına fare/klavye sinyali göndermesi garanti edilir.
+  3. **UAC ve Yönetici Pencereleri:** UAC onay pencereleri (`consent.exe`), Görev Yöneticisi, Regedit ve "Yönetici Olarak Çalıştır" pencerelerine teknisyen fare ve klavyesiyle serbestçe müdahale edebilir.
 
-### 📌 Madde 4: Her Açılışta Ajan ve Teknisyen Uygulaması Güncelleme Durumunu Kontrol Edecektir
-- **Kural:** Hem Ajan (`NexMote.Agent.Tray`) hem de Teknisyen Uygulaması (`NexMote.TechnicianApp`) her açılışında sunucu üzerinden (`/api/updates/check`) en güncel sürümün yayında olup olmadığını kontrol edecektir.
+### 📌 Madde 3: Windows Çekirdek/Servis Seviyesinde Çalışma (Kullanıcı Bağımsızlığı)
+- **Kural:** Ajan asla belirli bir kullanıcının profiline (`AppData`, `Roaming` vb.) bağımlı olmayacak, `%ProgramFiles%\NexMote` dizininde Windows Servisi olarak bağımsız yaşayacaktır.
 - **Teknik Güvenceler:**
-  1. **Ajan:** Başlangıçtan 3-4 saniye sonra sessizce `CheckForAgentUpdatesAsync(isManual: false)` çalıştırır. Yeni sürüm varsa arka planda `%ProgramData%\NexMote\Agent\pending-update.msi` konumuna indirilir ve Windows Servisi tarafından LocalSystem yetkisiyle sessizce kurulur.
-  2. **Teknisyen:** Pencere yüklendiği an (`MainWindow_Loaded`) `CheckForUpdatesAsync(isManual: false)` çalıştırır; yeni teknisyen MSI'ı varsa teknisyene tek tıkla güncelleme imkanı sunar.
+  1. **Oturum Yokken Bile Çevrimiçi:** Bilgisayarda henüz kimse oturum açmamış olsa dahi (Windows Giriş/Kilit ekranı / Winlogon), Ajan sunucuda "Çevrimiçi" görünür, telemetri gönderir ve uzaktan erişilebilir.
+  2. **Winlogon Canlı Yayıncısı (`--system-session`):** Oturum açık değilken veya kilitliyken Windows Servisi `NexMote.Agent.Tray.exe --system-session` sürecini `winsta0\Winlogon` masaüstünde başlatır; teknisyen giriş ekranını canlı izleyebilir ve yönetebilir.
+  3. **Kullanıcı Değiştirme:** Bir kullanıcı oturumu kapattığında veya kullanıcı değiştirdiğinde Ajan asla kapanmaz, sunucu bağlantısı kopmaz.
+
+### 📌 Madde 4: %100 Evrensel UTF-8 Uyumluluğu (Zero-Mojibake)
+- **Kural:** Terminal komutları, dosya adları, donanım/yazılım envanteri, hata günlükleri ve Türkçe karakterler (`ç, ğ, ı, ö, ş, ü, İ, Ğ`) tüm katmanlarda **UTF-8** olarak işlenecektir.
+- **Teknik Güvenceler:** CMD/PowerShell süreçlerinde `chcp 65001` ve `Console.OutputEncoding = UTF8` zorunludur. JSON serileştirmelerinde UTF-8 (BOM'suz) kullanılır; asla bozuk karakter (`?`, ``) gösterilemez.
+
+### 📌 Madde 5: Sessiz ve Kesintisiz Uzaktan Güncelleme (OTA Self-Update)
+- **Kural:** Ajanın yeni bir sürümü yayınlandığında veya web panelinden "Güncelle" emri verildiğinde, son kullanıcıya hiçbir onay penceresi fırlatmadan **arka planda sessizce (`/qn`) güncellenecektir.**
+- **Teknik Güvenceler:** Açılışta 3-4 saniye sonra sessizce `/api/updates/check` sorgusu yapılır. Yeni sürüm `%ProgramData%\NexMote\Agent\pending-update.msi` konumuna indirilip LocalSystem yetkisiyle kurulur; cihaz kimliği (`identity.json`) korunur.
+
+### 📌 Madde 6: Sessiz ve Şeffaf Arayüz & Kurulum (Zero-Distraction Installer & Tray)
+- **Kural:** Ajan açıldığında kullanıcının karşısına aniden pencereler, formlar fırlatmayacaktır. MSI kurulum paketinde gereksiz büyük görseller, lisans sözleşmesi onay ekranları, karmaşık metinler veya adımlar yer almayacaktır.
+- **Teknik Güvenceler:**
+  1. **Sessiz Tepsi:** `NexMote.Agent.Tray.exe` varsayılan olarak `openDashboardOnStart = false` ile açılır; doğrudan sağ alt köşedeki Bildirim Alanında (Tray) yeşil kalkan simgesiyle sessizce yerini alır. Yalnızca simgeye çift tıklandığında durum paneli açılır.
+  2. **Görsel ve Metin Sadeliği (Minimal MSI):** Kurulum paketinde gereksiz büyük görseller (dialog/banner bitmap'leri) veya lisans sözleşmesi kabul ekranları bulunmaz; kurulum tek tıkla/sessizce ve doğrudan tamamlanır.
+
+### 📌 Madde 7: Ağ ve Bağlantı Dayanıklılığı (Never Give Up)
+- **Kural:** İnternet kopsa, modem yeniden başlasa, sunucu bakıma girse veya IP değişse bile Ajan asla pes etmeyecek ve kapanmayacaktır.
+- **Teknik Güvenceler:** `InfiniteRetryPolicy` ile arka planda 0s, 2s, 5s, 10s aralıklarla sonsuza kadar yeniden bağlanmayı dener; hat veya sunucu ayağa kalktığı milisaniyede web paneline anında "Çevrimiçi" döner.
+
+### 📌 Madde 8: Kilit Ekranı ve Yazılımsal SAS (Ctrl+Alt+Del) Desteği
+- **Kural:** Teknisyen, kilitli veya parola ekranındaki bir bilgisayara uzaktan bağlandığında fiziksel klavyeye gerek kalmadan uzaktan `Ctrl+Alt+Del` gönderebilmelidir.
+- **Teknik Güvenceler:** Windows Servisi `SoftwareSASGeneration = 3` ve `PromptOnSecureDesktop = 0` politikalarını otomatik uygular. Teknisyen konsolundaki buton SYSTEM yetkili Girdi Yardımcısına `send-sas` sinyali göndererek Winlogon ekranını güvenle açar.
+
+### 📌 Madde 9: Cihaz Kimliği Bütünlüğü ve Kendi Kendini Onarma (Self-Healing Identity)
+- **Kural:** Cihazın adı, etki alanı veya IP adresi değişse bile sistemde **asla mükerrer (çift) cihaz kaydı oluşmayacaktır.**
+- **Teknik Güvenceler:** Cihaz kimliği (`identity.json`) korunur. Çöken veya sonlandırılan yardımcı süreçler (Tray veya InputHelper) Windows Servisi Watchdog'u tarafından 1 saniye içinde otomatik yeniden ayağa kaldırılır.
+
+### 📌 Madde 10: Kurumsal Denetim İzi ve Uçtan Uca Güvenlik (Audit & TLS 1.3)
+- **Kural:** Teknisyenin cihaz üzerinde gerçekleştirdiği her işlem denetlenebilir ve şifreli olmalıdır.
+- **Teknik Güvenceler:** Canlı ekran akışı, girdi ve komut sinyalleri TLS 1.3 / WSS ile şifrelenir. Uzaktan çalıştırılan tüm CMD/PowerShell komutları `CommandAudits` tablosuna silinemez denetim izi olarak kaydedilir.
 
 #### 📋 Doğrulama & Kontrol Listesi
 | Madde | Kontrol Noktası | Beklenen Durum |
 | :---: | :--- | :--- |
-| **1** | Windows Açılışı | Windows yeniden başlatıldığında Ajan otomatik devreye giriyor mu? |
-| **2** | Sessiz Tepsi | Ajan açıldığında ekrana popup fırlatmadan sağ altta simge olarak bekliyor mu? |
-| **3** | Kurulum Sonrası | MSI kurulumu biter bitmez cihaz web panelinde anında "Çevrimiçi" oluyor mu? |
-| **4** | Açılış Güncellemesi | Ajan ve Teknisyen açılırken `/api/updates/check` adresini sorguluyor mu? |
+| **1** | Otomatik Başlama | Windows açıldığında veya MSI kurulduğunda Ajan otomatik devreye giriyor mu? |
+| **2** | En Üst Düzey Yetki | UAC onay ekranında ve Yönetici pencerelerinde fare/klavye çalışıyor mu? |
+| **3** | Kullanıcı Bağımsızlığı | Oturum kilitliyken veya kapalıyken (Winlogon) cihaz çevrimiçi ve yönetilebilir mi? |
+| **4** | UTF-8 Uyumluluğu | Türkçe karakterler ve terminal çıktıları bozulmadan (zero-mojibake) akıyor mu? |
+| **5** | Uzaktan Güncelleme | Web panelinden veya otomatik olarak sessizce (/qn) güncelleniyor mu? |
+| **6** | Sessiz Tepsi | Ajan açıldığında ekrana popup fırlatmadan sağ altta simge olarak bekliyor mu? |
+| **7** | Ağ Dayanıklılığı | Bağlantı kesilip geri geldiğinde (InfiniteRetryPolicy) otomatik toparlanıyor mu? |
+| **8** | Ctrl+Alt+Del | Kilit ekranında uzaktan Ctrl+Alt+Del gönderilebiliyor mu? |
+| **9** | Kimlik Bütünlüğü | IP/Ad değiştiğinde mükerrer kayıt oluşmuyor ve çöken süreçler canlanıyor mu? |
+| **10** | Denetim İzi & TLS | Çalıştırılan komutlar denetim kütüğüne kaydedilip TLS 1.3 ile şifreleniyor mu? |
 
 ---
 
@@ -52,7 +85,7 @@ Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan 
 - **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
 - **Sağlık Endpoint:** `https://nexmote.com/health` -> `{"product":"NexMote","status":"ok"}`
 - **Erişim Dokümanı:** [docs/server-credentials.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/docs/server-credentials.md) (git'te takip edilmiyor, sadece yerel)
-- **Güncel Client Sürümü:** `0.7.3` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
+- **Güncel Client Sürümü:** `0.7.5` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
 
 ---
 

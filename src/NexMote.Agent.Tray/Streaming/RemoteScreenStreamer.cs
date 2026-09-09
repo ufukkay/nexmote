@@ -35,6 +35,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private int _adaptiveQuality = 72;
     private readonly object _qualityLock = new();
     private readonly ConcurrentDictionary<int, long> _lastAckedSequencePerDisplay = new();
+    private readonly ConcurrentDictionary<long, long> _inFlightFrameSentTicks = new();
+    private long _lastRemoteInputTicks;
     private readonly Dictionary<Guid, ActiveFileTransfer> _activeTransfers = new();
     private NamedPipeClientStream? _inputHelperPipe;
     private StreamWriter? _inputHelperWriter;
@@ -162,6 +164,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             .WithUrl(hubUrl, options =>
             {
                 options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+                options.TransportMaxBufferSize = 10 * 1024 * 1024;
+                options.ApplicationMaxBufferSize = 10 * 1024 * 1024;
             })
             .WithAutomaticReconnect(new InfiniteRetryPolicy())
             .Build();
@@ -192,6 +196,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 {
                     return; // Sadece izleme modu aktif
                 }
+                _lastRemoteInputTicks = Stopwatch.GetTimestamp();
                 HandleRemoteInput(payload);
             }
             else if (string.Equals(type, "ping", StringComparison.OrdinalIgnoreCase))
@@ -314,6 +319,18 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             {
                 _ = RemoteScreenStreamer.PerformSelfUpdateAsync(msiUrl);
             }
+        });
+
+        _connection.On<string>("ExecutePowerAction", action =>
+        {
+            try
+            {
+                if (!TrySendToInputHelper(JsonSerializer.Serialize(new RemoteInputEvent(_activeSessionId ?? Guid.Empty, "power-action", Button: action))))
+                {
+                    PowerHelper.Execute(action);
+                }
+            }
+            catch { }
         });
 
         _connection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
@@ -540,6 +557,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _streamCancellation = new CancellationTokenSource();
         _activeSessionId = sessionId;
 
+        // Oturum başlarken basılı kalmış olabilecek klavye niteleyici tuşlarını temizle
+        InputInjector.ReleaseAllModifiers();
+
         // WebRTC P2P DataChannel eşleşmesini başlat (Madde 1)
         try
         {
@@ -691,9 +711,13 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             if (ack is not null && _activeSessionId == ack.SessionId)
             {
                 _lastAckedSequencePerDisplay[ack.DisplayIndex] = ack.Sequence;
-                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var rtt = Math.Max(0, now - ack.ReceivedAtUnixMs);
-                AdjustQuality(rtt);
+
+                // Yerel RTT ölçümü: Tamamen bu bilgisayarın yerel Stopwatch sayacına dayalı (saat farkı sıfır)
+                if (_inFlightFrameSentTicks.TryRemove(ack.Sequence, out var sentTicks))
+                {
+                    var localRttMs = (Stopwatch.GetTimestamp() - sentTicks) * 1000 / Stopwatch.Frequency;
+                    AdjustQuality(Math.Max(1, localRttMs));
+                }
             }
         }
         catch
@@ -756,7 +780,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
                     var sessionId = Process.GetCurrentProcess().SessionId;
                     _inputHelperPipe = new NamedPipeClientStream(".", $"NexMoteInputHelper_{sessionId}", PipeDirection.Out);
-                    _inputHelperPipe.Connect(25);
+                    _inputHelperPipe.Connect(100);
                     _inputHelperWriter = new StreamWriter(_inputHelperPipe, Encoding.UTF8, 4096, leaveOpen: false) { AutoFlush = true };
                 }
 
@@ -769,7 +793,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 _inputHelperPipe?.Dispose();
                 _inputHelperPipe = null;
                 _inputHelperWriter = null;
-                _nextPipeConnectAttemptTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 2);
+                _nextPipeConnectAttemptTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency / 2);
                 return false;
             }
         }
@@ -1008,26 +1032,35 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             try
             {
                 var lastAcked = _lastAckedSequencePerDisplay.GetValueOrDefault(displayIndex, 0);
-                if (sequence > 0 && lastAcked < sequence)
+                var inFlightCount = sequence - lastAcked;
+                var maxInFlight = _selectedQualityMode switch
+                {
+                    "speed" => 3,     // 60-80 FPS için 3 eş zamanlı kare
+                    "quality" => 2,   // Kristal modda 2 kare
+                    "balanced" => 2,  // Dengeli modda 2 kare
+                    _ => 2            // Otomatik modda 2 kare
+                };
+
+                // Kayan pencere kontrolü: Boru hattında maxInFlight'tan fazla bekleyen kare varsa kısa bir süre bekle
+                if (inFlightCount >= maxInFlight)
                 {
                     var waitLimitMs = _selectedQualityMode switch
                     {
-                        "speed" => 35,
-                        "quality" => 120,
-                        "balanced" => 70,
-                        _ => Math.Clamp(_smoothedRttMs + 35, 40, 85)
+                        "speed" => 20,
+                        "quality" => 50,
+                        "balanced" => 35,
+                        _ => Math.Clamp(_smoothedRttMs + 15, 20, 50)
                     };
 
                     var waitStart = Stopwatch.GetTimestamp();
-                    while (sequence > _lastAckedSequencePerDisplay.GetValueOrDefault(displayIndex, 0))
+                    while ((sequence - _lastAckedSequencePerDisplay.GetValueOrDefault(displayIndex, 0)) >= maxInFlight)
                     {
                         var elapsedWaitMs = (Stopwatch.GetTimestamp() - waitStart) * 1000 / Stopwatch.Frequency;
                         if (elapsedWaitMs >= waitLimitMs || cancellationToken.IsCancellationRequested)
                         {
-                            AdjustQuality(120);
                             break;
                         }
-                        await Task.Delay(3, cancellationToken);
+                        await Task.Delay(2, cancellationToken);
                     }
                 }
 
@@ -1045,7 +1078,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 }
 
                 var timeSinceMotionMs = (now - lastMotionTicks) * 1000 / Stopwatch.Frequency;
-                var isRefinement = !refinementSent && timeSinceMotionMs > 150 && (now - lastSendTicks) > 0;
+                var timeSinceInputMs = (now - _lastRemoteInputTicks) * 1000 / Stopwatch.Frequency;
+                var isMotionActive = timeSinceMotionMs < 250 || timeSinceInputMs < 400;
+                var isRefinement = !refinementSent && !isMotionActive && (now - lastSendTicks) > 0;
 
                 int quality;
                 if (isRefinement)
@@ -1053,33 +1088,56 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                     quality = 92;
                     forceSend = true;
                 }
+                else if (isMotionActive)
+                {
+                    // Hareket esnasında hafif sıkıştırma (70-90 KB kare boyutu) ile sıfır gecikmeli 60 FPS
+                    quality = Math.Clamp(GetCurrentQuality() - 12, 48, 66);
+                }
                 else
                 {
-                    quality = Math.Clamp(GetCurrentQuality(), 48, 92);
+                    quality = Math.Clamp(GetCurrentQuality(), 54, 90);
                 }
 
                 var frame = ScreenCapture.CaptureJpegBase64(displayIndex, quality, forceSend);
 
                 if (frame is not null && _connection?.State == HubConnectionState.Connected)
                 {
+                    var bounds = ScreenCapture.GetDisplayBoundsPublic(displayIndex);
                     sequence++;
+                    _inFlightFrameSentTicks[sequence] = now;
+                    if (_inFlightFrameSentTicks.Count > 100)
+                    {
+                        foreach (var k in _inFlightFrameSentTicks.Keys)
+                        {
+                            if (k < sequence - 60) _inFlightFrameSentTicks.TryRemove(k, out _);
+                        }
+                    }
+
                     var payload = JsonSerializer.Serialize(new MultiScreenFrame(
                         displayIndex,
                         JpegBase64: frame,
                         Sequence: sequence,
-                        CapturedAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+                        CapturedAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        ScreenWidth: bounds.Width,
+                        ScreenHeight: bounds.Height));
 
-                    var sendStopwatch = Stopwatch.StartNew();
-                    var sentViaP2p = _webRtc?.SendData("stream", payload) ?? false;
+                    var sentViaP2p = false;
+                    try
+                    {
+                        sentViaP2p = _webRtc?.SendData("stream", payload) ?? false;
+                    }
+                    catch
+                    {
+                        sentViaP2p = false;
+                    }
+
                     if (!sentViaP2p)
                     {
                         await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
                     }
-                    sendStopwatch.Stop();
 
                     if (!isRefinement)
                     {
-                        AdjustQuality(sendStopwatch.ElapsedMilliseconds);
                         lastMotionTicks = now;
                         refinementSent = false;
                     }
@@ -1128,46 +1186,48 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     {
         lock (_qualityLock)
         {
-            _smoothedRttMs = (int)Math.Max(1, rttMs);
+            // Üstel hareketli ortalama ile ani ağ dalgalanmalarına karşı yumuşatma
+            _smoothedRttMs = (int)(_smoothedRttMs * 0.7 + rttMs * 0.3);
+            _smoothedRttMs = Math.Clamp(_smoothedRttMs, 1, 1000);
 
             switch (_selectedQualityMode)
             {
                 case "speed":
-                    _adaptiveQuality = 58;
-                    _frameDelayMs = 16;
+                    _adaptiveQuality = 56;
+                    _frameDelayMs = 12; // ~80 FPS hedefi
                     break;
 
                 case "balanced":
-                    _adaptiveQuality = 74;
-                    _frameDelayMs = 25;
+                    _adaptiveQuality = 70;
+                    _frameDelayMs = 16; // ~60 FPS hedefi
                     break;
 
                 case "quality":
-                    _adaptiveQuality = 92;
-                    _frameDelayMs = 33;
+                    _adaptiveQuality = 88;
+                    _frameDelayMs = 25; // ~40 FPS kristal hedefi
                     break;
 
                 case "auto":
                 default:
-                    if (_smoothedRttMs < 30)
+                    if (_smoothedRttMs < 45)
                     {
-                        _adaptiveQuality = 84;
-                        _frameDelayMs = 16;
+                        _adaptiveQuality = 76;
+                        _frameDelayMs = 16; // 60 FPS
                     }
-                    else if (_smoothedRttMs < 75)
+                    else if (_smoothedRttMs < 90)
                     {
-                        _adaptiveQuality = 74;
-                        _frameDelayMs = 22;
+                        _adaptiveQuality = 68;
+                        _frameDelayMs = 16; // 60 FPS
                     }
-                    else if (_smoothedRttMs < 140)
+                    else if (_smoothedRttMs < 160)
                     {
                         _adaptiveQuality = 60;
-                        _frameDelayMs = 33;
+                        _frameDelayMs = 20; // 50 FPS
                     }
                     else
                     {
-                        _adaptiveQuality = 48;
-                        _frameDelayMs = 50;
+                        _adaptiveQuality = 50;
+                        _frameDelayMs = 30; // ~33 FPS fallback
                     }
                     break;
             }

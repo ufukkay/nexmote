@@ -36,11 +36,33 @@ internal static class DesktopHelper
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseDesktop(IntPtr hDesktop);
 
+    private const int UOI_NAME = 2;
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetUserObjectInformation(IntPtr hObj, int nIndex, [Out] byte[] pvInfo, uint nLength, out uint lpnLengthNeeded);
+
     [ThreadStatic]
     private static IntPtr _currentThreadDesktop;
 
+    [ThreadStatic]
+    private static string? _currentDesktopName;
+
+    [ThreadStatic]
+    private static long _lastDesktopCheckTicks;
+
     private static IntPtr _winsta0Handle = IntPtr.Zero;
     private static readonly object _winstaLock = new();
+
+    private static string? GetDesktopName(IntPtr hDesktop)
+    {
+        if (hDesktop == IntPtr.Zero) return null;
+        var buffer = new byte[512];
+        if (GetUserObjectInformation(hDesktop, UOI_NAME, buffer, (uint)buffer.Length, out var lengthNeeded) && lengthNeeded > 0)
+        {
+            return System.Text.Encoding.Unicode.GetString(buffer, 0, (int)lengthNeeded).TrimEnd('\0');
+        }
+        return null;
+    }
 
     /// <summary>
     /// Sürecin interaktif pencere istasyonuna (winsta0) bağlı olduğundan emin olur.
@@ -71,11 +93,20 @@ internal static class DesktopHelper
     /// <summary>
     /// Aktif masaüstüne (Default / Winlogon secure desktop) çağıran iş parçacığını iliştirir.
     /// Handle'ı hemen kapatmayıp iş parçacığı o masaüstünü kullandığı sürece açık tutar.
+    /// Masaüstü adı değişmediği sürece mükerrer SetThreadDesktop çağrısı yapmaz ve çekirdek kilitlenmelerini önler.
     /// </summary>
-    public static void AttachToActiveDesktop()
+    public static void AttachToActiveDesktop(bool force = false)
     {
         try
         {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!force && _currentThreadDesktop != IntPtr.Zero && (now - _lastDesktopCheckTicks) < System.Diagnostics.Stopwatch.Frequency)
+            {
+                // Son kontrol 1 saniyeden kısa süre önce yapıldı ve zaten bir masaüstüne bağlıyız; çağrıyı atla
+                return;
+            }
+
+            _lastDesktopCheckTicks = now;
             EnsureWindowStation();
 
             var hDesktop = OpenInputDesktop(0, false, DESKTOP_ALL);
@@ -96,24 +127,28 @@ internal static class DesktopHelper
 
             if (hDesktop != IntPtr.Zero)
             {
-                if (hDesktop != _currentThreadDesktop)
+                var newDesktopName = GetDesktopName(hDesktop);
+
+                // Zaten aynı ada sahip masaüstüne bağlıysak mükerrer SetThreadDesktop çağrısı yapma
+                if (!string.IsNullOrEmpty(newDesktopName) &&
+                    string.Equals(newDesktopName, _currentDesktopName, StringComparison.OrdinalIgnoreCase) &&
+                    _currentThreadDesktop != IntPtr.Zero)
                 {
-                    if (SetThreadDesktop(hDesktop))
+                    CloseDesktop(hDesktop);
+                    return;
+                }
+
+                if (SetThreadDesktop(hDesktop))
+                {
+                    if (_currentThreadDesktop != IntPtr.Zero)
                     {
-                        if (_currentThreadDesktop != IntPtr.Zero)
-                        {
-                            try { CloseDesktop(_currentThreadDesktop); } catch { }
-                        }
-                        _currentThreadDesktop = hDesktop;
+                        try { CloseDesktop(_currentThreadDesktop); } catch { }
                     }
-                    else
-                    {
-                        CloseDesktop(hDesktop);
-                    }
+                    _currentThreadDesktop = hDesktop;
+                    _currentDesktopName = newDesktopName;
                 }
                 else
                 {
-                    // Zaten bu masaüstü handle'ına bağlıyız; açılan mükerrer handle'ı kapat
                     CloseDesktop(hDesktop);
                 }
             }

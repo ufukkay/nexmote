@@ -67,57 +67,61 @@ public static class NexMoteHttp
     }
 
     /// <summary>
-    /// Windows Servisi ve Tray süreçleri için ORTAK sunucu URL doğrulama kuralı: yerel/özel adreslere
-    /// veya localhost'a zorla üretim sunucusuna yönlendirir. Bu iki süreç de yüksek yetkiyle (SYSTEM /
-    /// kullanıcı oturumu + SYSTEM input-helper) çalıştığından, ServerUrl ayarının kazara veya kötü niyetle
-    /// yerel/sahte bir adrese yönlendirilmesi ciddi bir ele geçirme riskidir — bu yüzden NormalizeUrl'den
-    /// (genel amaçlı, localhost'a izin veren) farklı olarak burada localhost dahil tüm özel adresler reddedilir.
-    ///
-    /// Zorlama kuralları:
-    ///  • Boş / null              → üretim URL'sine zorla
-    ///  • Şema http:// ise        → üretim URL'sine zorla (TLS zorunlu)
-    ///  • Yerel/özel IP aralıkları (127.x, 192.168.x, 10.x, 172.16-31.x) veya "localhost" → üretim URL'sine zorla
-    ///  • Geçerli https:// URL    → TrimEnd('/') ile döndür
+    /// <summary>
+    /// Windows Servisi ve Tray süreçleri için sunucu URL doğrulama kuralı:
+    ///  • Boş / null              → varsayılan üretim URL'sine ("https://nexmote.com") yönlendir
+    ///  • Yerel/özel IP aralıkları (127.x, 192.168.x, 10.x, 172.16-31.x, localhost) → yerel ağ sunucuları için HTTP/HTTPS olarak kabul et
+    ///  • İnternet üzerindeki harici sunucular → güvenli HTTPS zorunlu
     /// </summary>
     public static string EnforceProductionUrl(string? rawUrl)
     {
-        const string productionUrl = "https://nexmote.com";
+        const string defaultServerUrl = "https://nexmote.com";
 
         if (string.IsNullOrWhiteSpace(rawUrl))
         {
-            return productionUrl;
+            return defaultServerUrl;
         }
 
-        if (rawUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        var trimmed = rawUrl.Trim().TrimEnd('/');
+        if (!trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            return productionUrl;
+            trimmed = (IsPrivateOrLocalHost(trimmed.Split(':')[0]) ? "http://" : "https://") + trimmed;
         }
 
-        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri))
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
         {
-            return productionUrl;
+            return defaultServerUrl;
         }
 
         var host = uri.Host;
 
-        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
-        {
-            return productionUrl;
-        }
-
+        // Yerel veya özel IP adresleri (192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost)
+        // yerel ağda/on-premise sunucularda HTTP ve HTTPS ile doğrudan desteklenir.
         if (IsPrivateOrLocalHost(host))
         {
-            return productionUrl;
+            return trimmed;
         }
 
-        return rawUrl.TrimEnd('/');
+        // İnternet üzerindeki harici sunucular mutlaka güvenli HTTPS protokolü kullanmalıdır.
+        if (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return "https://" + trimmed.Substring(7);
+        }
+
+        return trimmed;
     }
 
     /// <summary>
     /// Verilen host string'inin RFC-1918 özel IP aralıklarına veya loopback'e ait olup olmadığını kontrol eder.
     /// </summary>
-    private static bool IsPrivateOrLocalHost(string host)
+    public static bool IsPrivateOrLocalHost(string host)
     {
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         if (!IPAddress.TryParse(host, out var ip))
         {
             return false;
@@ -154,9 +158,9 @@ public static class NexMoteHttp
     }
 
     /// <summary>
-    /// Kullanıcı veya konfigürasyon tarafından girilen sunucu adresini (örn: "nexmote.com", "www.nexmote.com", "http://nexmote.com")
-    /// standart, güvenli ve geçerli bir mutlak HTTPS URL'ine dönüştürür.
-    /// Başına https:// veya www. yazılmasa dahi otomatik olarak doğru formata çevirir.
+    /// Kullanıcı veya konfigürasyon tarafından girilen sunucu adresini (örn: "192.168.0.219", "nexmote.com", "http://192.168.0.219")
+    /// standart, geçerli bir mutlak URL'e dönüştürür.
+    /// Yerel/özel IP'ler için HTTP protokolünü korur, harici alan adları için HTTPS'e zorlar.
     /// </summary>
     public static string NormalizeUrl(string? rawUrl)
     {
@@ -167,19 +171,19 @@ public static class NexMoteHttp
 
         var url = rawUrl.Trim().TrimEnd('/');
 
-        // Eğer kullanıcı protokol belirtmediyse (örn: "nexmote.com" veya "www.nexmote.com") https:// ekle
+        // Protokol belirtilmemişse: yerel IP veya localhost ise http://, harici ise https:// ekle
         if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
             !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            url = "https://" + url;
+            var hostPart = url.Split('/')[0].Split(':')[0];
+            url = (IsPrivateOrLocalHost(hostPart) ? "http://" : "https://") + url;
         }
 
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
-            // Localhost veya yerel IP değilse ve http:// ile girilmişse güvenli https:// protokolüne yükselt
+            // Localhost veya yerel/özel IP değilse ve http:// ile girilmişse güvenli https:// protokolüne yükselt
             if (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) &&
-                !uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
-                !uri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase))
+                !IsPrivateOrLocalHost(uri.Host))
             {
                 url = "https://" + url.Substring(7);
             }

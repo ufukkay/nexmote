@@ -45,6 +45,7 @@ internal static class ScreenCapture
     {
         LastFrameHashes[displayIndex] = 0;
         DisplayTileHashes.TryRemove(displayIndex, out _);
+        try { DxgiScreenCapture.Instance.Reset(); } catch { }
     }
 
     public static MultiScreenFrame? CaptureDeltaFrame(int displayIndex, int quality, bool forceKeyFrame, ref long sequence)
@@ -284,6 +285,21 @@ internal static class ScreenCapture
     {
         DesktopHelper.AttachToActiveDesktop();
 
+        // 1. Önce DirectX 11 DXGI GPU Yakalama Motorunu Dene (Sıfır CPU, 60 FPS, Donanım VRAM)
+        try
+        {
+            var dxgiFrame = DxgiScreenCapture.Instance.CaptureJpegBase64(displayIndex, quality, forceSend, out var capturedWithDxgi);
+            if (capturedWithDxgi)
+            {
+                return dxgiFrame;
+            }
+        }
+        catch
+        {
+            // DXGI istisnası durumunda sessizce GDI+ motoruna düş
+        }
+
+        // 2. DXGI desteklenmiyorsa veya masaüstü geçişi (UAC/Winlogon) varsa GDI+ Fallback devreye girer
         var bounds = GetDisplayBounds(displayIndex);
         if (bounds.Width <= 0 || bounds.Height <= 0)
         {
@@ -293,7 +309,24 @@ internal static class ScreenCapture
         using var capture = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
         using (var graphics = Graphics.FromImage(capture))
         {
-            graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+            try
+            {
+                graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+            }
+            catch
+            {
+                // Masaüstü geçişi (UAC secure desktop, kilit ekranı veya oturum değişimi) sırasında
+                // zorunlu olarak aktif masaüstüne yeniden bağlanıp ikinci kez dene
+                DesktopHelper.AttachToActiveDesktop(force: true);
+                try
+                {
+                    graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
 
             try
             {
@@ -384,6 +417,11 @@ internal static class ScreenCapture
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         g.DrawImage(source, 0, 0, newWidth, newHeight);
         return target;
+    }
+
+    internal static void SaveJpegToStream(Image image, Stream stream, long quality)
+    {
+        SaveJpeg(image, stream, quality);
     }
 
     private static void SaveJpeg(Image image, Stream stream, long quality)

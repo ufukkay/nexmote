@@ -38,8 +38,10 @@ publish-linux.zip
 *.zip
 docs/server-credentials.md
 scratch/
-chat.py
-.freebuff/
-walkthrough.md
+publish/
+*.py
+*.db
+*.db-shm
+*.db-wal
 
 

@@ -240,6 +240,8 @@ public sealed class Worker : BackgroundService
                 .WithUrl(hubUrl, options =>
                 {
                     options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+                    options.TransportMaxBufferSize = 10 * 1024 * 1024;
+                    options.ApplicationMaxBufferSize = 10 * 1024 * 1024;
                 })
                 .WithAutomaticReconnect(new InfiniteRetryPolicy())
                 .Build();
@@ -324,36 +326,7 @@ public sealed class Worker : BackgroundService
             _hubConnection.On<string>("ExecutePowerAction", action =>
             {
                 _logger.LogInformation("Sunucudan uzaktan güç komutu alındı: {Action}", action);
-                try
-                {
-                    switch (action.ToLowerInvariant())
-                    {
-                        case "reboot":
-                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
-                            break;
-                        case "reboot-safe":
-                            Process.Start(new ProcessStartInfo("bcdedit.exe", "/set {current} safeboot network") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
-                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
-                            break;
-                        case "reboot-normal":
-                            Process.Start(new ProcessStartInfo("bcdedit.exe", "/deletevalue {current} safeboot") { CreateNoWindow = true, UseShellExecute = false })?.WaitForExit(3000);
-                            Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
-                            break;
-                        case "shutdown":
-                            Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0 /f") { CreateNoWindow = true, UseShellExecute = false });
-                            break;
-                        case "lock":
-                            SessionProcessLauncher.TryLaunchInActiveSessionAsUser("rundll32.exe", "user32.dll,LockWorkStation", out _);
-                            break;
-                        case "logoff":
-                            Process.Start(new ProcessStartInfo("logoff.exe") { CreateNoWindow = true, UseShellExecute = false });
-                            break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Güç komutu yürütülürken hata: {Action}", action);
-                }
+                ExecutePowerAction(action);
             });
 
             await _hubConnection.StartAsync(cancellationToken);
@@ -363,6 +336,45 @@ public sealed class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SignalR Hub bağlantısı kurulamadı.");
+        }
+    }
+
+    private void ExecutePowerAction(string action)
+    {
+        _logger.LogInformation("Güç komutu yürütülüyor: {Action}", action);
+        try
+        {
+            var systemDir = Environment.SystemDirectory;
+            var shutdownExe = Path.Combine(systemDir, "shutdown.exe");
+            var bcdeditExe = Path.Combine(systemDir, "bcdedit.exe");
+            var logoffExe = Path.Combine(systemDir, "logoff.exe");
+
+            switch (action.ToLowerInvariant())
+            {
+                case "reboot":
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
+                    break;
+                case "reboot-safe":
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{bcdeditExe}\" /set {{current}} safeboot network & \"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
+                    break;
+                case "reboot-normal":
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{bcdeditExe}\" /deletevalue {{current}} safeboot & \"{shutdownExe}\" /r /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
+                    break;
+                case "shutdown":
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{shutdownExe}\" /s /f /t 0\"") { CreateNoWindow = true, UseShellExecute = false });
+                    break;
+                case "lock":
+                    SessionProcessLauncher.TryLaunchInActiveSessionAsUser("rundll32.exe", "user32.dll,LockWorkStation", out _);
+                    break;
+                case "logoff":
+                    SessionProcessLauncher.TryLaunchInActiveSessionAsUser(logoffExe, "", out _);
+                    Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"\"{logoffExe}\"\"") { CreateNoWindow = true, UseShellExecute = false });
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Güç komutu yürütülürken hata: {Action}", action);
         }
     }
 
@@ -389,6 +401,14 @@ public sealed class Worker : BackgroundService
                 var uninstallAck = new CommandRunResult(0, "Silent agent cleanup acknowledged.", string.Empty, 0, false);
                 await _client.PostQueuedCommandResultAsync(identity, command, uninstallAck, cancellationToken);
                 StartSilentCleanup();
+                return;
+            }
+
+            if (string.Equals(command.Kind, "power", StringComparison.OrdinalIgnoreCase))
+            {
+                var powerAck = new CommandRunResult(0, $"Power action '{command.Command}' acknowledged and executing.", string.Empty, 0, false);
+                await _client.PostQueuedCommandResultAsync(identity, command, powerAck, cancellationToken);
+                ExecutePowerAction(command.Command);
                 return;
             }
 

@@ -647,6 +647,7 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
             AuditLogService auditLog,
             IHubContext<SignalingHub> hubContext,
             SignalSessionAccess signalSessionAccess,
+            DeviceCommandQueue commandQueue,
             CancellationToken ct) =>
         {
             var device = devices.GetById(id);
@@ -676,7 +677,10 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
                 return Results.BadRequest(new { message = "Cihaz çevrimdışı olduğu için güç eylemi iletilemedi." });
             }
 
+            var initiatorIdStr = user.FindFirstValue(ClaimTypes.NameIdentifier);
+            Guid? initiatorUserId = Guid.TryParse(initiatorIdStr, out var pId) ? pId : null;
             var initiatorEmail = user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email") ?? "Bilinmeyen";
+            var corrId = http.GetCorrelationId();
 
             auditLog.Log(http, $"device.power.{action}", "Device", id.ToString(), new
             {
@@ -686,11 +690,14 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
                 initiatorEmail
             });
 
-            var targetGroup = signalSessionAccess.HasServiceConnection(id)
-                ? $"device:{id}:service"
-                : $"device:{id}";
+            // 1. Her zaman kuyruğa ekle (Garanti teslimat - Offline/SignalR kopukluğu koruması)
+            var requestId = Guid.NewGuid();
+            commandQueue.Enqueue(requestId, id, "power", "internal", action, 30, initiatorUserId, initiatorEmail, corrId);
 
-            await hubContext.Clients.Group(targetGroup).SendAsync("ExecutePowerAction", action, ct);
+            // 2. Anında SignalR ile tüm ilgili kanallara çoklu yayınla (Anında tetikleme)
+            await hubContext.Clients.Group($"device:{id}").SendAsync("ExecutePowerAction", action, ct);
+            await hubContext.Clients.Group($"device:{id}:service").SendAsync("ExecutePowerAction", action, ct);
+            await hubContext.Clients.Group($"device:{id}:tray").SendAsync("ExecutePowerAction", action, ct);
 
             string userFriendlyMessage = action switch
             {

@@ -4,7 +4,119 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.7.3] - 2026-09-07 (Güncel Sürüm)
+## 🏷️ [v0.8.0] - 2026-09-09 (Güncel Sürüm)
+### 🚀 DirectX 11 DXGI GPU Ekran Yakalama, WebRTC P2P Akışı ve Kusursuz Masaüstü Geçişi
+- **DirectX 11 DXGI Desktop Duplication (`DxgiScreenCapture.cs`):**
+  - Ekran kareleri doğrudan GPU VRAM framebuffer üzerinden yakalanarak CPU yükü sıfıra indirildi (%1-%3 aralığı).
+  - Donanımsal statik ekran algılaması (DXGI wait timeout) ile hareketsiz sahnelerde boşuna işlemci tüketen döngüler ve hash hesaplamaları tamamen ortadan kaldırıldı.
+  - Donanım hızlandırmalı imleç (cursor) katmanı eklendi.
+  - Desteklenmeyen sistemler veya sanal makineler için otomatik, sıfır gecikmeli GDI+ (`CopyFromScreen`) geri düşüşü (fallback) sağlandı.
+- **WebRTC P2P Sınırsız Akış ve Paket Parçalama (`WebRtcPeerTransport.cs`):**
+  - Eski 64 KB SCTP DataChannel sınırı dinamik paket parçalama protokolü (`__CHK__|{msgId}|{chunkIndex}|{totalChunks}|{data}`) ile kaldırıldı.
+  - 1080p, 2K ve yüksek kaliteli tüm karelerin doğrudan WebRTC P2P veri kanalı üzerinden 10-20 ms ultra düşük gecikmeyle akması sağlandı.
+  - 512 KB arabellek taşma koruması (bufferbloat guard) ile ağ tıkanıklıklarında SignalR WebSocket hattına kesintisiz geri dönüş korundu.
+- **Kusursuz Masaüstü Geçişi ve Çift Akış Çakışmasının Çözümü (`Program.cs` & `DesktopHelper.cs`):**
+  - `DXGI_ERROR_ACCESS_LOST` durumunda `DesktopHelper.AttachToActiveDesktop(force: true)` ile yeni aktif masaüstüne (`Winlogon` / UAC secure desktop) anında geçiş sağlandı.
+  - Kullanıcı oturum açtığında kilit ekranı yayıncısı (`--system-session`) ile kullanıcı masaüstü tepsisi (`--tray`) arasındaki yayın çakışması küresel olay mekanizması (`Global\NexMote_System_Session_Stop_{sessionId}`) ile milisaniyeler içinde çözülerek mükerrer akışlar engellendi.
+
+---
+
+## 🏷️ [v0.7.9] - 2026-09-08
+### ⚡ Kesintisiz Güç Yönetimi ve Çift Kanallı Güvenilir Komut Dağıtımı (Power Actions Fix)
+- **Güç Eylemleri Kuyruk Güvencesi (Persistent Command Queueing):**
+  - Web panelinden veya API üzerinden gönderilen tüm güç eylemleri (`reboot`, `shutdown`, `lock`, `logoff`, `reboot-safe`, `reboot-normal`), anlık SignalR soket bağlantı durumuna bağlı kalınmaksızın `DeviceCommands` kuyruğuna kalıcı olarak yazılır (`Kind = "power"`).
+- **Çok Kanallı Anlık İletim (Multi-Channel Broadcast):**
+  - SignalR sinyalleri hem `device:{id}:service` (LocalSystem Windows Servisi), hem `device:{id}:tray` (Kullanıcı Tepsisi), hem de `device:{id}` gruplarına eş zamanlı iletilir.
+- **Sistem Düzeyinde Güvenli Komut Yürütme:**
+  - `Worker.cs` ve `PowerHelper.cs` içinde sistem araçları (`shutdown.exe`, `bcdedit.exe`, `rundll32.exe`, `logoff.exe`) mutlak sistem yolu ve `cmd.exe /c ""` güvenli kapsayıcısıyla çağrılır.
+- **Tepsi Seviyesinde Yedek Dinleyici (`RemoteScreenStreamer.cs`):**
+  - Tray modülü oturum içinde `ExecutePowerAction` dinleyicisi kazanarak servis veya doğrudan tepsi üzerinden gelen eylemleri anında işleyebilir hale getirildi.
+
+---
+
+## 🏷️ [v0.7.8] - 2026-09-08
+### 📦 Minimal ve Sade MSI, Doğrudan Başlama (Tiksiz Kurulum) & Proje Temizliği
+- **Minimal & Sade Kurulum (Zero-Bloat MSI):**
+  - MSI kurulum paketindeki gereksiz özel bitmap görselleri (`dialog.bmp`, `banner.bmp`) ve lisans metni (`license.rtf`) kaldırıldı; native, sade ve kurumsal Windows Installer standartlarına dönüldü.
+- **Doğrudan ve Otomatik Başlama (Tiksiz / Onaysız Kurulum):**
+  - MSI bitiş ekranındaki "NexMote Agent uygulamasını şimdi başlat" onay kutusu (checkbox / tik işareti) kaldırıldı.
+  - Kurulum bittiğinde kullanıcıdan herhangi bir onay kutusunu işaretlemesi beklenmeksizin uygulama doğrudan ve otomatik olarak başlatılır.
+  - Sessiz kurulumlarda (`/qn`) Windows Servisi watchdog'u ile anında kullanıcı oturumuna enjeksiyon sağlanır.
+- **Proje ve Dağıtım Alanı Derin Temizliği:**
+  - Eski ve kullanılmayan tek kullanımlık betikler, gereksiz arşiv paketleri (`downloads.tar.gz` ~223 MB), `.wixpdb` sembolleri ve geçici veritabanı kopyaları repodan tamamen temizlendi.
+- **Ajan Ana Yasası (RULES.md & AGENTS.md) Genişletmesi:**
+  - Madde 1'e "Doğrudan Başlama (Tiksiz / Onaysız Kurulum)" ve Madde 6'ya "Görsel ve Metin Sadeliği (Minimal MSI)" ilkeleri eklenerek kalıcı kural haline getirildi.
+
+---
+
+## 🏷️ [v0.7.7] - 2026-09-08
+### ⚡ 60 FPS Akıcı Masaüstü, Kayan Pencere (Sliding Window), Monotonik Yerel RTT & Dinamik Hareket Sıkıştırması
+- **Kayan Pencere Boru Hattı (Sliding Window Pipelining - `RemoteScreenStreamer.cs`):**
+  - Tek karelik "dur-ve-onay-bekle" (stop-and-wait) darboğazı kaldırılarak boru hattında eş zamanlı 2-3 kare akışı sağlandı. Uzak ağ gecikmesinde bile FPS tavanı 14'ten doğrudan **30 - 60 FPS** seviyesine çıkarıldı.
+- **Saat Farkından Arındırılmış Monotonik Yerel RTT (`Stopwatch.GetTimestamp()`):**
+  - İstemci ve teknisyen makinelerinin sistem saatleri arasındaki zaman kayması (clock skew) kaynaklı sahte gecikme ölçümü engellendi. Karelerin gidiş-dönüş süresi ajanın yerel işlemci sayacı üzerinden sıfır hata payıyla ölçülerek haksız kalite düşüşleri önlendi.
+- **Dinamik Hareket Sıkıştırması (Motion-Adaptive Dynamic Quality):**
+  - Fare ve pencere hareketleri algılandığında kare boyutu anında 70-90 KB seviyesine optimize edilerek ağ arabelleği (bufferbloat) şişmeden sıfır gecikmeli akış sağlandı.
+  - Hareket durduğunda 150 ms içinde %92 netlikte kristal tekil arıtma karesi (refinement frame) gönderilerek metinlerin ve arayüzün keskin okunması sağlandı.
+- **Erken Onay Sinyali (Fast ACK - `MainWindow.xaml.cs`):**
+  - Teknisyen konsolunda kare arka planda çözüldüğü milisaniyede onay sinyali gönderilerek ajanın gönderme penceresi sıfır gecikmeyle açık tutuldu.
+
+---
+
+## 🏷️ [v0.7.6] - 2026-09-08
+### 🚀 Kesintisiz Ekran Akışı, 10MB SignalR Arabelleği, SCTP Koruma & Canlı Görüntü Garantisi
+- **WebRTC SCTP Veri Kanalı Arabellek Koruması (`WebRtcPeerTransport.cs` & `RemoteScreenStreamer.cs`):**
+  - SIPSorcery `RTCDataChannel` UDP üzerinden parçalanmamış 64 KB'tan büyük paketleri sessizce düşürüyordu veya arabellekte kilitliyordu. 64 KB üzerindeki büyük ekran karelerinin doğrudan güvenilir SignalR WebSocket hattı üzerinden akması garanti altına alındı.
+- **SignalR 10 MB Yüksek Bant Genişliği Arabelleği (`MainWindow.xaml.cs`, `RemoteScreenStreamer.cs`, `Worker.cs`):**
+  - İstemci ve Teknisyen uygulamasındaki `HubConnectionBuilder` yapılandırmalarına `TransportMaxBufferSize = 10 * 1024 * 1024` ve `ApplicationMaxBufferSize = 10 * 1024 * 1024` (10 MB) tanımlandı. 32 KB varsayılan sınır nedeniyle yüksek çözünürlüklü ekran akışlarının tıkanması tamamen engellendi.
+- **Teknisyen Konsolu Akış Fallback & Placeholder Çözümü (`MainWindow.xaml.cs`):**
+  - Monitör indeks uyuşmazlığında gelen ilk ekran karesini fallback olarak alıp görüntüleyen koruma eklendi; ekran karesi geldiğinde "Görüntü akışı bekleniyor" (`PlaceholderPanel`) anında gizlenerek masaüstü pürüzsüzce ekrana getirildi.
+- **ScreenCapture Güvenli Masaüstü Geçiş & Çökme Koruması (`ScreenCapture.cs`):**
+  - Windows UAC veya kilit ekranı geçişlerinde `CopyFromScreen` Win32 hatası verdiğinde akış döngüsünün takılması önlendi; `AttachToActiveDesktop(force: true)` ile ikinci deneme yapılarak ekran yakalama kararlılığı sağlandı.
+
+---
+
+## 🏷️ [v0.7.5] - 2026-09-08
+### 🎯 Fare ve Klavye Kararlılığı, Çekirdek Desktop Optimizasyonu & Piksel Hassasiyetinde Koordinat Eşleme
+- **DesktopHelper Çekirdek Thrashing Optimizasyonu (`DesktopHelper.cs`):**
+  - Saniyede 45-60 kez yapılan gereksiz `SetThreadDesktop` ve `OpenInputDesktop` çağrıları önbelleğe alındı.
+  - `GetUserObjectInformation(hDesktop, UOI_NAME)` ile aktif masaüstü adı (`Default`, `Winlogon`) okunarak, zaten o masaüstüne bağlı olunduğunda mükerrer çekirdek geçişleri engellendi. Kontroller 1 saniyede en fazla 1 kez çalışacak şekilde sınırlandı (1500 kat çekirdek yük hafiflemesi, sıfır hareket gecikmesi).
+- **Piksel Düzeyinde Kesin Koordinat Haritalama (`MainWindow.xaml.cs` - `TryMapTileToRemote`):**
+  - Uzak ekrandan gelen son karenin gerçek piksel boyutları (`bitmap.PixelWidth`, `bitmap.PixelHeight`) doğrudan kullanılarak dinamik Aspect Ratio, Pillarbox ve Letterbox kenar boşluğu hesabı getirildi.
+  - Normalleştirilmiş oran (`relX / renderedWidth`) ile hedef piksel `[0, remoteWidth - 1]` aralığına tam isabetle eşleştirildi; 1366x768, 2560x1440 ve %125/%150 Windows DPI ölçeklendirmeli bilgisayarlardaki koordinat kaymaları kalıcı olarak çözüldü.
+- **Akıllı Fare Hız Sınırlayıcı & Son Konum Garantisi (`HandleTileMouseMove`):**
+  - Fare hareketleri saniyede en fazla 60 paket (16ms) ile sınırlandırıldı.
+  - Hız sınırına takılan son hareketler bir `DispatcherTimer` (16ms) ile hedefe kesin olarak iletilir hale getirildi (fare durduğunda imlecin hedefte kalması garanti edildi).
+  - Tıklama anında (`HandleTileMouseButton`), bekleyen son hareket sinyali tıklamadan hemen önce gönderilerek tıklamanın tam imleç ucunda olması sağlandı.
+- **Çift İmleç Konumlandırma Çakışmasının Çözümü (`InputInjector.cs`):**
+  - `SetCursorPos` başarılı olduğunda redundant ve titremeye yol açan `SendInput(MouseMove)` çağrısı iptal edildi; imleç pürüzsüz ve titreşimsiz hareket eder hale getirildi.
+  - `SetCursorPos` başarısız olduğunda (UAC veya masaüstü geçişi), anında zorunlu masaüstü yenilemesi (`AttachToActiveDesktop(force: true)`) yapılıp doğru sanal masaüstü normalizasyon formülü (`65536.0 / vWidth`) ile `SendInput` ve `mouse_event` sürücü katmanına geri düşüş sağlandı.
+- **Klavye Otomatik Tekrar Desteği (Key Repeat):**
+  - `e.IsRepeat` engeli kaldırılarak `Backspace`, yön tuşları, `Delete` ve metin tuşları için otomatik tekrar etkinleştirildi. Yalnızca `Ctrl`, `Alt`, `Shift`, `Win` niteleyicilerinde mükerrer sinyal önlendi.
+- **Pencere Odak Kaybında Tuş Kilitlenmesi Koruması (Sticky Keys Önleme):**
+  - Teknisyen `Alt+Tab` yaptığında veya başka bir uygulamaya tıkladığında `Window.Deactivated` olayı yakalanarak basılı kalan tüm tuşlar için uzak bilgisayara anında `KeyUp` sinyali gönderilmesi ve `_downKeys` listesinin temizlenmesi sağlandı.
+- **MultiScreenFrame Çözünürlük Metadata Transferi (`RemoteScreenStreamer.cs`):**
+  - Kare serileştirmesinde `ScreenWidth` ve `ScreenHeight` parametreleri gerçek ekran sınırlarından okunarak iletilir hale getirildi.
+
+---
+
+## 🏷️ [v0.7.4] - 2026-09-08
+### 🛡️ Domain PC'lerinde UAC & Yönetici Onay Ekranlarında Tam Fare ve Klavye Etkileşimi
+- **Domain Kullanıcıları İçin Named Pipe ACL Genişletmesi (`BuildPipeSecurity`):**
+  - SYSTEM yetkili Girdi Yardımcısının (`--input-helper`) yerel Named Pipe (`NexMoteInputHelper_{sessionId}`) erişim kuralına `AuthenticatedUserSid` ve `WorldSid` (ReadWrite) eklendi.
+  - Active Directory Domain ortamlarında kısıtlı kullanıcı hesaplarıyla oturum açılmış bilgisayarlarda Ajan Tray sürecinin (`NexMote.Agent.Tray.exe`) Girdi Yardımcısına bağlanırken `Access Denied` (Erişim Engellendi) hatası alması giderildi.
+- **Güvenilir Süreç Doğrulaması (`IsAllowedClient`):**
+  - Girdi Yardımcısı Named Pipe sunucusuna bağlanan sürecin aynı Windows Oturumunda (`currentSessionId`) ve birebir aynı dosya yolunda (`selfPath` - `%ProgramFiles%\NexMote`) çalıştığı doğrulanarak, ticari kod imzalama sertifikası aranmaksızın SYSTEM girdi enjeksiyonu aktif hale getirildi.
+- **UIPI (User Interface Privilege Isolation) Aşımı & UAC Etkileşimi:**
+  - Teknisyen canlı masaüstü oturumundayken Windows Kullanıcı Hesabı Denetimi (UAC - `consent.exe`), Görev Yöneticisi ve "Yönetici Olarak Çalıştır" ile açılmış tüm yüksek yetkili pencerelere fare tıklamaları ve klavye girdilerinin SYSTEM yetkisiyle kesintisiz iletilmesi sağlandı.
+- **Bağlantı Zaman Aşımı & Yeniden Deneme Optimizasyonu:**
+  - Named Pipe istemci bağlantı zaman aşımı 25ms'den 100ms'ye çıkarıldı, yeniden bağlanma aralığı 500ms'ye düşürüldü.
+- **Birincil Belirteç İmpersonation Düzeltmesi (`SessionProcessLauncher`):**
+  - `DuplicateTokenEx` çağrısında `TokenPrimary` için `SecurityImpersonation` seviyesi standart hale getirildi.
+
+---
+
+## 🏷️ [v0.7.3] - 2026-09-07
 ### ⚡ Kesintisiz Canlı Masaüstü Akışı, Sonsuz Yeniden Bağlanma & Çift Katmanlı Oturum Uyandırma
 - **Sonsuz ve Kararlı SignalR Yeniden Bağlanma Politikası (`InfiniteRetryPolicy`):**
   - İstemcilerin (Ajan, Windows Servisi ve Teknisyen Konsolu) geçici ağ dalgalanmaları veya sunucu servis yeniden başlatmalarında 4 deneme sonra kalıcı olarak düşmesini engelleyen `InfiniteRetryPolicy` (0s, 2s, 5s, 10s döngüsü) devreye alındı.

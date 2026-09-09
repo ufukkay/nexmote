@@ -75,8 +75,19 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("web", policy =>
     {
+        var configuredOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ??
+            ["http://localhost:5173", "http://127.0.0.1:5173", "https://nexmote.com", "https://www.nexmote.com", "http://192.168.0.219"];
+
         policy
-            .WithOrigins(builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? ["http://localhost:5173", "http://127.0.0.1:5173", "https://nexmote.com", "https://www.nexmote.com"])
+            .SetIsOriginAllowed(origin =>
+            {
+                if (configuredOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) return true;
+                if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+                {
+                    if (NexMote.Shared.Network.NexMoteHttp.IsPrivateOrLocalHost(uri.Host)) return true;
+                }
+                return false;
+            })
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -162,6 +173,14 @@ using (var scope = app.Services.CreateScope())
 
     // Idempotent şema başlatıcı ve kolon migration yöneticisi (Madde 5)
     DatabaseInitializer.Initialize(db, app.Logger);
+
+    // Ajan Ana Yasası Madde 9 (Self-Healing Identity): Açılışta mükerrer cihazları otomatik tekilleştir
+    var deviceRegistry = scope.ServiceProvider.GetRequiredService<DeviceRegistry>();
+    var dedupCount = deviceRegistry.DeduplicateDevices();
+    if (dedupCount > 0)
+    {
+        app.Logger.LogInformation("Mükerrer cihazlar otomatik tekilleştirildi. Temizlenen kayıt sayısı: {Count}", dedupCount);
+    }
 
     if (!db.ServerSettings.Any())
     {

@@ -141,9 +141,37 @@ internal static class Program
         var serverUrl = AgentSettings.LoadServerUrl();
         var streamer = new RemoteScreenStreamer(serverUrl, _ => { });
 
+        var stopEventName = $@"Global\NexMote_System_Session_Stop_{sessionId}";
+        EventWaitHandle? stopEvent = null;
+        try
+        {
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var eventSecurity = new EventWaitHandleSecurity();
+            eventSecurity.AddAccessRule(new EventWaitHandleAccessRule(worldSid, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+            stopEvent = EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, stopEventName, out _, eventSecurity);
+        }
+        catch
+        {
+            stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, stopEventName);
+        }
+
+        ThreadPool.RegisterWaitForSingleObject(stopEvent, (_, _) =>
+        {
+            try { Application.Exit(); } catch { }
+        }, null, -1, true);
+
         var timer = new System.Windows.Forms.Timer { Interval = 1000 };
         timer.Tick += async (_, _) =>
         {
+            // Kullanıcı oturum açtıysa ve Tray uygulaması devreye girdiyse, system-session görevini tamamlamıştır
+            var trayMutexName = $@"Global\NexMote_Agent_Tray_Session_{sessionId}";
+            if (Mutex.TryOpenExisting(trayMutexName, out var trayMutex))
+            {
+                trayMutex.Dispose();
+                Application.Exit();
+                return;
+            }
+
             DesktopHelper.AttachToActiveDesktop();
             await streamer.EnsureStartedAsync();
         };
@@ -173,8 +201,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private string _screenStatus = "hazirlaniyor";
     private readonly System.Windows.Forms.Timer _timer;
     private readonly System.Windows.Forms.Timer _signalingTimer;
-    private readonly System.Windows.Forms.Timer _heartbeatTimer;
-    private readonly CpuUsageSampler _cpuSampler = new();
     private readonly SynchronizationContext? _uiContext;
     private readonly RemoteScreenStreamer _streamer;
     private readonly EventWaitHandle? _showDashboardEvent;
@@ -193,8 +219,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _serverUrl = AgentSettings.LoadServerUrl();
         _statusItem = new ToolStripMenuItem("Servis durumu: kontrol ediliyor") { Enabled = false };
         _serverItem = new ToolStripMenuItem($"Sunucu: {_serverUrl}") { Enabled = false };
-
         var menu = BuildContextMenu();
+
+        // Giriş ekranında çalışan eski system-session yayıncısı varsa devralmak için durdurma sinyali gönder
+        try
+        {
+            var currentSessionId = Process.GetCurrentProcess().SessionId;
+            var stopEventName = $@"Global\NexMote_System_Session_Stop_{currentSessionId}";
+            if (EventWaitHandle.TryOpenExisting(stopEventName, out var stopEvt))
+            {
+                stopEvt.Set();
+                stopEvt.Dispose();
+            }
+        }
+        catch { }
 
         try
         {
@@ -269,18 +307,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _signalingTimer.Start();
 
-        // 15 saniyelik periyodik canlılık (heartbeat) ve telemetri zamanlayıcısı
-        _heartbeatTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 500 // Açılışta derhal ilk heartbeat'i ilet
-        };
-        _heartbeatTimer.Tick += async (_, _) =>
-        {
-            await SendHeartbeatAsync();
-            _heartbeatTimer.Interval = 15000;
-        };
-        _heartbeatTimer.Start();
-
         // 60 saniyelik periyodik güvenlik profili (branding + şifre koruması bayrakları) kontrolü
         _securityProfileTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         _securityProfileTimer.Tick += async (_, _) =>
@@ -292,7 +318,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         RefreshStatus(showBalloon: false);
         _ = _streamer.EnsureStartedAsync();
-        _ = SendHeartbeatAsync();
 
         if (openDashboardOnStart)
         {
@@ -504,49 +529,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         form.CancelButton = cancelButton;
 
         return form.ShowDialog() == DialogResult.OK ? textBox.Text : null;
-    }
-
-    private async Task SendHeartbeatAsync()
-    {
-        var identity = DeviceIdentityFile.Load();
-        if (identity is null)
-        {
-            var enrollKey = AgentSettings.LoadEnrollmentKey();
-            identity = await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
-            if (identity is null) return;
-        }
-
-        try
-        {
-            using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(6));
-            var heartbeatUrl = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/heartbeat";
-            var mem = SystemTelemetry.GetMemoryMetrics();
-            var diskFree = SystemTelemetry.GetDiskFreeMb();
-            var ip = SystemTelemetry.GetPrimaryIPv4Address();
-            var cpu = _cpuSampler.GetAveragePercent();
-            var uptime = (long)TimeSpan.FromMilliseconds(Environment.TickCount64).TotalSeconds;
-            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.7.0";
-
-            var req = new DeviceHeartbeatRequest(
-                identity.AgentToken,
-                ActiveUser: SessionUserResolver.GetActiveSessionUserName(),
-                IpAddress: ip,
-                CpuUsagePercent: cpu,
-                MemoryTotalMb: mem.TotalMb,
-                MemoryUsedMb: mem.UsedMb,
-                DiskFreeMb: diskFree,
-                UptimeSeconds: uptime,
-                AgentVersion: version);
-
-            var res = await http.PostAsJsonAsync(heartbeatUrl, req);
-            if (res.StatusCode == System.Net.HttpStatusCode.Unauthorized || res.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                DeviceIdentityFile.Delete();
-                var enrollKey = AgentSettings.LoadEnrollmentKey();
-                await DeviceIdentityFile.EnsureEnrolledAsync(_serverUrl, enrollKey);
-            }
-        }
-        catch { }
     }
 
     private async Task CheckForAgentUpdatesAsync(bool isManual)
