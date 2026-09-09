@@ -294,6 +294,17 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 {
                     SasHelper.SendSas();
                 }
+
+                // Kilit açma sonrası ekran görüntüsünü anında tazeleyip teknisyene zorunlu olarak gönder
+                for (var i = 1; i <= ScreenCapture.GetDisplayCount(); i++)
+                {
+                    ScreenCapture.ResetHash(i);
+                }
+                DxgiScreenCapture.Instance.Reset();
+                if (_activeSessionId.HasValue)
+                {
+                    _ = SendScreenInfoAsync(_activeSessionId.Value);
+                }
             }
             else if (string.Equals(type, "power-action", StringComparison.OrdinalIgnoreCase))
             {

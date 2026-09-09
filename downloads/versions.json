@@ -2,19 +2,19 @@
     "agent":  {
                   "version":  "0.8.0",
                   "releaseNotes":  "NexMote Agent v0.8.0: DirectX 11 DXGI GPU ekran yakalama, WebRTC P2P yuksek hizli iletim ve kesintisiz masaustu gecisleri.",
-                  "sha256":  "4A9550C0601CE60FAEB3F459DC4D6354BD2B48B2AA27EFF6E36179DD7728F1DF",
-                  "sizeBytes":  161247232
+                  "sha256":  "298E00FEE21E311F75D8FCDBC5200593A7E9263D5FC0661BDBE6D4986C998A70",
+                  "sizeBytes":  161251328
               },
     "technician":  {
                        "version":  "0.8.0",
                        "releaseNotes":  "NexMote Teknisyen Konsolu v0.8.0: DirectX 11 GPU yakalama destegi, WebRTC P2P sinirsiz akis ve 60 FPS masaustu.",
-                       "sha256":  "C6FED4A6944F307642CFE46811C4AA72530D57DC0B69140861D30FBBA3BAB794",
+                       "sha256":  "9FEEE17EC69872712E1A524B3812E8FB2A83390C2118F9FBF7774BCDE8C575F3",
                        "sizeBytes":  63832064
                    },
     "deployer":  {
                      "version":  "0.8.0",
                      "releaseNotes":  "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
-                     "sha256":  "E7426721C039E06862DD284EC8C68AE509BF1FF087679E12BA23119A91383815",
-                     "sizeBytes":  63692800
+                     "sha256":  "F4E1BD51C41B89C962B7145F3A24698B843773BB504B8788D57B82EF35D8BEFF",
+                     "sizeBytes":  63676416
                  }
 }

@@ -267,7 +267,11 @@ internal sealed class DxgiScreenCapture : IDisposable
                     capturedWithDxgi = true;
                     return null;
                 }
-                capturedWithDxgi = true;
+
+                // forceSend=true (ilk bağlantı anı veya periyodik anahtar kare):
+                // Ekranda hareket henüz yoksa DXGI timeout döner. Teknisyenin 'Görüntü akışı bekleniyor'
+                // ekranında takılı kalmaması için GDI+ fallback'e devret ki hemen tam bir kare yakalanıp gönderilsin:
+                capturedWithDxgi = false;
                 return null;
             }
 
@@ -276,6 +280,7 @@ internal sealed class DxgiScreenCapture : IDisposable
                 // AccessLost, SessionDisconnected vb. Masaüstü değişti (UAC, Kilit, Çözünürlük)
                 DesktopHelper.AttachToActiveDesktop(force: true);
                 ResetDisplay(displayIndex);
+                capturedWithDxgi = false;
                 return null;
             }
 

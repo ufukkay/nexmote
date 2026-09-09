@@ -291,7 +291,10 @@ internal static class ScreenCapture
             var dxgiFrame = DxgiScreenCapture.Instance.CaptureJpegBase64(displayIndex, quality, forceSend, out var capturedWithDxgi);
             if (capturedWithDxgi)
             {
-                return dxgiFrame;
+                if (dxgiFrame is not null || !forceSend)
+                {
+                    return dxgiFrame;
+                }
             }
         }
         catch

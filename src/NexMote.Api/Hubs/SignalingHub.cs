@@ -294,6 +294,13 @@ public sealed class SignalingHub : Hub
 
         // Mesajı oturumdaki diğer istemcilere yayınla
         await Clients.OthersInGroup($"session:{sessionId}").SendAsync("SignalReceived", type, payload);
+
+        // Kilit açma (send-sas / Ctrl+Alt+Del) sinyali geldiğinde en üst düzey SYSTEM yetkili Windows Servisine de doğrudan ilet
+        if (string.Equals(type, "send-sas", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("[Signaling] SAS (Ctrl+Alt+Del / Kilit Aç) sinyali SYSTEM servisine yönlendiriliyor: DeviceId={DeviceId}", session.DeviceId);
+            await Clients.Group($"device:{session.DeviceId}:service").SendAsync("ExecuteSystemSas");
+        }
     }
 
     /// <summary>

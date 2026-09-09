@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using NexMote.Agent.Windows.Platform;
 using NexMote.Shared.Commands;
 using NexMote.Shared.Contracts;
 using NexMote.Shared.Identity;
@@ -264,6 +265,12 @@ public sealed class Worker : BackgroundService
                 _logger.LogInformation("Sunucudan canlı oturum isteği alındı: {SessionId}. Aktif oturum denetleniyor...", sessionId);
                 EnsureTrayRunning();
                 TryWakeupTraySession(sessionId);
+            });
+
+            _hubConnection.On("ExecuteSystemSas", () =>
+            {
+                _logger.LogInformation("SYSTEM yetkili SAS (Ctrl+Alt+Del / Kilit Aç) sinyali alındı. Session 0 çekirdeğinde yürütülüyor...");
+                SasServiceHelper.SendSas();
             });
 
             _hubConnection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
