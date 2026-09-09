@@ -22,6 +22,8 @@
 param (
     [string]$ServerIp = "192.168.0.219",
     [string]$RemoteShare = "\\192.168.0.219\nexmote",
+    [string]$Username = "",
+    [string]$Password = "",
     [switch]$LocalOnly,
     [switch]$SkipWebBuild
 )
@@ -84,6 +86,16 @@ foreach ($dir in $ensureDirs) {
     }
 }
 
+# İndirme kataloğu ve versiyon manifest senkronizasyonu
+$downloadsSrc = Join-Path $rootDir "downloads"
+$downloadsDst = Join-Path $stagingDir "downloads"
+if (Test-Path $downloadsSrc) {
+    Write-Host "İndirme paketleri senkronize ediliyor: $downloadsSrc -> $downloadsDst" -ForegroundColor Cyan
+    Get-ChildItem -Path $downloadsSrc | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination $downloadsDst -Force
+    }
+}
+
 # web.config kontrolü
 $webConfigSrc = Join-Path $rootDir "src\NexMote.Api\web.config"
 $webConfigDst = Join-Path $stagingDir "web.config"
@@ -105,6 +117,12 @@ if ($LocalOnly) {
 # 4. Sunucuya Aktarım ve IIS Yenileme
 Write-Host "`n[3/4] IIS Sunucusuna ($RemoteShare) aktarılıyor..." -ForegroundColor Yellow
 
+# Eğer kullanıcı adı/şifre belirtildiyse SMB bağlantısını kur
+if (-not [string]::IsNullOrWhiteSpace($Username) -and -not [string]::IsNullOrWhiteSpace($Password)) {
+    Write-Host "Ağ paylaşımı kimlik doğrulanıyor ($Username)..." -ForegroundColor Cyan
+    & net use $RemoteShare /user:$Username $Password | Out-Null
+}
+
 $canReachShare = $false
 try {
     if (Test-Path $RemoteShare) {
@@ -117,10 +135,11 @@ try {
 if (-not $canReachShare) {
     Write-Warning "Ağ paylaşımına ulaşılamadı: $RemoteShare"
     Write-Host "`n------------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host "İPUCU: Sunucuda paylaşımı otomatik açmak için:" -ForegroundColor White
-    Write-Host "1. RDP ile 192.168.0.219 sunucusuna bağlanın." -ForegroundColor White
-    Write-Host "2. Yönetici PowerShell'de 'scripts/setup-iis-server.ps1' çalıştırın." -ForegroundColor White
-    Write-Host "3. Ya da '$stagingDir' içeriğini RDP ile kopyalayın." -ForegroundColor White
+    Write-Host "İPUCU: Sunucuda paylaşımı otomatik açmak veya bağlanmak için:" -ForegroundColor White
+    Write-Host "1. Parametre olarak -Username ve -Password verebilirsiniz:" -ForegroundColor White
+    Write-Host "   .\scripts\deploy-iis.ps1 -Username 'DESKTOP-SIH3FAC\administrator' -Password '***'" -ForegroundColor Cyan
+    Write-Host "2. RDP ile 192.168.0.219 sunucusuna bağlanıp 'scripts/setup-iis-server.ps1' çalıştırabilirsiniz." -ForegroundColor White
+    Write-Host "3. Ya da '$stagingDir' içeriğini RDP ile kopyalayabilirsiniz." -ForegroundColor White
     Write-Host "------------------------------------------------------------" -ForegroundColor Yellow
     $sw.Stop()
     return
