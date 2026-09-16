@@ -29,7 +29,12 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
   - `DesktopHelper.AttachToActiveDesktop` üzerinde `Winlogon` ACL kurallarıyla uyumsuz olan `DESKTOP_ALL (0x020001FF)` maskesi yerine `MAXIMUM_ALLOWED (0x02000000)` kullanıldı; `Winlogon` masaüstü erişiminde `ERROR_ACCESS_DENIED (5)` hatası ve `Default` masaüstüne hatalı geri düşme önlendi.
   - Masaüstü denetim aralığı 1 saniyeden 100ms seviyesine çekildi; fare tıklaması ve tuş basımlarında `force: true` ile aktif masaüstüne anında bağlanma garantilendi.
   - `InputInjector.MoveMouse` içinde salt `SetCursorPos` koordinat taşımasının Windows 10/11 kilit perdesini uyandırmaması problemi, `SendInput` ve `mouse_event` ile sentetik `MouseMove` donanım olayları enjekte edilerek çözüldü.
-  - `InputHelperServer` üzerinde istemci bağlantıları arka planda asenkron işlenerek boru kilitlenmeleri önlendi; Windows Servisinin (Session 0) SAS ve kilit açma sinyalleri güvenlik doğrulamasından geçecek şekilde güncellendi.
+- **Teknisyen Giriş Kalıcılığı ve Web'den Masaüstüne Otomatik SSO (`MainWindow.xaml.cs`, `DeepLinkValidator.cs`, `RemoteSessionRegistry.cs`, `DeviceEndpoints.cs`):**
+  - Web konsolunda oturum açmış bir teknisyen "Canlı Bağlan" dediğinde, her bağlantıda masaüstü uygulamasının tekrar e-posta, şifre ve MFA sorması problemi tamamen çözüldü.
+  - `MainWindow.xaml.cs` içindeki `EnsureSessionAsync` metodunda `forcePrompt` parametresine bakılmaksızın öncelikle diskteki kayıtlı ve DPAPI ile şifreli oturum token'ı (`storedToken`) doğrulandı; geçerliyse kullanıcıya hiçbir giriş penceresi gösterilmeden anında oturum açıldı.
+  - `ConnectSignalingAsync` içinde doğrudan zorunlu login penceresi açılması engellendi; önce sessizce kayıtlı token doğrulandı, sadece oturum yoksa veya süresi dolmuşsa login penceresi gösterildi.
+  - Web konsolundan gelen `POST /api/remote-sessions` isteklerinde teknisyenin Bearer oturum token'ı `nexmote://connect?...&userToken=...` parametresiyle deep-link'e eklendi.
+  - Teknisyen masaüstü uygulaması deep-link ile açıldığında gelen `userToken`'ı anında yetkilendirme başlığına (`Authorization`) bağlar ve DPAPI ile güvenle saklar; böylece web konsoluna sabah bir kez giriş yapan teknisyen, bilgisayarı kapanana kadar veya oturumu bitene kadar hiçbir ek şifre/MFA girmeden tek tıkla canlı bağlantı kurabilir.
 
 ---
 

@@ -8,7 +8,8 @@ public sealed record ValidatedDeepLink(
     string Token,
     string ServerUrl,
     string? DeviceName,
-    Guid? DeviceId);
+    Guid? DeviceId,
+    string? UserToken = null);
 
 /// <summary>
 /// nexmote:// deep-link bağlantı parametrelerini doğrulayan, kötü amaçlı sunucu yönlendirmelerini (serverUrl spoofing)
@@ -113,7 +114,14 @@ public static class DeepLinkValidator
             deviceId = parsedDevId;
         }
 
-        validated = new ValidatedDeepLink(sessionId, token, finalServerUrl, deviceName, deviceId);
+        // 5. İsteğe bağlı kullanıcı oturum token'ı (Web SSO köprüsü - teknisyen girişini otomatik aktarır)
+        string? userToken = null;
+        if (query.TryGetValue("userToken", out var rawUserToken) && !string.IsNullOrWhiteSpace(rawUserToken) && rawUserToken.Length <= 512)
+        {
+            userToken = rawUserToken.Trim();
+        }
+
+        validated = new ValidatedDeepLink(sessionId, token, finalServerUrl, deviceName, deviceId, userToken);
         return true;
     }
 

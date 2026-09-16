@@ -215,7 +215,14 @@ public static class DeviceEndpoints
                 return Results.Unauthorized();
             }
 
-            var session = sessions.Create(request.DeviceId, serverUrl, ownerUserId);
+            string? userToken = null;
+            var authHeader = http.Request.Headers.Authorization.ToString();
+            if (authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                userToken = authHeader["Bearer ".Length..].Trim();
+            }
+
+            var session = sessions.Create(request.DeviceId, serverUrl, ownerUserId, userToken);
             auditLog.Log(http, "session.start", "Device", device.Id.ToString(), new { device.DeviceName, device.LocationCode, serverUrl, sessionId = session.SessionId });
             return Results.Ok(session);
         });

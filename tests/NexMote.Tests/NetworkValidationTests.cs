@@ -60,4 +60,20 @@ public sealed class NetworkValidationTests
         Assert.Equal("http://192.168.0.219", validated.ServerUrl);
         Assert.False(requiresConfirmation);
     }
+
+    [Fact]
+    public void DeepLinkValidator_ParsesUserTokenForWebSSO()
+    {
+        var sessionId = Guid.NewGuid();
+        var token = "12345678901234567890";
+        var userToken = "my-secret-session-bearer-token-12345";
+        var uri = $"nexmote://session/?sessionId={sessionId}&token={token}&serverUrl={Uri.EscapeDataString("https://nexmote.com")}&userToken={userToken}";
+
+        var valid = DeepLinkValidator.TryValidate(uri, "https://nexmote.com", out var validated, out var errorMessage, out var requiresConfirmation);
+
+        Assert.True(valid, errorMessage);
+        Assert.NotNull(validated);
+        Assert.Equal(userToken, validated.UserToken);
+        Assert.False(requiresConfirmation);
+    }
 }

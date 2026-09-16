@@ -41,6 +41,16 @@ public sealed class RemoteSessionRegistryTests : IDisposable
         Assert.NotNull(_registry.Activate(response.SessionId, activated.Token, ownerId));
     }
 
+    [Fact]
+    public void Create_with_userToken_includes_it_in_launch_uri()
+    {
+        var ownerId = Guid.NewGuid();
+        var userToken = "test-user-sso-token-abcdef123456";
+        var response = _registry.Create(Guid.NewGuid(), "https://nexmote.com", ownerId, userToken);
+
+        Assert.Contains($"userToken={userToken}", response.LaunchUri);
+    }
+
     public void Dispose() => _connection.Dispose();
 
     private static string ExtractToken(string launchUri)

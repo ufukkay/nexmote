@@ -2,19 +2,19 @@
     "agent":  {
                   "version":  "0.8.3",
                   "releaseNotes":  "NexMote Agent v0.8.3: Kilit ekrani (Winlogon) fare ve klavye etkilesimi, UAC ve oturum girdi restorasyonu.",
-                  "sha256":  "2ECE0C00336240D9B522852C0DC512DA5EBED834590814B6401FF530B376F7FB",
-                  "sizeBytes":  161271808
+                  "sha256":  "3254C55637C19431D4911760D15095F6F40975ABED6CD6FE55DF60B98DAA73E2",
+                  "sizeBytes":  161255424
               },
     "technician":  {
                        "version":  "0.8.3",
                        "releaseNotes":  "NexMote Teknisyen Konsolu v0.8.3: Kilit ekrani ve UAC girdi iletim optimizasyonu.",
-                       "sha256":  "1DB27282EAD2E855FDA2C83F9B6D5C21CE983A36273AE82600D6760355718571",
-                       "sizeBytes":  63827968
+                       "sha256":  "ECF4B2F718902D9A0F9B2C63AFF52F401FCB48F5186A118121368660E28A9953",
+                       "sizeBytes":  63868928
                    },
     "deployer":  {
                      "version":  "0.8.3",
                      "releaseNotes":  "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
-                     "sha256":  "FD9BBBEDE52CCB2AD81BD7E1AA49299473B38D3EEEF0D76D8FCD91DF955F2193",
-                     "sizeBytes":  63692800
+                     "sha256":  "E46DE1C5432F86F574BC63210B2FD317EC6D2E7FF43A493E40A8E7B4E18CC47F",
+                     "sizeBytes":  63696896
                  }
 }

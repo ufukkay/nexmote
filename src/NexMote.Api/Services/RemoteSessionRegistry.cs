@@ -26,7 +26,7 @@ public sealed class RemoteSessionRegistry
     /// <param name="deviceId">Hedef cihaz kimliği.</param>
     /// <param name="serverUrl">Sunucu genel URL'i.</param>
     /// <returns>Oturum ID, token ve LaunchUri içeren yanıt.</returns>
-    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl, Guid ownerUserId)
+    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl, Guid ownerUserId, string? userToken = null)
     {
         using var db = _dbFactory.CreateDbContext();
 
@@ -59,6 +59,10 @@ public sealed class RemoteSessionRegistry
 
         // Teknisyen masaüstü uygulamasını tetikleyen custom URI protokol formatı
         var launchUri = $"nexmote://connect?sessionId={id}&token={Uri.EscapeDataString(token)}&serverUrl={Uri.EscapeDataString(normalizedServerUrl)}&deviceId={deviceId}";
+        if (!string.IsNullOrWhiteSpace(userToken))
+        {
+            launchUri += $"&userToken={Uri.EscapeDataString(userToken)}";
+        }
         return new CreateRemoteSessionResponse(id, deviceId, launchUri, expiresAt);
     }
 

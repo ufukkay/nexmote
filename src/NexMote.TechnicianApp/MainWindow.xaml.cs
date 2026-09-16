@@ -92,12 +92,16 @@ public partial class MainWindow : Window
 
         this.Deactivated += Window_Deactivated;
 
-        var (storedUrl, storedEmail, _) = TechnicianAppSettings.Load();
+        var (storedUrl, storedEmail, storedToken) = TechnicianAppSettings.Load();
         if (!string.IsNullOrWhiteSpace(storedUrl))
         {
             _serverUrl = NexMoteHttp.NormalizeUrl(storedUrl);
         }
         _loginEmail = storedEmail ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(storedToken))
+        {
+            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", storedToken);
+        }
 
         Title = $"{Title} (v{RunningVersion})";
         UpdateHeaderIdentity();
@@ -164,7 +168,8 @@ public partial class MainWindow : Window
         _loginEmail = storedEmail ?? string.Empty;
         UpdateHeaderIdentity();
 
-        if (!forcePrompt && !string.IsNullOrWhiteSpace(storedToken))
+        // 1. Önce her zaman diskteki kayıtlı oturum token'ını dene (sabah giriş yapıldıysa veya web'den aktarıldıysa tekrar sorma)
+        if (!string.IsNullOrWhiteSpace(storedToken))
         {
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", storedToken);
             if (await TryLoadCurrentUserAsync())
@@ -172,11 +177,12 @@ public partial class MainWindow : Window
                 return true;
             }
 
-            // Token geçersiz/süresi dolmuş — temizle, aşağıda forcePrompt=false ise sessizce başarısız dön.
+            // Token geçersiz veya süresi dolmuş — temizle
             _http.DefaultRequestHeaders.Authorization = null;
             TechnicianAppSettings.Save(_serverUrl, storedEmail, null);
         }
 
+        // 2. Eğer kayıtlı geçerli bir token yoksa ve prompt istenmiyorsa (arka plan doğrulaması) sessizce başarısız dön
         if (!forcePrompt)
         {
             return false;
@@ -347,6 +353,25 @@ public partial class MainWindow : Window
                 var (_, storedEmail, storedToken) = TechnicianAppSettings.Load();
                 TechnicianAppSettings.Save(_serverUrl, storedEmail, storedToken);
                 UpdateHeaderIdentity();
+            }
+
+            // Web SSO: Eğer deep-link içinde web konsolundan gelen kullanıcı token'ı varsa hemen yetkilendir ve DPAPI ile kaydet
+            if (!string.IsNullOrWhiteSpace(link.UserToken))
+            {
+                _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", link.UserToken);
+                var (_, storedEmail, _) = TechnicianAppSettings.Load();
+                TechnicianAppSettings.Save(_serverUrl, storedEmail ?? _loginEmail, link.UserToken);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Dispatcher.InvokeAsync(async () =>
+                        {
+                            await TryLoadCurrentUserAsync();
+                        });
+                    }
+                    catch { }
+                });
             }
 
             _sessionId = link.SessionId;
@@ -527,10 +552,18 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (_http.DefaultRequestHeaders.Authorization is null && !await EnsureSessionAsync(forcePrompt: true))
+            if (_http.DefaultRequestHeaders.Authorization is null)
             {
-                StatusText.Text = "Canlı oturum için teknisyen girişi gerekli.";
-                return;
+                // Önce saklı oturumu sessizce dene (sabah giriş yapıldıysa veya SSO token'ı varsa sorma)
+                if (!await EnsureSessionAsync(forcePrompt: false))
+                {
+                    // Yalnızca kayıtlı geçerli oturum yoksa kullanıcıya login ekranı göster
+                    if (!await EnsureSessionAsync(forcePrompt: true))
+                    {
+                        StatusText.Text = "Canlı oturum için teknisyen girişi gerekli.";
+                        return;
+                    }
+                }
             }
 
             StatusText.Text = "Sinyalleşme sunucusuna bağlanılıyor...";
