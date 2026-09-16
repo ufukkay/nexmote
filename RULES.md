@@ -85,9 +85,8 @@ NexMote projesinde derleme, paketleme ve dağıtım işlemleri için aşağıdak
 | :--- | :--- | :--- |
 | **`scripts/deploy-iis.ps1`** | Web ön yüzünü Vite ile derler, API'yi publish eder, `nexmote.db`'yi ezmeden IIS sunucusuna aktarır ve `/health` kontrolü yapar. | `.\scripts\deploy-iis.ps1`<br>`.\scripts\deploy-iis.ps1 -SkipWebBuild` |
 | **`scripts/package-windows.ps1`** | WiX v5 ile kurumsal per-machine MSI paketlerini (`Agent`, `Technician`, `Cleaner`, `Deployer`) derler, SHA-256 hesaplar ve `versions.json` üretir. | `.\scripts\package-windows.ps1 -Version "0.7.4" -SkipCodeSigning` |
-| **`scripts/deploy-server.ps1`** | Linux (Ubuntu VPS) sunuculara rsync/ssh ile dağıtım yapar. | `.\scripts\deploy-server.ps1 -TargetHost "186.241.21.133"` |
 | **Birim Testleri (`dotnet test`)** | Proje içi .NET 8 SDK ile ağ, deep-link ve kontrat testlerini çalıştırır. | `& ".\.dotnet\dotnet.exe" test -c Release` |
-| **Web Frontend Build** | React 18 + TypeScript + Vite konsolunu derler. | `cd web; npm run build` |
+| **Web Frontend Build** | React 19 + TypeScript + Vite konsolunu derler. | `cd web; npm run build` |
 
 ---
 
@@ -96,7 +95,7 @@ NexMote projesinde derleme, paketleme ve dağıtım işlemleri için aşağıdak
 Herhangi bir kod değişikliği, hata düzeltmesi veya yeni özellik eklendiğinde sırasıyla şu adımlar tamamlanmalıdır:
 
 1. [ ] **Derleme Kontrolü:** `dotnet build NexMote.sln -c Release` hatasız ve uyarısız tamamlanmalıdır.
-2. [ ] **Birim Testleri:** `& ".\.dotnet\dotnet.exe" test -c Release` ile tüm testlerin (26/26) yeşil olduğu doğrulanmalıdır.
+2. [ ] **Birim Testleri:** `& ".\.dotnet\dotnet.exe" test -c Release` ile tüm testlerin yeşil olduğu doğrulanmalıdır.
 3. [ ] **Versiyon Tutarlılığı:** Yeni sürüm numarası tüm `.csproj` dosyalarında, `web/package.json`, `package-windows.ps1`, `CHANGELOG.md` ve `AGENTS.md` içinde eşitlenmelidir.
 4. [ ] **MSI Paketleme:** `scripts/package-windows.ps1` çalıştırılarak yeni `.msi` dosyaları ve `downloads/versions.json` üretilmelidir.
 5. [ ] **Veritabanı Güvenliği:** Dağıtım sırasında canlı `nexmote.db`, `nexmote.db-wal` ve `dpkeys/` dosyalarının kesinlikle ezilmediği teyit edilmelidir.

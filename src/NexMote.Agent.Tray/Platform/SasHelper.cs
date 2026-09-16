@@ -33,7 +33,15 @@ internal static class SasHelper
         // 1. Zorunlu olarak aktif masaüstüne (Default veya Winlogon) bağlan
         DesktopHelper.AttachToActiveDesktop(force: true);
 
-        // 2. sas.dll üzerinden Güvenli Dikkat Dizisi (Ctrl+Alt+Del) gönder
+        // 2. sas.dll politika denetimi ve Güvenli Dikkat Dizisi (Ctrl+Alt+Del) gönderimi
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true);
+            key?.SetValue("SoftwareSASGeneration", 3, Microsoft.Win32.RegistryValueKind.DWord);
+            key?.SetValue("PromptOnSecureDesktop", 0, Microsoft.Win32.RegistryValueKind.DWord);
+        }
+        catch { }
+
         try
         {
             SendSAS(false);

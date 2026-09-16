@@ -150,6 +150,7 @@ export type ServerSettings = {
   smtpPassword?: string | null;
   smtpFromAddress?: string | null;
   smtpFromName?: string | null;
+  smtpSslMode?: string | null;
   alertsEnabled: boolean;
   alertRecipientEmails?: string | null;
   alertOfflineEnabled: boolean;
@@ -376,12 +377,24 @@ export async function inviteUser(email: string, displayName: string, role: "Admi
   return response.json();
 }
 
-/** Kayıtlı SMTP ayarlarıyla verilen adrese test e-postası gönderir (Admin). */
-export async function testSmtp(toEmail: string): Promise<{ message: string }> {
+export type SmtpTestOptions = {
+  toEmail: string;
+  host?: string | null;
+  port?: number;
+  username?: string | null;
+  password?: string | null;
+  fromAddress?: string | null;
+  fromName?: string | null;
+  sslMode?: string | null;
+};
+
+/** Kayıtlı veya formdaki SMTP ayarlarıyla verilen adrese test e-postası gönderir (Admin). */
+export async function testSmtp(options: string | SmtpTestOptions): Promise<{ message: string }> {
+  const payload = typeof options === "string" ? { toEmail: options } : options;
   const response = await fetch("/api/admin/settings/smtp/test", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ toEmail })
+    body: JSON.stringify(payload)
   });
   const detail = await response.json().catch(() => null);
   if (!response.ok) {
@@ -443,12 +456,41 @@ export async function enableUser(userId: string): Promise<void> {
   }
 }
 
-/** Kilitlenmiş bir kullanıcının MFA'sını admin zorla kapatır. */
-export async function resetUserMfa(userId: string): Promise<void> {
-  const response = await fetch(`/api/admin/users/${userId}/mfa/reset`, { method: "POST", headers: authHeaders() });
+/** Bir kullanıcının şifresini yönetici olarak doğrudan değiştirir (Admin). */
+export async function adminChangeUserPassword(userId: string, newPassword: string): Promise<{ message: string }> {
+  const response = await fetch(`/api/admin/users/${userId}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ newPassword })
+  });
+  const detail = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error("MFA sıfırlanamadı.");
+    throw new Error(detail?.message ?? "Şifre değiştirilemedi.");
   }
+  return detail;
+}
+
+/** Kullanıcı hesabını sistemden tamamen siler (Admin). */
+export async function deleteUser(userId: string): Promise<{ message: string }> {
+  const response = await fetch(`/api/admin/users/${userId}`, {
+    method: "DELETE",
+    headers: authHeaders()
+  });
+  const detail = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(detail?.message ?? "Kullanıcı silinemedi.");
+  }
+  return detail;
+}
+
+/** Kilitlenmiş veya MFA açık bir kullanıcının MFA'sını admin sıfırlar/kaldırır. */
+export async function resetUserMfa(userId: string): Promise<{ message: string }> {
+  const response = await fetch(`/api/admin/users/${userId}/mfa/reset`, { method: "POST", headers: authHeaders() });
+  const detail = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(detail?.message ?? "MFA sıfırlanamadı.");
+  }
+  return detail;
 }
 
 /** Sayfalanmış, filtrelenebilir denetim (activity) logu (Admin). */

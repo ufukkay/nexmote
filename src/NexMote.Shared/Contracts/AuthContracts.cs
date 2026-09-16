@@ -68,8 +68,19 @@ public sealed record InvitePreviewResponse(string Email, string DisplayName, str
 /// <summary>Davet edilen kişinin kendi şifresini belirleyip daveti kabul etme isteği.</summary>
 public sealed record AcceptInviteRequest(string Password);
 
-/// <summary>SMTP test e-postası gönderme isteği.</summary>
-public sealed record SmtpTestRequest(string ToEmail);
+/// <summary>Yöneticinin bir kullanıcının şifresini doğrudan sıfırlama isteği.</summary>
+public sealed record AdminResetPasswordRequest(string NewPassword);
+
+/// <summary>SMTP test e-postası gönderme isteği (isteğe bağlı olarak formdaki güncel ayarları test etmek için parametreleri barındırabilir).</summary>
+public sealed record SmtpTestRequest(
+    string ToEmail,
+    string? Host = null,
+    int? Port = null,
+    string? Username = null,
+    string? Password = null,
+    string? FromAddress = null,
+    string? FromName = null,
+    string? SslMode = null);
 
 /// <summary>Denetim logu (Audit Log) tekil kaydı.</summary>
 public sealed record ActivityLogEntry(
@@ -99,6 +110,7 @@ public sealed record ActivityLogEntry(
 /// <param name="SmtpPassword">SMTP şifresi — write-only: GET yanıtında her zaman boş döner, POST'ta boş bırakılırsa mevcut şifre korunur.</param>
 /// <param name="SmtpFromAddress">Giden e-postalarda "Kimden" adresi.</param>
 /// <param name="SmtpFromName">Giden e-postalarda görünen gönderen adı.</param>
+/// <param name="SmtpSslMode">SMTP SSL/TLS modu (Auto, Ssl, StartTls, None).</param>
 public sealed record ServerSettingsContract(
     string ServerUrl,
     string EnrollmentKey,
@@ -111,6 +123,7 @@ public sealed record ServerSettingsContract(
     string? SmtpPassword = null,
     string? SmtpFromAddress = null,
     string? SmtpFromName = null,
+    string SmtpSslMode = "Auto",
     bool AlertsEnabled = true,
     string? AlertRecipientEmails = null,
     bool AlertOfflineEnabled = true,

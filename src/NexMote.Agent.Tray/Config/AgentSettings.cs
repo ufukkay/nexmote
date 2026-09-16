@@ -11,7 +11,7 @@ internal static class AgentSettings
     public static string LoadServerUrl()
     {
         var raw = LoadSetting("ServerUrl", "https://nexmote.com");
-        return NexMoteHttp.EnforceProductionUrl(raw);
+        return NexMoteHttp.EnforceAgentServerUrl(raw);
     }
 
     public static string LoadEnrollmentKey()

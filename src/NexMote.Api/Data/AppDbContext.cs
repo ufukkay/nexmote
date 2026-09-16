@@ -102,6 +102,7 @@ public sealed class AppDbContext : DbContext
         {
             entity.HasKey(s => s.Id);
             entity.HasIndex(s => s.DeviceId);
+            entity.HasIndex(s => s.OwnerUserId);
         });
 
         // Sunucu ayarları birincil anahtar
@@ -283,6 +284,16 @@ public sealed class RemoteSessionEntity
     [MaxLength(128)]
     public string Token { get; set; } = string.Empty;
 
+    /// <summary>Oturumu oluşturan teknisyen kullanıcı kimliği.</summary>
+    public Guid? OwnerUserId { get; set; }
+
+    /// <summary>İlk aktivasyondan sonra reconnect için kullanılan token hash'i.</summary>
+    [MaxLength(128)]
+    public string? ActiveTokenHash { get; set; }
+
+    /// <summary>Launch token'ın başarıyla tüketildiği zaman.</summary>
+    public DateTimeOffset? ActivatedAt { get; set; }
+
     /// <summary>Oturum oluşturulma zamanı.</summary>
     public DateTimeOffset CreatedAt { get; set; }
 
@@ -340,6 +351,10 @@ public sealed class ServerSettingEntity
     /// <summary>Giden e-postalarda görünen gönderen adı.</summary>
     [MaxLength(128)]
     public string? SmtpFromName { get; set; }
+
+    /// <summary>SMTP SSL/TLS modu ("Auto", "Ssl", "StartTls", "None"). Varsayılan: "Auto".</summary>
+    [MaxLength(32)]
+    public string SmtpSslMode { get; set; } = "Auto";
 
     /// <summary>Uyarı/bildirim sisteminin genel açık/kapalı anahtarı.</summary>
     public bool AlertsEnabled { get; set; } = true;
@@ -593,6 +608,12 @@ public sealed class UserEntity
 
     /// <summary>Tek kullanımlık kurtarma kodlarının hash'lerini içeren JSON dizisi.</summary>
     public string? MfaRecoveryCodesHashJson { get; set; }
+
+    /// <summary>Başarısız MFA denemelerinin ardışık sayısı.</summary>
+    public int MfaFailedAttempts { get; set; }
+
+    /// <summary>Bu zamana kadar MFA doğrulaması geçici olarak kilitlidir.</summary>
+    public DateTimeOffset? MfaLockedUntil { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 

@@ -7,7 +7,7 @@
     1. IIS WebSocket Protocol özelliğini etkinleştirir.
     2. C:\inetpub\wwwroot\nexmote klasörünü oluşturur ve IIS izinlerini ayarlar.
     3. IIS Application Pool (No Managed Code) ve Web Sitesi oluşturur.
-    4. Klasörü ağ paylaşımına (\\192.168.0.219\nexmote) açar, böylece geliştirici bilgisayarından
+    4. Klasörü sınırlı izinli ağ paylaşımına (\\192.168.0.219\nexmote) açar, böylece geliştirici bilgisayarından
        tek tıkla "deploy-iis.ps1" ile otomatik güncelleme yapılabilir.
 #>
 
@@ -17,7 +17,10 @@ param (
     [string]$AppPoolName = "NexMote",
     [string]$SiteName = "NexMote",
     [int]$Port = 80,
-    [string]$ShareName = "nexmote"
+    [int]$HttpsPort = 443,
+    [string]$CertificateThumbprint = "",
+    [string]$ShareName = "nexmote",
+    [string]$DeploymentAccount = "Administrators"
 )
 
 Write-Host "====================================================" -ForegroundColor Cyan
@@ -98,6 +101,25 @@ if (Get-Module -Name WebAdministration) {
         Write-Host "Web Sitesi '$SiteName' güncellendi." -ForegroundColor Green
     }
 
+    $httpsBinding = Get-WebBinding -Name $SiteName -Protocol "https" -Port $HttpsPort -ErrorAction SilentlyContinue
+    if (-not $httpsBinding) {
+        if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
+            throw "HTTPS binding bulunamadı. Production kurulumu için -CertificateThumbprint verilmelidir."
+        }
+
+        $certificatePath = "Cert:\LocalMachine\My\$CertificateThumbprint"
+        if (-not (Test-Path $certificatePath)) {
+            throw "HTTPS sertifikası bulunamadı: $certificatePath"
+        }
+
+        New-WebBinding -Name $SiteName -Protocol https -Port $HttpsPort -IPAddress "*" -HostHeader "" | Out-Null
+        $httpsBinding = Get-WebBinding -Name $SiteName -Protocol "https" -Port $HttpsPort
+        $httpsBinding.AddSslCertificate($CertificateThumbprint, "My")
+        Write-Host "HTTPS binding (Port: $HttpsPort) sertifika ile oluşturuldu." -ForegroundColor Green
+    } else {
+        Write-Host "HTTPS binding (Port: $HttpsPort) zaten mevcut." -ForegroundColor Green
+    }
+
     Start-Website -Name $SiteName -ErrorAction SilentlyContinue
 } else {
     Write-Warning "WebAdministration modülü bulunamadı. IIS Yöneticisi arayüzünden Site ve AppPool'u kontrol edebilirsiniz."
@@ -108,24 +130,40 @@ Write-Host "`n[4/5] Otomatik Dağıtım için Ağ Paylaşımı oluşturuluyor: \
 try {
     $existingShare = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
     if (-not $existingShare) {
-        New-SmbShare -Name $ShareName -Path $SitePath -FullAccess "Everyone" -Description "NexMote Deployment Share" | Out-Null
-        Write-Host "Ağ paylaşımı '\\$env:COMPUTERNAME\$ShareName' oluşturuldu (FullAccess)." -ForegroundColor Green
+        New-SmbShare -Name $ShareName -Path $SitePath -ChangeAccess $DeploymentAccount -Description "NexMote Deployment Share" | Out-Null
+        Write-Host "Ağ paylaşımı '\\$env:COMPUTERNAME\$ShareName' oluşturuldu (${DeploymentAccount}: ChangeAccess)." -ForegroundColor Green
     } else {
-        Write-Host "Ağ paylaşımı '$ShareName' zaten mevcut." -ForegroundColor Green
+        $everyoneAccess = Get-SmbShareAccess -Name $ShareName -ErrorAction SilentlyContinue |
+            Where-Object { $_.AccountName -eq "Everyone" }
+        if ($everyoneAccess) {
+            Revoke-SmbShareAccess -Name $ShareName -AccountName "Everyone" -Force | Out-Null
+            Write-Host "Ağ paylaşımındaki Everyone erişimi kaldırıldı." -ForegroundColor Green
+        }
+
+        Grant-SmbShareAccess -Name $ShareName -AccountName $DeploymentAccount -AccessRight Change -Force | Out-Null
+        Write-Host "Ağ paylaşımı '$ShareName' için yalnızca '$DeploymentAccount' ChangeAccess yetkisi kullanılıyor." -ForegroundColor Green
     }
 } catch {
     Write-Warning "SMB Share oluşturulurken uyarı: $($_.Exception.Message)"
 }
 
-# 5. Güvenlik Duvarı (Windows Firewall) Port 80
-Write-Host "`n[5/5] Windows Firewall Port 80 kontrol ediliyor..." -ForegroundColor Yellow
+# 5. Güvenlik Duvarı (Windows Firewall) HTTP redirect ve HTTPS portları
+Write-Host "`n[5/5] Windows Firewall HTTP/HTTPS portları kontrol ediliyor..." -ForegroundColor Yellow
 try {
     $rule = Get-NetFirewallRule -DisplayName "NexMote-HTTP-In" -ErrorAction SilentlyContinue
     if (-not $rule) {
         New-NetFirewallRule -DisplayName "NexMote-HTTP-In" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow | Out-Null
-        Write-Host "Firewall kuralı (Port $Port TCP) eklendi." -ForegroundColor Green
+        Write-Host "Firewall HTTP redirect kuralı (Port $Port TCP) eklendi." -ForegroundColor Green
     } else {
-        Write-Host "Firewall kuralı zaten mevcut." -ForegroundColor Green
+        Write-Host "Firewall HTTP redirect kuralı zaten mevcut." -ForegroundColor Green
+    }
+
+    $httpsRule = Get-NetFirewallRule -DisplayName "NexMote-HTTPS-In" -ErrorAction SilentlyContinue
+    if (-not $httpsRule) {
+        New-NetFirewallRule -DisplayName "NexMote-HTTPS-In" -Direction Inbound -LocalPort $HttpsPort -Protocol TCP -Action Allow | Out-Null
+        Write-Host "Firewall HTTPS kuralı (Port $HttpsPort TCP) eklendi." -ForegroundColor Green
+    } else {
+        Write-Host "Firewall HTTPS kuralı zaten mevcut." -ForegroundColor Green
     }
 } catch {
     Write-Warning "Firewall kuralı eklenemedi: $($_.Exception.Message)"

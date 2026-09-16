@@ -22,9 +22,13 @@ public static class SettingsEndpoints
 
         app.MapGet("/api/downloads", (DownloadCatalog downloads) => Results.Ok(downloads.List()));
 
-        app.MapGet("/api/updates/check", (IConfiguration config, DownloadCatalog downloads) =>
+        app.MapGet("/api/updates/check", (IConfiguration config, DownloadCatalog downloads, HttpContext httpContext) =>
         {
-            var baseUrl = config["PublicUrl"] ?? "https://nexmote.com";
+            var configuredPublicUrl = config["PublicUrl"]?.TrimEnd('/');
+            var requestBaseUrl = $"{httpContext.Request.Scheme}://{httpContext.Request.Host}".TrimEnd('/');
+            var baseUrl = !string.IsNullOrWhiteSpace(configuredPublicUrl) && !configuredPublicUrl.Contains("nexmote.com", StringComparison.OrdinalIgnoreCase)
+                ? configuredPublicUrl
+                : requestBaseUrl;
             var versions = downloads.GetVersionInfo();
             var agentIntegrity = downloads.GetIntegrity("NexMote-Agent-Setup.msi");
             var technicianIntegrity = downloads.GetIntegrity("NexMote-Technician-Setup.msi");
@@ -62,6 +66,7 @@ public static class SettingsEndpoints
                 setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
                 SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
                 SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName,
+                SmtpSslMode: setting.SmtpSslMode ?? "Auto",
                 AlertsEnabled: setting.AlertsEnabled, AlertRecipientEmails: setting.AlertRecipientEmails,
                 AlertOfflineEnabled: setting.AlertOfflineEnabled, AlertOfflineMinutes: setting.AlertOfflineMinutes,
                 AlertDiskLowEnabled: setting.AlertDiskLowEnabled, AlertDiskLowMb: setting.AlertDiskLowMb,
@@ -90,6 +95,7 @@ public static class SettingsEndpoints
             setting.SmtpUsername = request.SmtpUsername;
             setting.SmtpFromAddress = request.SmtpFromAddress;
             setting.SmtpFromName = request.SmtpFromName;
+            setting.SmtpSslMode = string.IsNullOrWhiteSpace(request.SmtpSslMode) ? "Auto" : request.SmtpSslMode;
             if (!string.IsNullOrWhiteSpace(request.SmtpPassword))
             {
                 setting.SmtpPasswordEncrypted = email.EncryptPassword(request.SmtpPassword);
@@ -118,6 +124,7 @@ public static class SettingsEndpoints
                 request.AlertDiskLowEnabled,
                 request.AlertCpuHighEnabled,
                 request.AlertMemoryHighEnabled,
+                request.SmtpSslMode,
                 SmtpConfigured = !string.IsNullOrWhiteSpace(request.SmtpHost)
             });
 
@@ -125,6 +132,7 @@ public static class SettingsEndpoints
                 setting.ServerUrl, setting.EnrollmentKey, setting.HeartbeatSeconds, setting.DefaultLocationCode,
                 SmtpHost: setting.SmtpHost, SmtpPort: setting.SmtpPort, SmtpUsername: setting.SmtpUsername,
                 SmtpPassword: null, SmtpFromAddress: setting.SmtpFromAddress, SmtpFromName: setting.SmtpFromName,
+                SmtpSslMode: setting.SmtpSslMode ?? "Auto",
                 AlertsEnabled: setting.AlertsEnabled, AlertRecipientEmails: setting.AlertRecipientEmails,
                 AlertOfflineEnabled: setting.AlertOfflineEnabled, AlertOfflineMinutes: setting.AlertOfflineMinutes,
                 AlertDiskLowEnabled: setting.AlertDiskLowEnabled, AlertDiskLowMb: setting.AlertDiskLowMb,
@@ -138,14 +146,16 @@ public static class SettingsEndpoints
             EmailService email,
             AuditLogService auditLog) =>
         {
-            var (success, error) = await email.SendAsync(
-                request.ToEmail,
-                "NexMote - Test E-postası",
-                "<p>Bu, NexMote sunucunuzun SMTP yapılandırmasını doğrulamak için gönderilen bir test e-postasıdır.</p>");
+            if (string.IsNullOrWhiteSpace(request.ToEmail))
+            {
+                return Results.BadRequest(new { message = "Geçerli bir alıcı e-posta adresi belirtilmelidir." });
+            }
+
+            var (success, error) = await email.SendTestAsync(request);
 
             auditLog.Log(http, "settings.smtp_test", "ServerSetting", "1", new { toEmail = request.ToEmail, success, error }, success);
 
-            return success ? Results.Ok(new { message = "Test e-postası gönderildi." }) : Results.BadRequest(new { message = error });
+            return success ? Results.Ok(new { message = "Test e-postası başarıyla gönderildi." }) : Results.BadRequest(new { message = error });
         });
 
         // Veritabanı Yedekleme ve Bakım Endpoint'leri (Madde 6)

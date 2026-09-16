@@ -30,6 +30,11 @@ public static class SessionCookie
             return (cookieToken, true);
         }
 
+        if (http.Request.Query.TryGetValue("access_token", out var queryToken) && !string.IsNullOrWhiteSpace(queryToken))
+        {
+            return (queryToken.ToString(), false);
+        }
+
         return (null, false);
     }
 

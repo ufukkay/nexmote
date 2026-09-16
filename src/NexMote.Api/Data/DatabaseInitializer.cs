@@ -36,6 +36,7 @@ public static class DatabaseInitializer
         // 4. Kolon güncellemeleri (Incremental Schema Evolution)
         EnsureColumns(db, logger);
         db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_ActivityLogs_CorrelationId ON ActivityLogs (CorrelationId);");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_RemoteSessions_OwnerUserId ON RemoteSessions (OwnerUserId);");
         transaction.Commit();
     }
 
@@ -180,6 +181,7 @@ public static class DatabaseInitializer
             );
             CREATE UNIQUE INDEX IF NOT EXISTS ""IX_DeviceCommands_RequestId"" ON ""DeviceCommands"" (""RequestId"");
             CREATE INDEX IF NOT EXISTS ""IX_DeviceCommands_DeviceId_Status_CreatedAt"" ON ""DeviceCommands"" (""DeviceId"", ""Status"", ""CreatedAt"");
+
         ";
 
         try
@@ -219,13 +221,19 @@ public static class DatabaseInitializer
             @"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpPasswordEncrypted"" TEXT;",
             @"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromAddress"" TEXT;",
             @"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpFromName"" TEXT;",
+            @"ALTER TABLE ""ServerSettings"" ADD COLUMN ""SmtpSslMode"" TEXT NOT NULL DEFAULT 'Auto';",
             @"ALTER TABLE ""ActivityLogs"" ADD COLUMN ""CorrelationId"" TEXT;",
             @"ALTER TABLE ""CommandAudits"" ADD COLUMN ""InitiatorUserId"" TEXT;",
             @"ALTER TABLE ""CommandAudits"" ADD COLUMN ""InitiatorEmail"" TEXT;",
             @"ALTER TABLE ""CommandAudits"" ADD COLUMN ""CorrelationId"" TEXT;",
             @"ALTER TABLE ""DeviceCommands"" ADD COLUMN ""InitiatorUserId"" TEXT;",
             @"ALTER TABLE ""DeviceCommands"" ADD COLUMN ""InitiatorEmail"" TEXT;",
-            @"ALTER TABLE ""DeviceCommands"" ADD COLUMN ""CorrelationId"" TEXT;"
+            @"ALTER TABLE ""DeviceCommands"" ADD COLUMN ""CorrelationId"" TEXT;",
+            @"ALTER TABLE ""RemoteSessions"" ADD COLUMN ""OwnerUserId"" TEXT;",
+            @"ALTER TABLE ""RemoteSessions"" ADD COLUMN ""ActiveTokenHash"" TEXT;",
+            @"ALTER TABLE ""RemoteSessions"" ADD COLUMN ""ActivatedAt"" TEXT;",
+            @"ALTER TABLE ""Users"" ADD COLUMN ""MfaFailedAttempts"" INTEGER NOT NULL DEFAULT 0;",
+            @"ALTER TABLE ""Users"" ADD COLUMN ""MfaLockedUntil"" TEXT;"
         };
 
         foreach (var statement in alterStatements)

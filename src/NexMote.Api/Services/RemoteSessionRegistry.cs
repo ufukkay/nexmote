@@ -26,7 +26,7 @@ public sealed class RemoteSessionRegistry
     /// <param name="deviceId">Hedef cihaz kimliği.</param>
     /// <param name="serverUrl">Sunucu genel URL'i.</param>
     /// <returns>Oturum ID, token ve LaunchUri içeren yanıt.</returns>
-    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl)
+    public CreateRemoteSessionResponse Create(Guid deviceId, string serverUrl, Guid ownerUserId)
     {
         using var db = _dbFactory.CreateDbContext();
 
@@ -40,6 +40,7 @@ public sealed class RemoteSessionRegistry
             Id = id,
             DeviceId = deviceId,
             Token = HashToken(token),
+            OwnerUserId = ownerUserId,
             CreatedAt = now,
             ExpiresAt = expiresAt
         };
@@ -78,23 +79,48 @@ public sealed class RemoteSessionRegistry
         return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt);
     }
 
-    public RemoteSessionRecord? Activate(Guid sessionId, string token)
+    public RemoteSessionRecord? Activate(Guid sessionId, string token, Guid? ownerUserId = null)
     {
         using var db = _dbFactory.CreateDbContext();
+        using var transaction = db.Database.BeginTransaction();
 
-        var tokenHash = HashToken(token);
         var session = db.RemoteSessions.FirstOrDefault(s => s.Id == sessionId);
         if (session is null ||
             session.ExpiresAt <= DateTimeOffset.UtcNow ||
-            !string.Equals(session.Token, tokenHash, StringComparison.OrdinalIgnoreCase))
+            (session.OwnerUserId.HasValue && ownerUserId.HasValue && session.OwnerUserId.Value != ownerUserId.Value))
         {
             return null;
         }
 
-        session.ExpiresAt = DateTimeOffset.UtcNow.Add(ActiveSessionLifetime);
-        db.SaveChanges();
+        var now = DateTimeOffset.UtcNow;
+        string activeToken;
+        if (session.ActivatedAt is null)
+        {
+            if (!TokenMatches(session.Token, token))
+            {
+                return null;
+            }
 
-        return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt);
+            activeToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            session.Token = string.Empty;
+            session.ActiveTokenHash = HashToken(activeToken);
+            session.ActivatedAt = now;
+        }
+        else
+        {
+            if (!TokenMatches(session.ActiveTokenHash, token))
+            {
+                return null;
+            }
+
+            activeToken = token;
+        }
+
+        session.ExpiresAt = now.Add(ActiveSessionLifetime);
+        db.SaveChanges();
+        transaction.Commit();
+
+        return new RemoteSessionRecord(session.Id, session.DeviceId, activeToken, session.ExpiresAt);
     }
 
     public void Expire(Guid sessionId)
@@ -104,12 +130,25 @@ public sealed class RemoteSessionRegistry
         if (session is not null)
         {
             session.ExpiresAt = DateTimeOffset.UtcNow;
+            session.ActiveTokenHash = null;
             db.SaveChanges();
         }
     }
 
     private static string HashToken(string token) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+
+    private static bool TokenMatches(string? storedHash, string token)
+    {
+        if (string.IsNullOrWhiteSpace(storedHash))
+        {
+            return false;
+        }
+
+        var actualHash = Convert.FromHexString(HashToken(token));
+        var expectedHash = Convert.FromHexString(storedHash);
+        return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
+    }
 }
 
 /// <summary>

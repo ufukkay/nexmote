@@ -30,6 +30,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private bool _starting;
     private bool _disposed;
     private bool _joinedDeviceGroup;
+    private int _closedRetryCount = 0;
     private AgentSecurityProfileResponse? _securityProfile;
     private volatile string? _lastClipboardText;
     private int _adaptiveQuality = 72;
@@ -194,7 +195,7 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             {
                 if (_securityProfile?.ViewOnlyMode == true)
                 {
-                    return; // Sadece izleme modu aktif
+                    return; // Sadece izleme modunda girdi kapalı
                 }
                 _lastRemoteInputTicks = Stopwatch.GetTimestamp();
                 HandleRemoteInput(payload);
@@ -391,6 +392,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         _connection.Reconnected += async _ =>
         {
+            // Reset closed retry counter on successful reconnect
+            _closedRetryCount = 0;
             await JoinDeviceAsync();
             _joinedDeviceGroup = true;
             if (_activeSessionId.HasValue && _identity is not null)
@@ -408,10 +411,16 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         _connection.Closed += error =>
         {
             _joinedDeviceGroup = false;
-            _setStatus($"kapandi ({error?.Message ?? "baglanti kapandi"})");
+            // Increase closed retry count and compute backoff with jitter
+            _closedRetryCount++;
+            var baseSeconds = Math.Min(30, (int)Math.Pow(2, Math.Min(_closedRetryCount, 5)));
+            var rand = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, 1000) / 1000.0;
+            var jitterFactor = 0.6 + (rand * 0.8);
+            var delaySeconds = Math.Max(1, (int)(baseSeconds * jitterFactor));
+            _setStatus($"kapandi ({error?.Message ?? "baglanti kapandi"}) - yeniden dene ~{delaySeconds}s");
             _ = Task.Run(async () =>
             {
-                await Task.Delay(2000);
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
                 if (!_disposed)
                 {
                     await EnsureStartedAsync();

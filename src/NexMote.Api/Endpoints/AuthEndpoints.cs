@@ -172,10 +172,24 @@ public static class AuthEndpoints
             return auth.SetActive(id, true, actingUserId) ? Results.NoContent() : Results.NotFound();
         });
 
+        admin.MapPost("/admin/users/{id:guid}/password", (Guid id, AdminResetPasswordRequest request, ClaimsPrincipal actor, UserAuthService auth) =>
+        {
+            var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var (success, error) = auth.AdminChangePassword(id, request.NewPassword, actingUserId);
+            return success ? Results.Ok(new { message = "Kullanıcı şifresi başarıyla güncellendi." }) : Results.BadRequest(new { message = error });
+        });
+
+        admin.MapDelete("/admin/users/{id:guid}", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
+        {
+            var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var (success, error) = auth.DeleteUser(id, actingUserId);
+            return success ? Results.Ok(new { message = "Kullanıcı başarıyla silindi." }) : Results.BadRequest(new { message = error });
+        });
+
         admin.MapPost("/admin/users/{id:guid}/mfa/reset", (Guid id, ClaimsPrincipal actor, UserAuthService auth) =>
         {
             var actingUserId = Guid.Parse(actor.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            return auth.AdminResetMfa(id, actingUserId) ? Results.NoContent() : Results.NotFound();
+            return auth.AdminResetMfa(id, actingUserId) ? Results.Ok(new { message = "MFA başarıyla sıfırlandı." }) : Results.NotFound();
         });
 
         admin.MapGet("/admin/audit-log", (int? page, int? pageSize, Guid? userId, string? action, UserAuthService auth) =>

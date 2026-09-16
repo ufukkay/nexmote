@@ -39,7 +39,8 @@ internal static class SessionProcessLauncher
     }
 
     /// <summary>
-    /// Aktif konsol oturumunda Tepsi (Tray) uygulamasının çalışıp çalışmadığını Mutex ve Süreç üzerinden denetler.
+    /// Aktif konsol oturumunda Tepsi (Tray) uygulamasının çalışıp çalışmadığını Mutex ve Yerel Pipe üzerinden denetler.
+    /// Input-helper veya system-session gibi aynı isimli yardımcı süreçlerle asla karıştırılmaz.
     /// </summary>
     public static bool IsTrayRunningInSession(uint sessionId)
     {
@@ -54,8 +55,16 @@ internal static class SessionProcessLauncher
         }
         catch { }
 
-        // Fallback: Check if NexMote.Agent.Tray process is running in session
-        return IsProcessRunningInSession("NexMote.Agent.Tray", sessionId);
+        try
+        {
+            if (File.Exists($@"\\.\pipe\NexMote_Session_Wakeup_{sessionId}"))
+            {
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
     }
 
     /// <summary>

@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using System.Security.Claims;
 using NexMote.Api.Services;
 using NexMote.Shared.Contracts;
 
@@ -71,9 +73,16 @@ public sealed class SignalingHub : Hub
     /// </summary>
     /// <param name="sessionId">Teknisyen oturum kimliği.</param>
     /// <param name="token">Oturuma özel tek kullanımlık güvenlik token'ı.</param>
-    public async Task JoinTechnicianSession(Guid sessionId, string token)
+    public async Task<string> JoinTechnicianSession(Guid sessionId, string token)
     {
-        var session = _sessions.Activate(sessionId, token);
+        Guid? ownerUserId = null;
+        var userIdClaim = Context.User?.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (Guid.TryParse(userIdClaim, out var parsedUserId))
+        {
+            ownerUserId = parsedUserId;
+        }
+
+        var session = _sessions.Activate(sessionId, token, ownerUserId);
         if (session is null)
         {
             _logger.LogWarning("[Signaling] JoinTechnicianSession basarisiz: Gecersiz veya suresi dolmus oturum. SessionId: {SessionId}", sessionId);
@@ -124,6 +133,8 @@ public sealed class SignalingHub : Hub
             await Clients.Group($"device:{session.DeviceId}").SendAsync("RemoteSessionRequested", sessionId);
             await Clients.Group($"device:{session.DeviceId}:service").SendAsync("RemoteSessionRequested", sessionId);
         }
+
+        return session.Token;
     }
 
     /// <summary>
@@ -326,6 +337,7 @@ public sealed class SignalingHub : Hub
     /// <summary>
     /// Teknisyen istemcisinin veya web konsolunun canlı cihaz telemetri delta akışına abone olmasını sağlar (Madde 7).
     /// </summary>
+    [Authorize(Policy = "AnyUser")]
     public Task SubscribeToDeviceFeed()
     {
         return Groups.AddToGroupAsync(Context.ConnectionId, "devices:feed");
@@ -334,6 +346,7 @@ public sealed class SignalingHub : Hub
     /// <summary>
     /// Canlı cihaz telemetri delta akışı aboneliğinden ayrılır.
     /// </summary>
+    [Authorize(Policy = "AnyUser")]
     public Task UnsubscribeFromDeviceFeed()
     {
         return Groups.RemoveFromGroupAsync(Context.ConnectionId, "devices:feed");

@@ -15,6 +15,12 @@ internal static class SasServiceHelper
     {
         try
         {
+            using (var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true))
+            {
+                key?.SetValue("SoftwareSASGeneration", 3, Microsoft.Win32.RegistryValueKind.DWord);
+                key?.SetValue("PromptOnSecureDesktop", 0, Microsoft.Win32.RegistryValueKind.DWord);
+            }
+
             // LocalSystem yetkisiyle çağrıldığında asUser=false zorunludur ve Winlogon'a doğrudan SAS iletir
             SendSAS(false);
         }

@@ -18,31 +18,55 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// SQLite veritabanı bağlantısı ve DbContextFactory kaydı
+var dbPath = Path.Combine(AppContext.BaseDirectory, "nexmote.db");
+
 // Production ortamında varsayılan / eksik credential ile başlatmayı engelle
 if (builder.Environment.IsProduction())
 {
     var adminPassword = builder.Configuration["Admin:Password"];
     var enrollmentKey = builder.Configuration["Enrollment:Key"];
+    var publicUrl = builder.Configuration["PublicUrl"];
+    var manifestSignatureRequired = builder.Configuration.GetValue("Updates:ManifestSignature:Required", false);
 
-    var errors = new List<string>();
-    if (string.IsNullOrWhiteSpace(adminPassword))
-        errors.Add("Admin:Password production ortamında ayarlanmalıdır (ilk Admin kullanıcısının bootstrap şifresi).");
-    if (string.IsNullOrWhiteSpace(enrollmentKey))
-        errors.Add("Enrollment:Key production ortamında ayarlanmalıdır.");
+    var isPrivateDeployment = string.IsNullOrWhiteSpace(publicUrl) ||
+        (Uri.TryCreate(publicUrl, UriKind.Absolute, out var pUri) &&
+         (pUri.IsLoopback ||
+          pUri.Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
+          (IPAddress.TryParse(pUri.Host, out var ip) && (
+              IPAddress.IsLoopback(ip) ||
+              ip.GetAddressBytes()[0] == 10 ||
+              (ip.GetAddressBytes()[0] == 172 && ip.GetAddressBytes()[1] >= 16 && ip.GetAddressBytes()[1] <= 31) ||
+              (ip.GetAddressBytes()[0] == 192 && ip.GetAddressBytes()[1] == 168)))));
 
-    if (errors.Count > 0)
+    if (isPrivateDeployment)
     {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.Error.WriteLine("=== NEXMOTE BAŞLATMA HATASI: GÜVENLİ KONFİGÜRASYON EKSİK ===");
-        foreach (var err in errors) Console.Error.WriteLine($"  ✗ {err}");
-        Console.Error.WriteLine("  Sırları /etc/systemd/system/nexmote.service.d/override.conf içinde Environment= satırları olarak tanımlayın.");
-        Console.ResetColor();
-        Environment.Exit(1);
+        Console.WriteLine($"[NexMote] Özel/Yerel ağ veya IIS dağıtımı ({publicUrl ?? "LAN"}). Esnek konfigürasyon aktif.");
+    }
+    else
+    {
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(adminPassword) && !File.Exists(dbPath))
+            errors.Add("Admin:Password production ortamında ayarlanmalıdır (ilk Admin kullanıcısının bootstrap şifresi).");
+        if (string.IsNullOrWhiteSpace(enrollmentKey) && !File.Exists(dbPath))
+            errors.Add("Enrollment:Key production ortamında ayarlanmalıdır.");
+        if (!Uri.TryCreate(publicUrl, UriKind.Absolute, out var publicUri) ||
+            !string.Equals(publicUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            errors.Add("PublicUrl production ortamında HTTPS olmalıdır.");
+        if (!manifestSignatureRequired)
+            errors.Add("Updates:ManifestSignature production ortamında zorunlu olmalıdır.");
+
+        if (errors.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine("=== NEXMOTE BAŞLATMA HATASI: GÜVENLİ KONFİGÜRASYON EKSİK ===");
+            foreach (var err in errors) Console.Error.WriteLine($"  ✗ {err}");
+            Console.Error.WriteLine("  Sırları /etc/systemd/system/nexmote.service.d/override.conf içinde Environment= satırları olarak tanımlayın.");
+            Console.ResetColor();
+            Environment.Exit(1);
+        }
     }
 }
-
-// SQLite veritabanı bağlantısı ve DbContextFactory kaydı
-var dbPath = Path.Combine(AppContext.BaseDirectory, "nexmote.db");
 builder.Services.AddDbContextFactory<AppDbContext>(options =>
     options.UseSqlite($"Data Source={dbPath}"));
 
@@ -79,15 +103,7 @@ builder.Services.AddCors(options =>
             ["http://localhost:5173", "http://127.0.0.1:5173", "https://nexmote.com", "https://www.nexmote.com", "http://192.168.0.219"];
 
         policy
-            .SetIsOriginAllowed(origin =>
-            {
-                if (configuredOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) return true;
-                if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
-                {
-                    if (NexMote.Shared.Network.NexMoteHttp.IsPrivateOrLocalHost(uri.Host)) return true;
-                }
-                return false;
-            })
+            .SetIsOriginAllowed(origin => configuredOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -215,6 +231,11 @@ app.UseMiddleware<CorrelationIdMiddleware>();
 // Tüm HTTP ve API yanıtlarında UTF-8 karakter kodlaması güvencesi
 app.Use(async (context, next) =>
 {
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    context.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+
     context.Response.OnStarting(() =>
     {
         var contentType = context.Response.ContentType;
@@ -236,6 +257,23 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
     ForwardLimit = 1,
     KnownProxies = { IPAddress.Loopback, IPAddress.IPv6Loopback }
 });
+
+if (app.Environment.IsProduction())
+{
+    app.Use(async (context, next) =>
+    {
+        // Yalnızca harici/internet domain isteklerinde HTTPS'e yönlendir; yerel ağ / özel IP (192.168.x vb.) isteklerini zorlama
+        if (!context.Request.IsHttps && !NexMote.Shared.Network.NexMoteHttp.IsPrivateOrLocalHost(context.Request.Host.Host))
+        {
+            context.Response.Headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+            var httpsUrl = "https://" + context.Request.Host + context.Request.PathBase + context.Request.Path + context.Request.QueryString;
+            context.Response.Redirect(httpsUrl, permanent: true);
+            return;
+        }
+        await next();
+    });
+}
+
 app.UseCors("web");
 app.UseRateLimiter();
 app.UseAuthentication();

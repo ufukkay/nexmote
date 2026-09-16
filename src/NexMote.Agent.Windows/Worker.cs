@@ -234,7 +234,7 @@ public sealed class Worker : BackgroundService
                 _hubConnection = null;
             }
 
-            var serverUrl = _optionsMonitor.CurrentValue.ServerUrl?.TrimEnd('/') ?? "https://nexmote.com";
+            var serverUrl = AgentClient.GetCleanServerUrl(_optionsMonitor.CurrentValue.ServerUrl);
             var hubUrl = $"{serverUrl}/hubs/signaling";
 
             _hubConnection = new HubConnectionBuilder()
@@ -264,13 +264,14 @@ public sealed class Worker : BackgroundService
             {
                 _logger.LogInformation("Sunucudan canlı oturum isteği alındı: {SessionId}. Aktif oturum denetleniyor...", sessionId);
                 EnsureTrayRunning();
-                TryWakeupTraySession(sessionId);
+                _ = TryWakeupTraySessionAsync(sessionId);
             });
 
             _hubConnection.On("ExecuteSystemSas", () =>
             {
                 _logger.LogInformation("SYSTEM yetkili SAS (Ctrl+Alt+Del / Kilit Aç) sinyali alındı. Session 0 çekirdeğinde yürütülüyor...");
                 SasServiceHelper.SendSas();
+                TrySendSasToActiveSession();
             });
 
             _hubConnection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>
@@ -742,42 +743,28 @@ public sealed class Worker : BackgroundService
                 var activeSession = SessionProcessLauncher.GetActiveConsoleSessionId();
                 if (activeSession != 0xFFFFFFFF)
                 {
-                    var isUserLoggedIn = SessionProcessLauncher.IsUserLoggedIn(activeSession);
                     var isTrayRunning = SessionProcessLauncher.IsTrayRunningInSession(activeSession);
                     var isInputHelperRunning = SessionProcessLauncher.IsInputHelperRunningInSession(activeSession);
-                    var isSystemStreamerRunning = SessionProcessLauncher.IsSystemSessionStreamerRunningInSession(activeSession);
 
                     var trayExePath = Path.Combine(AppContext.BaseDirectory, "NexMote.Agent.Tray.exe");
                     if (File.Exists(trayExePath))
                     {
-                        if (isUserLoggedIn)
+                        // 1. SYSTEM yetkili Tray uygulamasını aktif konsol oturumunda başlat ve sürekli aktif tut
+                        // (Kullanıcı giriş yapmış olsun veya Winlogon kilit ekranında olsun, tek ve yetkili yayıncı olarak çalışır)
+                        if (!isTrayRunning)
                         {
-                            // 1. Kullanıcı oturum açtığında bildirim alanı (Tray) ve Durum Paneli için kullanıcı yetkisiyle başlat
-                            if (!isTrayRunning)
+                            _logger.LogInformation("Aktif konsol oturumu ({SessionId}). SYSTEM yetkili Tray başlatılıyor...", activeSession);
+                            if (!SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--tray", out var launchErr))
                             {
-                                _logger.LogInformation("Kullanıcı oturumu aktif ({SessionId}). Tray başlatılıyor...", activeSession);
-                                if (!SessionProcessLauncher.TryLaunchInActiveSessionAsUser(trayExePath, "--tray", out var launchErr))
-                                {
-                                    _logger.LogDebug("TryLaunchInActiveSessionAsUser ({Error}), SYSTEM olarak deneniyor...", launchErr);
-                                    SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--tray", out _);
-                                }
-                            }
-
-                            // 2. SYSTEM yetkili Girdi Yardımcısı her zaman aktif olmalıdır (Kilit ekranı ve UAC pencereleri için)
-                            if (!isInputHelperRunning)
-                            {
-                                EnsureInputHelperRunning();
+                                _logger.LogWarning("SYSTEM yetkili Tray başlatılamadı ({Error}), kullanıcı yetkisiyle deneniyor...", launchErr);
+                                SessionProcessLauncher.TryLaunchInActiveSessionAsUser(trayExePath, "--tray", out _);
                             }
                         }
-                        else
+
+                        // 2. SYSTEM yetkili Girdi Yardımcısı her zaman aktif olmalıdır (Kilit ekranı ve UAC pencereleri için)
+                        if (!isInputHelperRunning)
                         {
-                            // 3. Kullanıcı henüz giriş yapmamış (Windows Giriş/Kilit Ekranı):
-                            // SYSTEM yetkili Canlı Oturum Yayıncısını başlat ve aktif tut
-                            if (!isSystemStreamerRunning)
-                            {
-                                _logger.LogInformation("Giriş/Kilit ekranı aktif ({SessionId}). SYSTEM oturum yayıncısı başlatılıyor...", activeSession);
-                                SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--system-session", out _);
-                            }
+                            EnsureInputHelperRunning();
                         }
                     }
                 }
@@ -814,13 +801,11 @@ public sealed class Worker : BackgroundService
                 var trayExePath = Path.Combine(AppContext.BaseDirectory, "NexMote.Agent.Tray.exe");
                 if (File.Exists(trayExePath))
                 {
-                    if (!SessionProcessLauncher.TryLaunchInActiveSessionAsUser(trayExePath, "--tray", out var error))
+                    _logger.LogInformation("Canlı oturum için SYSTEM yetkili Tray başlatılıyor (Session: {SessionId})...", activeSession);
+                    if (!SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--tray", out var error))
                     {
-                        _logger.LogDebug("Tray kullanıcı olarak başlatılamadı ({Error}), SYSTEM fallback deneniyor...", error);
-                        if (!SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--tray", out var sysError))
-                        {
-                            _logger.LogWarning("Aktif oturumda ({SessionId}) Tray başlatılamadı: {Error}", activeSession, sysError);
-                        }
+                        _logger.LogWarning("SYSTEM yetkili Tray başlatılamadı ({Error}), kullanıcı olarak deneniyor...", error);
+                        SessionProcessLauncher.TryLaunchInActiveSessionAsUser(trayExePath, "--tray", out _);
                     }
                 }
             }
@@ -833,9 +818,9 @@ public sealed class Worker : BackgroundService
 
     /// <summary>
     /// Aktif konsol oturumundaki Tray uygulamasına yerel Named Pipe üzerinden canlı oturum başlama sinyali iletir.
-    /// Bu sayede ağ/SignalR gecikmesi olsa dahi Tray anında canlı oturuma katılır.
+    /// Süreç henüz başlıyorsa 3 saniyeye kadar periyodik olarak tekrar dener.
     /// </summary>
-    private void TryWakeupTraySession(Guid sessionId)
+    private async Task TryWakeupTraySessionAsync(Guid sessionId)
     {
         try
         {
@@ -843,15 +828,68 @@ public sealed class Worker : BackgroundService
             if (activeSession == 0xFFFFFFFF) return;
 
             var pipeName = $"NexMote_Session_Wakeup_{activeSession}";
-            using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.Out);
-            client.Connect(300);
-            using var writer = new StreamWriter(client, Encoding.UTF8, 1024, leaveOpen: false) { AutoFlush = true };
-            writer.WriteLine(sessionId.ToString());
-            _logger.LogInformation("Tray canlı oturum uyandırma sinyali yerel pipe üzerinden iletildi: SessionId={SessionId}, Session={Session}", sessionId, activeSession);
+            for (int i = 0; i < 6; i++)
+            {
+                try
+                {
+                    using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.Out);
+                    await client.ConnectAsync(500);
+                    using var writer = new StreamWriter(client, Encoding.UTF8, 1024, leaveOpen: false) { AutoFlush = true };
+                    await writer.WriteLineAsync(sessionId.ToString());
+                    _logger.LogInformation("Tray canlı oturum uyandırma sinyali yerel pipe üzerinden iletildi: SessionId={SessionId}, Session={Session}", sessionId, activeSession);
+                    return;
+                }
+                catch
+                {
+                    if (i < 5) await Task.Delay(500);
+                }
+            }
+            _logger.LogDebug("Tray yerel pipe sinyali iletilemedi (Tray SignalR üzerinden de alabilir).");
         }
         catch (Exception ex)
         {
-            _logger.LogDebug("Tray yerel pipe sinyali iletilemedi (Tray SignalR üzerinden de alabilir): {Error}", ex.Message);
+            _logger.LogDebug("Tray yerel pipe çağrısında hata: {Error}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Aktif konsol oturumuna (Session 1, 2 vb.) doğrudan SAS ve kilit açma (Space + Enter + Mouse Click) komutunu iletir.
+    /// Önce Named Pipe ile SYSTEM Girdi Yardımcısına gönderir; yanıt alınamazsa tek seferlik --send-sas-once başlatır.
+    /// </summary>
+    private void TrySendSasToActiveSession()
+    {
+        try
+        {
+            var activeSession = SessionProcessLauncher.GetActiveConsoleSessionId();
+            if (activeSession == 0xFFFFFFFF) return;
+
+            var pipeName = $"NexMoteInputHelper_{activeSession}";
+            var sent = false;
+            try
+            {
+                using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.Out);
+                client.Connect(400);
+                using var writer = new StreamWriter(client, Encoding.UTF8, 1024, leaveOpen: false) { AutoFlush = true };
+                var sasEvent = JsonSerializer.Serialize(new RemoteInputEvent(Guid.Empty, "send-sas"));
+                writer.WriteLine(sasEvent);
+                sent = true;
+                _logger.LogInformation("SAS sinyali aktif oturum ({SessionId}) Girdi Yardımcısına Named Pipe üzerinden iletildi.", activeSession);
+            }
+            catch { }
+
+            if (!sent)
+            {
+                var trayExePath = Path.Combine(AppContext.BaseDirectory, "NexMote.Agent.Tray.exe");
+                if (File.Exists(trayExePath))
+                {
+                    SessionProcessLauncher.TryLaunchInActiveSession(trayExePath, "--send-sas-once", out _);
+                    _logger.LogInformation("SAS sinyali aktif oturumda ({SessionId}) --send-sas-once süreciyle yürütüldü.", activeSession);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TrySendSasToActiveSession çağrısında hata.");
         }
     }
 }

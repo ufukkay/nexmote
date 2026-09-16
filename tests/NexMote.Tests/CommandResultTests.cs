@@ -9,6 +9,48 @@ namespace NexMote.Tests;
 public sealed class CommandResultTests
 {
     [Fact]
+    public void TakeNext_claims_a_command_only_once()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        var factory = new Factory(connection);
+        using var db = factory.CreateDbContext();
+        db.Database.EnsureCreated();
+        var queue = new DeviceCommandQueue(factory);
+        var device = Guid.NewGuid();
+        queue.Enqueue(Guid.NewGuid(), device, "command", "cmd", "echo test", 30);
+
+        var first = queue.TakeNext(device);
+        var second = queue.TakeNext(device);
+
+        Assert.NotNull(first);
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public void TakeNext_requeues_an_uncompleted_expired_delivery()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        var factory = new Factory(connection);
+        using var db = factory.CreateDbContext();
+        db.Database.EnsureCreated();
+        var queue = new DeviceCommandQueue(factory);
+        var device = Guid.NewGuid();
+        queue.Enqueue(Guid.NewGuid(), device, "command", "cmd", "echo test", 30);
+
+        var first = queue.TakeNext(device);
+        Assert.NotNull(first);
+        var entity = db.DeviceCommands.Single();
+        entity.DeliveredAt = DateTimeOffset.UtcNow.AddMinutes(-10);
+        db.SaveChanges();
+
+        var second = queue.TakeNext(device);
+
+        Assert.NotNull(second);
+    }
+
+    [Fact]
     public void DuplicateResultCreatesOneAuditAndConflictingResultIsRejected()
     {
         using var connection = new SqliteConnection("Data Source=:memory:");

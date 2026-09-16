@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ServerUrl = "https://nexmote.com",
-    [string]$Version = "0.8.0",
+    [string]$Version = "0.8.2",
     [string]$DestinationDir = "",
     [switch]$SkipCodeSigning
 )

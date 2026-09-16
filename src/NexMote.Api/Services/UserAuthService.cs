@@ -20,6 +20,8 @@ public sealed class UserAuthService
 {
     private const string MfaProtectorPurpose = "NexMote.Api.MfaSecret.v1";
     private static readonly TimeSpan MfaChallengeLifetime = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MfaLockoutDuration = TimeSpan.FromMinutes(10);
+    private const int MaxMfaAttempts = 5;
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private static readonly TimeSpan SessionLifetimeRemembered = TimeSpan.FromDays(30);
 
@@ -138,14 +140,34 @@ public sealed class UserAuthService
             return null;
         }
 
+        if (user.MfaLockedUntil > now)
+        {
+            return null;
+        }
+
+        if (user.MfaLockedUntil is not null)
+        {
+            user.MfaLockedUntil = null;
+            user.MfaFailedAttempts = 0;
+        }
+
         var isValid = _totp.VerifyCode(Unprotect(user.MfaSecretEncrypted), code) || TryConsumeRecoveryCode(db, user, code);
         if (!isValid)
         {
+            user.MfaFailedAttempts++;
+            if (user.MfaFailedAttempts >= MaxMfaAttempts)
+            {
+                user.MfaLockedUntil = now.Add(MfaLockoutDuration);
+                pending.RevokedAt = now;
+            }
+
             LogActivity(db, user.Id, user.Email, "login.mfa_failed", null, null, null, ip, success: false);
             db.SaveChanges();
             return null;
         }
 
+        user.MfaFailedAttempts = 0;
+        user.MfaLockedUntil = null;
         pending.RevokedAt = now;
         var token = IssueSession(db, user, rememberMe, ip, userAgent);
         user.LastLoginAt = now;
@@ -510,6 +532,65 @@ public sealed class UserAuthService
         return true;
     }
 
+    public (bool Success, string? Error) AdminChangePassword(Guid userId, string newPassword, Guid actingUserId)
+    {
+        if (!PasswordValidator.Validate(newPassword, out var error))
+        {
+            return (false, error);
+        }
+
+        using var db = _dbFactory.CreateDbContext();
+        var user = db.Users.FirstOrDefault(u => u.Id == userId);
+        if (user is null)
+        {
+            return (false, "Kullanıcı bulunamadı.");
+        }
+
+        user.PasswordHash = _passwordHasher.HashPassword(user, newPassword);
+
+        // Kullanıcının mevcut tüm aktif oturumlarını iptal et (şifresi değiştiği için yeniden giriş yapmalı)
+        foreach (var session in db.UserSessions.Where(s => s.UserId == userId && s.RevokedAt == null))
+        {
+            session.RevokedAt = DateTimeOffset.UtcNow;
+        }
+
+        LogActivity(db, actingUserId, null, "user.password_change_by_admin", "User", user.Id.ToString(), $"email={user.Email}", null, success: true);
+        db.SaveChanges();
+        return (true, null);
+    }
+
+    public (bool Success, string? Error) DeleteUser(Guid userId, Guid actingUserId)
+    {
+        if (userId == actingUserId)
+        {
+            return (false, "Kendi hesabınızı silemezsiniz.");
+        }
+
+        using var db = _dbFactory.CreateDbContext();
+        var user = db.Users.FirstOrDefault(u => u.Id == userId);
+        if (user is null)
+        {
+            return (false, "Kullanıcı bulunamadı.");
+        }
+
+        if (user.Role == UserRoles.Admin && db.Users.Count(u => u.Role == UserRoles.Admin && u.IsActive) <= 1)
+        {
+            return (false, "Sistemdeki son aktif yönetici silinemez.");
+        }
+
+        // İlgili kullanıcının oturumlarını ve davetlerini temizle
+        var userSessions = db.UserSessions.Where(s => s.UserId == userId).ToList();
+        db.UserSessions.RemoveRange(userSessions);
+
+        var userInvites = db.UserInvites.Where(i => i.UserId == userId).ToList();
+        db.UserInvites.RemoveRange(userInvites);
+
+        db.Users.Remove(user);
+        LogActivity(db, actingUserId, null, "user.delete", "User", userId.ToString(), $"email={user.Email}, displayName={user.DisplayName}, role={user.Role}", null, success: true);
+        db.SaveChanges();
+        return (true, null);
+    }
+
     public bool AdminResetMfa(Guid userId, Guid actingUserId)
     {
         using var db = _dbFactory.CreateDbContext();
@@ -522,7 +603,16 @@ public sealed class UserAuthService
         user.MfaEnabled = false;
         user.MfaSecretEncrypted = null;
         user.MfaRecoveryCodesHashJson = null;
-        LogActivity(db, actingUserId, null, "user.mfa_reset", "User", user.Id.ToString(), null, null, success: true);
+        user.MfaFailedAttempts = 0;
+        user.MfaLockedUntil = null;
+
+        // Askıdaki MFA challenge oturumlarını iptal et
+        foreach (var session in db.UserSessions.Where(s => s.UserId == userId && s.IsMfaPending && s.RevokedAt == null))
+        {
+            session.RevokedAt = DateTimeOffset.UtcNow;
+        }
+
+        LogActivity(db, actingUserId, null, "user.mfa_reset", "User", user.Id.ToString(), $"email={user.Email}", null, success: true);
         db.SaveChanges();
         return true;
     }

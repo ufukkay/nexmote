@@ -82,7 +82,7 @@ Bu bölüm, **NexMote** projesinin istemci mimarisinde (Ajan, Windows Arka Plan 
 **NexMote**, kurumsal düzeyde uzaktan bilgisayar yönetimi, canlı masaüstü izleme/kontrolü, uzak terminal komut çalıştırma ve istemci destek platformudur.
 
 - **Canlı Sistem URL:** [https://nexmote.com](https://nexmote.com)
-- **Sunucu IP Adresi:** `186.241.21.133` (Hostinger Germany - Frankfurt Ubuntu 24.04 LTS VPS)
+- **Sunucu Altyapısı:** Microsoft IIS 10.0 Windows Server (`192.168.0.219` yerel / `212.12.135.106` harici)
 - **Sağlık Endpoint:** `https://nexmote.com/health` -> `{"product":"NexMote","status":"ok"}`
 - **Erişim Dokümanı:** [docs/server-credentials.md](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/docs/server-credentials.md) (git'te takip edilmiyor, sadece yerel)
 - **Güncel Client Sürümü:** `0.7.5` (bkz. [Versiyonlama](#-versiyonlama--otomatik-güncelleme-mimarisi) ve `CHANGELOG.md`)
@@ -472,35 +472,24 @@ Bu, `downloads/NexMote-Agent-Setup.msi`, `downloads/NexMote-Technician-Setup.msi
 ### 5. Canlı Sunucuya Yayınlama (Deploy to Production)
 ```powershell
 # 1. Linux x64 paketini derle
-.\.dotnet\dotnet.exe publish src/NexMote.Api/NexMote.Api.csproj -c Release -r linux-x64 --self-contained false -o ./publish-linux
+```powershell
+# 1. IIS sunucusuna tek tıkla otomatik dağıtım (React web ön yüz derleme + API publish + senkronizasyon):
+.\scripts\deploy-iis.ps1
 
-# 2. Web ön yüzünü derle ve kopyala
-cmd /c "npm --prefix web run build"
-powershell -Command "New-Item -ItemType Directory -Force -Path 'publish-linux\wwwroot'; Copy-Item -Recurse -Force 'web\dist\*' 'publish-linux\wwwroot\'"
-
-# 3. Ziple ve SCP ile sunucuya yükle
-powershell -Command "Compress-Archive -Path 'publish-linux\*' -DestinationPath 'publish-linux.zip' -Force; scp -i '$env:USERPROFILE\.ssh\id_ed25519' 'publish-linux.zip' root@186.241.21.133:/tmp/publish-linux.zip"
-
-# 4. Sunucuda aç ve servisi yeniden başlat
-powershell -Command "ssh -i '$env:USERPROFILE\.ssh\id_ed25519' root@186.241.21.133 'unzip -o /tmp/publish-linux.zip -d /var/www/nexmote/ && systemctl restart nexmote.service'"
-
-# 5. MSI'ları HER İKİ downloads klasörüne de yükle (bkz. yukarıdaki not)
-scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@186.241.21.133:/var/www/nexmote/wwwroot/downloads/
-scp -i "$env:USERPROFILE\.ssh\id_ed25519" downloads\NexMote-Agent-Setup.msi downloads\NexMote-Technician-Setup.msi downloads\versions.json root@186.241.21.133:/var/www/nexmote/downloads/
+# 2. Veya önceden derlenmişse web derlemesini atlayarak hızlı dağıtım:
+.\scripts\deploy-iis.ps1 -SkipWebBuild
 ```
 
 ---
 
 ## 🌐 Canlı Sunucu (Production) Özeti
 
-- **İşletim Sistemi:** Ubuntu 24.04.4 LTS (Hostinger Germany - Frankfurt VPS - `186.241.21.133`)
-- **Web Sunucu:** Nginx (`/etc/nginx/sites-available/nexmote`) - Reverse Proxy & WebSocket Headers
-- **SSL Sertifikası:** Let's Encrypt Certbot 256-bit SSL (`https://nexmote.com`, `https://www.nexmote.com`, `https://api.nexmote.com`)
-- **Servis Yöneticisi:** `systemd` (`nexmote.service` -> `/var/www/nexmote/NexMote.Api.dll --urls http://127.0.0.1:5080`)
-  - Sırlar: `/etc/systemd/system/nexmote.service.d/override.conf` (`Admin__ApiKey`, `Enrollment__Key` — repoya işlenmez)
-- **Veritabanı:** SQLite (`/var/www/nexmote/nexmote.db`)
-- **MFA Data Protection anahtarları:** `/var/www/nexmote/dpkeys/` — kullanıcıların TOTP secret'larını şifreleyen anahtarlar burada kalıcı. `unzip -o` ile yapılan deploy bu dizine dokunmaz (zip içinde yer almaz), ama **elle silinirse tüm kullanıcıların MFA'sı kalıcı olarak çözülemez hale gelir** (şifre girişi etkilenmez, sadece MFA'yı herkesin yeniden kurması gerekir).
-- **Kayıtlı test/demo cihazları:** TAL-01888 (aktif test cihazı), DESKTOP-SIH3FAC (kullanıcının kendi bilgisayarı — 2026-08-22'de doğrulandı, test için kullanılabilir), 36D6735F-A0A6-4, PC-UFUK
+- **İşletim Sistemi & Web Sunucu:** Microsoft IIS 10.0 (Windows Server - `192.168.0.219` yerel ağ / `212.12.135.106` harici)
+- **SSL Sertifikası:** 256-bit SSL (`https://nexmote.com`)
+- **API Çalışma Modu:** In-Process / Out-of-Process ASP.NET Core Module v2 (IIS Application Pool)
+- **Veritabanı:** SQLite (`nexmote.db`) — dağıtımlarda Robocopy `/XF nexmote.db*` ile korunur
+- **MFA Data Protection anahtarları:** `dpkeys/` — kullanıcıların TOTP secret'larını ve SMTP şifrelerini şifreleyen anahtarlar burada kalıcıdır
+- **Kayıtlı test/demo cihazları:** TAL-01888 (aktif test cihazı), DESKTOP-SIH3FAC (kullanıcının kendi bilgisayarı)
 
 ---
 

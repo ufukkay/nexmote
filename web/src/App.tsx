@@ -65,6 +65,7 @@ import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import {
   acceptInvite,
+  adminChangeUserPassword,
   ActiveDeviceAlert,
   ActivityLogEntry as AuditLogEntry,
   assignDeviceGroup,
@@ -76,6 +77,7 @@ import {
   createRemoteSession,
   createSecurityProfile,
   createUser,
+  deleteUser,
   CurrentUser,
   deleteDevice,
   deleteDeviceGroup,
@@ -655,15 +657,26 @@ export function App() {
 
   async function handleTestSmtp() {
     if (!smtpTestEmail.trim()) {
-      showToast("Test e-postası için bir adres girin.");
+      showToast("Test e-postası için bir alıcı adres girin.");
       return;
     }
     setTestingSmtp(true);
     try {
-      await testSmtp(smtpTestEmail.trim());
-      showToast("Test e-postası gönderildi.");
+      const result = await testSmtp({
+        toEmail: smtpTestEmail.trim(),
+        host: settings.smtpHost,
+        port: settings.smtpPort,
+        username: settings.smtpUsername,
+        password: settings.smtpPassword,
+        fromAddress: settings.smtpFromAddress,
+        fromName: settings.smtpFromName,
+        sslMode: settings.smtpSslMode
+      });
+      showToast(result.message || "Test e-postası başarıyla gönderildi.");
+      addActivityLog(`SMTP testi başarılı: ${smtpTestEmail.trim()}`, "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Test e-postası gönderilemedi.");
+      addActivityLog(`SMTP testi başarısız: ${error instanceof Error ? error.message : ""}`, "warn");
     } finally {
       setTestingSmtp(false);
     }
@@ -728,11 +741,38 @@ export function App() {
 
   async function handleResetUserMfa(user: UserSummary) {
     try {
-      await resetUserMfa(user.id);
+      const result = await resetUserMfa(user.id);
       await refreshUsers();
-      showToast(`${user.email} için MFA sıfırlandı.`);
+      showToast(result?.message || `${user.email} için MFA kaldırıldı.`);
+      addActivityLog(`MFA kaldırıldı: ${user.email}`, "warn");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "MFA sıfırlanamadı.");
+      showToast(error instanceof Error ? error.message : "MFA kaldırılamadı.");
+      throw error;
+    }
+  }
+
+  async function handleAdminChangePassword(user: UserSummary, newPassword: string) {
+    try {
+      const result = await adminChangeUserPassword(user.id, newPassword);
+      showToast(result?.message || `${user.email} kullanıcısının şifresi güncellendi.`);
+      addActivityLog(`Şifre güncellendi: ${user.email}`, "info");
+      await refreshUsers();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Şifre değiştirilemedi.";
+      showToast(msg);
+      throw error;
+    }
+  }
+
+  async function handleDeleteUser(user: UserSummary) {
+    try {
+      const result = await deleteUser(user.id);
+      showToast(result?.message || `${user.email} kullanıcısı sistemden silindi.`);
+      addActivityLog(`Kullanıcı silindi: ${user.email}`, "warn");
+      await refreshUsers();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Kullanıcı silinemedi.");
+      throw error;
     }
   }
 
@@ -1379,7 +1419,7 @@ export function App() {
       if (view === "settings") {
         refreshServerMetrics(false);
       }
-    }, 3000);
+    }, 10000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -1830,6 +1870,47 @@ export function App() {
         {/* View 1: Device Management Console */}
         {view === "devices" && (
           <>
+            <section className="device-summary-strip" aria-label="Cihaz durumu özeti">
+              <button
+                type="button"
+                className={`device-summary-card ${statusFilter === "all" ? "active" : ""}`}
+                onClick={() => setStatusFilter("all")}
+              >
+                <span className="device-summary-icon total"><Monitor size={16} /></span>
+                <span className="device-summary-copy">
+                  <strong>{devices.length}</strong>
+                  <span>Toplam cihaz</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`device-summary-card online ${statusFilter === "online" ? "active" : ""}`}
+                onClick={() => setStatusFilter("online")}
+              >
+                <span className="device-summary-icon online"><Wifi size={16} /></span>
+                <span className="device-summary-copy">
+                  <strong>{onlineCount}</strong>
+                  <span>Çevrimiçi</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`device-summary-card warning ${statusFilter === "warning" ? "active" : ""}`}
+                onClick={() => setStatusFilter("warning")}
+              >
+                <span className="device-summary-icon warning"><AlertCircle size={16} /></span>
+                <span className="device-summary-copy">
+                  <strong>{warningCount}</strong>
+                  <span>Dikkat gereken</span>
+                </span>
+              </button>
+              <div className="device-summary-context">
+                <span className="device-summary-context-dot" />
+                <span>{selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} cihaz seçildi` : "Canlı durum izleniyor"}</span>
+                {loading && <RefreshCw size={13} className="animate-spin" aria-label="Yenileniyor" />}
+              </div>
+            </section>
+
             {/* Filter & View Mode Bar */}
             <div className="filter-bar">
               <div className="filter-group">
@@ -3830,7 +3911,7 @@ export function App() {
                   </p>
 
                   <form onSubmit={handleSaveSettings} className="settings-form">
-                    <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--space-3)" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1.5fr", gap: "var(--space-3)" }}>
                       <div className="form-group">
                         <label className="form-label">SMTP Sunucu Adresi</label>
                         <input
@@ -3849,6 +3930,19 @@ export function App() {
                           value={settings.smtpPort ?? 465}
                           onChange={(e) => setSettings({ ...settings, smtpPort: Number(e.target.value) })}
                         />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Şifreleme (SSL / TLS)</label>
+                        <select
+                          className="form-input"
+                          value={settings.smtpSslMode ?? "Auto"}
+                          onChange={(e) => setSettings({ ...settings, smtpSslMode: e.target.value })}
+                        >
+                          <option value="Auto">Otomatik (Porta Göre)</option>
+                          <option value="Ssl">SSL / TLS (Port 465)</option>
+                          <option value="StartTls">STARTTLS (Port 587)</option>
+                          <option value="None">Düz Metin (Şifresiz)</option>
+                        </select>
                       </div>
                     </div>
 
@@ -4178,6 +4272,8 @@ export function App() {
             handleSetUserRole={handleSetUserRole}
             handleToggleUserActive={handleToggleUserActive}
             handleResetUserMfa={handleResetUserMfa}
+            handleAdminChangePassword={handleAdminChangePassword}
+            handleDeleteUser={handleDeleteUser}
           />
         )}
 

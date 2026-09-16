@@ -4,9 +4,9 @@ param(
     [string]$EnrollmentKey = "",
     [string]$AdminEmail = "admin@nexmote.com",
     [string]$AdminPassword = "",
-    [string]$Version = "0.8.0",
-    [string]$AgentReleaseNotes = "NexMote Agent v0.8.0: DirectX 11 DXGI GPU ekran yakalama, WebRTC P2P yuksek hizli iletim ve kesintisiz masaustu gecisleri.",
-    [string]$TechnicianReleaseNotes = "NexMote Teknisyen Konsolu v0.8.0: DirectX 11 GPU yakalama destegi, WebRTC P2P sinirsiz akis ve 60 FPS masaustu.",
+    [string]$Version = "0.8.2",
+    [string]$AgentReleaseNotes = "NexMote Agent v0.8.2: Canli goruntu ve girdi iletim duzeltmeleri, SignalR WebSocket yetkilendirme optimizasyonu.",
+    [string]$TechnicianReleaseNotes = "NexMote Teknisyen Konsolu v0.8.2: Canli masaustu akisi ve girdi stabilizasyonu.",
     [switch]$FrameworkDependent,
     [string]$SigningCertificateThumbprint = "",
     [string]$SigningCertificatePath = "",
@@ -140,11 +140,19 @@ if ($SkipCodeSigning.IsPresent) {
         -CertificatePassword $SigningCertificatePassword
 }
 
+Get-Process -Name "NexMote*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
+
 if (Test-Path $artifacts) {
-    Remove-Item -LiteralPath $artifacts -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        Remove-Item -LiteralPath $artifacts -Recurse -Force -ErrorAction Stop
+    } catch {
+        Start-Sleep -Seconds 1
+        Remove-Item -LiteralPath $artifacts -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
-New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $trayPublish, $technicianPublish, $cleanerPublish | Out-Null
+New-Item -ItemType Directory -Force -Path $downloads, $agentPublish, $trayPublish, $technicianPublish, $cleanerPublish, $deployerPublish | Out-Null
 
 $selfContained = -not $FrameworkDependent.IsPresent
 $publishArgs = @("-c", "Release", "-r", "win-x64", "--self-contained", $selfContained.ToString().ToLowerInvariant())
@@ -298,6 +306,11 @@ if ($null -ne $signingCertificate) {
         -SignaturePath (Join-Path $downloads "versions.json.sig") `
         -Certificate $signingCertificate `
         -KeyId $signingCertificate.Thumbprint
+} else {
+    $sigPath = Join-Path $downloads "versions.json.sig"
+    if (Test-Path $sigPath) {
+        Remove-Item $sigPath -Force
+    }
 }
 
 Write-Host "Packaging Complete in Record Time!"

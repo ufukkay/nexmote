@@ -527,12 +527,19 @@ public partial class MainWindow : Window
     {
         try
         {
+            if (_http.DefaultRequestHeaders.Authorization is null && !await EnsureSessionAsync(forcePrompt: true))
+            {
+                StatusText.Text = "Canlı oturum için teknisyen girişi gerekli.";
+                return;
+            }
+
             StatusText.Text = "Sinyalleşme sunucusuna bağlanılıyor...";
             var hubUrl = $"{serverUrl.TrimEnd('/')}/hubs/signaling";
             _connection = new HubConnectionBuilder()
                 .WithUrl(hubUrl, options =>
                 {
                     options.HttpMessageHandlerFactory = _ => NexMoteHttp.CreateHandler();
+                    options.AccessTokenProvider = () => Task.FromResult(_http.DefaultRequestHeaders.Authorization?.Parameter);
                     options.TransportMaxBufferSize = 10 * 1024 * 1024;
                     options.ApplicationMaxBufferSize = 10 * 1024 * 1024;
                 })
@@ -662,7 +669,14 @@ public partial class MainWindow : Window
             _connection.Reconnected += _ =>
             {
                 Dispatcher.Invoke(() => StatusText.Text = "Sinyalleşme tekrar sağlandı.");
-                return _connection.InvokeAsync("JoinTechnicianSession", sessionId, token);
+                return _connection.InvokeAsync<string>("JoinTechnicianSession", sessionId, token)
+                    .ContinueWith(result =>
+                    {
+                        if (result.Status == TaskStatus.RanToCompletion)
+                        {
+                            token = result.Result;
+                        }
+                    });
             };
 
             _connection.Closed += error =>
@@ -699,7 +713,7 @@ public partial class MainWindow : Window
             };
 
             await _connection.StartAsync();
-            await _connection.InvokeAsync("JoinTechnicianSession", sessionId, token);
+            token = await _connection.InvokeAsync<string>("JoinTechnicianSession", sessionId, token);
             StatusText.Text = "Oturuma katılındı. Görüntü akışı bekleniyor...";
 
             // WebRTC P2P doğrudan veri kanalı müzakeresini başlat (Madde 1)

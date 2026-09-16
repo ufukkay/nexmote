@@ -10,7 +10,7 @@
     4. Hedef IIS sunucusunda (\\192.168.0.219\nexmote) app_offline.htm oluşturarak DLL kilitlerini güvenle çözer.
     5. Dosyaları veritabanını (nexmote.db) ezmeden senkronize eder.
     6. app_offline.htm dosyasını silerek IIS'i anında yeniden başlatır.
-    7. Canlı sistem sağlık kontrolünü (http://192.168.0.219/health) doğrular.
+    7. Canlı sistem sağlık kontrolünü HTTPS üzerinden doğrular.
 
 .EXAMPLE
     .\scripts\deploy-iis.ps1
@@ -22,6 +22,7 @@
 param (
     [string]$ServerIp = "192.168.0.219",
     [string]$RemoteShare = "\\192.168.0.219\nexmote",
+    [string]$HealthUrl = "",
     [string]$Username = "",
     [string]$Password = "",
     [switch]$LocalOnly,
@@ -161,6 +162,12 @@ $offlineContent = @"
 try {
     Set-Content -Path $offlineFile -Value $offlineContent -Force
     Write-Host "app_offline.htm devrede (DLL kilitleri çözüldü)." -ForegroundColor Cyan
+    
+    # IIS w3wp sürecinin kilitlerini çözmek için sonlandır
+    if (-not [string]::IsNullOrWhiteSpace($Username) -and -not [string]::IsNullOrWhiteSpace($Password)) {
+        Write-Host "IIS işçi süreci (w3wp) güvenle sonlandırılıyor..." -ForegroundColor Cyan
+        & taskkill.exe /S $ServerIp /U $Username /P $Password /IM w3wp.exe /F 2>$null | Out-Null
+    }
     Start-Sleep -Seconds 2
 
     # Robocopy ile senkronize et (nexmote.db ve mevcut dpkeys korunur!)
@@ -170,31 +177,50 @@ try {
         $stagingDir,
         $RemoteShare,
         "/E",
-        "/XO",
         "/XF"
-    ) + $excludeFiles + @("/R:2", "/W:2", "/NP", "/NDL", "/NJH", "/NJS")
+    ) + $excludeFiles + @("/R:3", "/W:2", "/NP", "/NDL", "/NJH", "/NJS")
 
     & robocopy @robocopyArgs | Out-Null
     Write-Host "Dosya aktarımı tamamlandı." -ForegroundColor Green
-} finally {
     # app_offline.htm'i silerek IIS'i anında uyandır
     if (Test-Path $offlineFile) {
         Remove-Item -Force $offlineFile -ErrorAction SilentlyContinue
-        Write-Host "app_offline.htm kaldırıldı (IIS otomatik başlatıldı)." -ForegroundColor Green
+        Write-Host "app_offline.htm kaldırıldı." -ForegroundColor Green
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Username) -and -not [string]::IsNullOrWhiteSpace($Password)) {
+        try {
+            $secPw = ConvertTo-SecureString $Password -AsPlainText -Force
+            $cred = New-Object System.Management.Automation.PSCredential($Username, $secPw)
+            $opt = New-CimSessionOption -Protocol Dcom
+            $sess = New-CimSession -ComputerName $ServerIp -Credential $cred -SessionOption $opt -ErrorAction SilentlyContinue
+            if ($sess) {
+                Invoke-CimMethod -CimSession $sess -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine="C:\Windows\System32\inetsrv\appcmd.exe start apppool /apppool.name:NexMote"} | Out-Null
+                Remove-CimSession $sess -ErrorAction SilentlyContinue
+            }
+        } catch {}
+    }
+} catch {
+    Write-Warning "Dağıtım sırasında bir hata oluştu: $($_.Exception.Message)"
+} finally {
+    if (Test-Path $offlineFile) {
+        Remove-Item -Force $offlineFile -ErrorAction SilentlyContinue
+        Write-Host "app_offline.htm kaldırıldı." -ForegroundColor Green
     }
 }
 
 # 5. Canlı Sağlık Kontrolü
-Write-Host "`n[4/4] Sunucu sağlık kontrolü yapılıyor: http://$ServerIp/health ..." -ForegroundColor Yellow
+if ([string]::IsNullOrWhiteSpace($HealthUrl)) {
+    $HealthUrl = "http://$ServerIp/health"
+}
+Write-Host "`n[4/4] Sunucu sağlık kontrolü yapılıyor: $HealthUrl ..." -ForegroundColor Yellow
 Start-Sleep -Seconds 2
 
-$healthUrl = "http://$ServerIp/health"
 $maxRetries = 5
 $healthy = $false
 
 for ($i = 1; $i -le $maxRetries; $i++) {
     try {
-        $res = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+        $res = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
         if ($res.status -eq "ok") {
             $healthy = $true
             break
@@ -209,8 +235,8 @@ $sw.Stop()
 Write-Host "`n====================================================" -ForegroundColor Green
 if ($healthy) {
     Write-Host "   BAŞARILI! NEXMOTE IIS ÜZERİNDE CANLI!" -ForegroundColor Green
-    Write-Host "   URL: http://$ServerIp/" -ForegroundColor White
-    Write-Host "   Sağlık: $healthUrl -> OK" -ForegroundColor White
+    Write-Host "   URL: $HealthUrl" -ForegroundColor White
+    Write-Host "   Sağlık: $HealthUrl -> OK" -ForegroundColor White
 } else {
     Write-Host "   Dağıtım tamamlandı fakat health yanıt vermedi." -ForegroundColor Yellow
     Write-Host "   Lütfen IIS Application Pool durumunu kontrol edin." -ForegroundColor Yellow

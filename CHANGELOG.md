@@ -4,7 +4,57 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.8.0] - 2026-09-09 (Güncel Sürüm)
+## 🏷️ [v0.8.3] - 2026-09-15 (Güncel Sürüm)
+### 📧 SMTP Dayanıklılığı ve Gelişmiş Teknisyen Yönetimi (Şifre Değiştirme, MFA Kaldırma, Teknisyen Silme)
+- **SMTP Bağlantı ve Sertifika İyileştirmeleri (`EmailService.cs`, `SettingsEndpoints.cs`):**
+  - Hostinger, cPanel, dahili posta sunucuları ve self-signed sertifikalarda yaşanan `RemoteCertificateNameMismatch` ve SSL handshake kesintilerini önlemek amacıyla toleranslı sertifika denetimi (`ServerCertificateValidationCallback`) sağlandı.
+  - SMTP zaman aşımı 15 saniyeye indirilerek port engeli veya askıda kalma durumlarında uygulamanın donması engellendi.
+  - MailKit XOAUTH2 mekanizması temizlenerek gereksiz SASL auth hataları önlendi.
+  - Şifreleme modu seçeneği (`SmtpSslMode`: Otomatik, SSL/TLS 465, STARTTLS 587, Düz Metin) hem veritabanına hem arayüze eklendi.
+  - Formdaki güncel değerlerle anlık test yapabilme desteği (`SendTestAsync`) ve ayrıntılı hata bildirimleri getirildi.
+- **Yönetici Tarafından Teknisyen Şifresi Değiştirme (`UserAuthService.cs`, `AuthEndpoints.cs`, `UsersView.tsx`):**
+  - Yöneticilerin (Admin) panel üzerinden diledikleri teknisyenin şifresini doğrudan belirleyebilmesini sağlayan `POST /api/admin/users/{id}/password` endpoint'i ve arayüz modalı eklendi.
+  - Şifre karmaşıklık politikası (`PasswordValidator`) denetlendi, şifresi değişen kullanıcının mevcut tüm oturumları otomatik sonlandırıldı.
+  - Arayüzde rastgele güçlü şifre üretme (`Sparkles`), şifreyi panoya kopyalama ve göster/gizle butonları sunuldu.
+- **Yönetici Tarafından Teknisyen MFA'sını Kaldırma (`UserAuthService.cs`, `AuthEndpoints.cs`, `UsersView.tsx`):**
+  - İki adımlı doğrulaması açık veya hatalı denemeler yüzünden kilitlenmiş teknisyenlerin MFA kilidini ve yapılandırmasını sıfırlayan `AdminResetMfa` güçlendirildi.
+  - Hatalı deneme sayaçları ve kilitlenme süreleri sıfırlandı, askıdaki MFA challenge oturumları iptal edildi.
+  - Arayüzde açıklayıcı onay penceresi ve `ShieldOff` aksiyon butonu eklendi.
+- **Yönetici Tarafından Teknisyen Silme (`UserAuthService.cs`, `AuthEndpoints.cs`, `UsersView.tsx`):**
+  - Sistemden bir teknisyeni kalıcı olarak silmeyi sağlayan `DELETE /api/admin/users/{id}` endpoint'i eklendi.
+  - Yöneticinin kendi hesabını silememesi ve sistemdeki son aktif Admin'in silinememesi için güvenlik kısıtlamaları uygulandı.
+  - Silinen kullanıcının oturumları (`UserSessions`) ve davetleri (`UserInvites`) güvenle temizlendi, denetim kaydı (`user.delete`) işlendi.
+  - Arayüzde kırmızı renkli `Trash2` butonu ve çift onaylı silme modalı sunuldu.
+
+---
+
+## 🏷️ [v0.8.2] - 2026-09-09
+### ⚡ Canlı Görüntü, Fare/Klavye ve Sinyalleşme Restorasyonu
+- **SignalR WebSocket Yetkilendirme & Query Access Token Desteği (`SessionCookie.cs` & `SignalingHub.cs`):**
+  - SignalR WebSocket bağlantılarında gelen `access_token` query parametresi kimlik doğrulama katmanına dahil edildi.
+  - `JoinTechnicianSession` içindeki gereksiz Authorization attribute engeli kaldırılarak 32 baytlık kriptografik oturum token'ı ile doğrudan, anında ve güvenilir katılım sağlandı.
+- **Fail-Closed Girdi Engelleme Düzeltmesi (`RemoteScreenStreamer.cs` & `Program.cs`):**
+  - Sunucuda özel güvenlik profili tanımlanmamış olsa dahi varsayılan olarak fare ve klavye girdilerinin çalışması garanti edildi (`_securityProfileLoaded` varsayılan true yapıldı, kısıtlama yalnızca profil açıkça yasakladığında uygulanacak şekilde düzeltildi).
+- **Sunucu Adresi Yönlendirme Düzeltmesi (`NexMoteHttp.cs`):**
+  - `EnforceAgentServerUrl` fonksiyonunun yerel ağ ve IIS IP adreslerini (`192.168.0.219`) zorla harici `nexmote.com` adresine yönlendirmesi engellendi; yerel sunucuların bağımsız çalışması sağlandı.
+
+---
+
+## 🏷️ [v0.8.1] - 2026-09-09
+### 🛠️ Görüntü Akışı ve Kilit Açma İyileştirmeleri (Session Watchdog & Secure Desktop SAS Fixes)
+- **Kullanıcı Oturum Kontrolü ve Süreç İyileştirmesi (`SessionProcessLauncher.cs`):**
+  - `IsTrayRunningInSession` içindeki hatalı süreç kontrolü kaldırıldı; `--input-helper` sürecinin tepsiyi çalışıyor gibi göstermesi ve tepsiyi engellemesi giderildi. Named Pipe ve oturum Mutex'i ile kesin denetim sağlandı.
+- **SYSTEM Düzeyinde Oturum Başlatma ve İzin Aşımı (`Worker.cs` & `Program.cs`):**
+  - Tray ve InputHelper süreçleri aktif kullanıcı oturumuna SYSTEM yetkileri çoğaltılarak (`TryLaunchInActiveSession`) başlatıldı. Standart kullanıcı oturumlarında `Global\` mutex erişim reddi (`UnauthorizedAccessException`) güvenli oturum fallback'i ile korundu.
+- **Kilit Ekranı ve Yazılımsal SAS (Ctrl+Alt+Del) Çift Kanallı Çözümü:**
+  - `SoftwareSASGeneration = 3` ve `PromptOnSecureDesktop = 0` kayıt defteri anahtarları otomatik denetlenerek yazılımsal SAS garantilendi.
+  - Teknisyen kilit aç butonuna bastığında hem Session 0 hem de aktif masaüstü girdi yardımcısı (`--send-sas-once`) üzerinden kilit perdesi kaldırılıp parola kutusunun açılması sağlandı.
+- **Dinamik Güncelleme Adresi Çözümlemesi (`SettingsEndpoints.cs`):**
+  - `/api/updates/check` çağrılarında gelen istemcinin ana bilgisayarı (`http://192.168.0.219`) dinamik olarak algılanıp güncelleme paketleri doğrudan doğru sunucudan indirilecek şekilde ayarlandı.
+
+---
+
+## 🏷️ [v0.8.0] - 2026-09-09
 ### 🚀 DirectX 11 DXGI GPU Ekran Yakalama, WebRTC P2P Akışı ve Kusursuz Masaüstü Geçişi
 - **DirectX 11 DXGI Desktop Duplication (`DxgiScreenCapture.cs`):**
   - Ekran kareleri doğrudan GPU VRAM framebuffer üzerinden yakalanarak CPU yükü sıfıra indirildi (%1-%3 aralığı).

@@ -169,7 +169,7 @@ public sealed class AgentClient
     /// Tray sürecinin de aynı kuralı uygulaması gerektiğinden, gerçek mantık paylaşımlı
     /// <see cref="NexMoteHttp.EnforceProductionUrl"/> içinde tutulur — burada tekrarlanmaz.
     /// </summary>
-    internal static string GetCleanServerUrl(string? rawUrl) => NexMoteHttp.EnforceProductionUrl(rawUrl);
+    internal static string GetCleanServerUrl(string? rawUrl) => NexMoteHttp.EnforceAgentServerUrl(rawUrl);
 
     /// <summary>
     /// Base URL ve path'i güvenli şekilde birleştirir.

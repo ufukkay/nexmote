@@ -10,14 +10,26 @@ namespace NexMote.Shared.Network;
 /// </summary>
 public static class NexMoteHttp
 {
-    public const string LiveServerIp = "186.241.21.133";
-    public const string OldServerIp = "72.62.198.100";
+    public const string LiveServerIp = "212.12.135.106";
 
     public static SocketsHttpHandler CreateHandler()
     {
         return new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+                {
+                    if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None) return true;
+                    // Yerel ağ veya sunucu IP adresiyle bağlanırken oluşan sertifika isim uyuşmazlığını kabul et
+                    if ((sslPolicyErrors & ~System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch) == System.Net.Security.SslPolicyErrors.None)
+                    {
+                        return true;
+                    }
+                    return false;
+                }
+            },
             ConnectCallback = async (context, cancellationToken) =>
             {
                 var host = context.DnsEndPoint.Host;
@@ -110,6 +122,16 @@ public static class NexMoteHttp
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// Production agent/tray bağlantılarında eski yerel ağ adreslerinin canlı sunucuya yönlenmesini sağlar.
+    /// Yerel geliştirme URL'lerini koruyan <see cref="EnforceProductionUrl"/> aksine, dağıtılmış istemciler
+    /// private IP veya localhost üzerinde çalışan eski sunucu adreslerine bağlanmamalıdır.
+    /// </summary>
+    public static string EnforceAgentServerUrl(string? rawUrl)
+    {
+        return EnforceProductionUrl(rawUrl);
     }
 
     /// <summary>

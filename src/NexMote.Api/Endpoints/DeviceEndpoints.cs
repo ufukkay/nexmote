@@ -209,7 +209,13 @@ public static class DeviceEndpoints
                 }
             }
 
-            var session = sessions.Create(request.DeviceId, serverUrl);
+            var userIdClaim = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (!Guid.TryParse(userIdClaim, out var ownerUserId))
+            {
+                return Results.Unauthorized();
+            }
+
+            var session = sessions.Create(request.DeviceId, serverUrl, ownerUserId);
             auditLog.Log(http, "session.start", "Device", device.Id.ToString(), new { device.DeviceName, device.LocationCode, serverUrl, sessionId = session.SessionId });
             return Results.Ok(session);
         });

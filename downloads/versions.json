@@ -1,20 +1,20 @@
 ﻿{
-    "agent":  {
-                  "version":  "0.8.0",
-                  "releaseNotes":  "NexMote Agent v0.8.0: DirectX 11 DXGI GPU ekran yakalama, WebRTC P2P yuksek hizli iletim ve kesintisiz masaustu gecisleri.",
-                  "sha256":  "298E00FEE21E311F75D8FCDBC5200593A7E9263D5FC0661BDBE6D4986C998A70",
-                  "sizeBytes":  161251328
-              },
-    "technician":  {
-                       "version":  "0.8.0",
-                       "releaseNotes":  "NexMote Teknisyen Konsolu v0.8.0: DirectX 11 GPU yakalama destegi, WebRTC P2P sinirsiz akis ve 60 FPS masaustu.",
-                       "sha256":  "9FEEE17EC69872712E1A524B3812E8FB2A83390C2118F9FBF7774BCDE8C575F3",
-                       "sizeBytes":  63832064
-                   },
-    "deployer":  {
-                     "version":  "0.8.0",
-                     "releaseNotes":  "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
-                     "sha256":  "F4E1BD51C41B89C962B7145F3A24698B843773BB504B8788D57B82EF35D8BEFF",
-                     "sizeBytes":  63676416
-                 }
+  "agent": {
+    "version": "0.8.2",
+    "releaseNotes": "NexMote Agent v0.8.2: Canli goruntu ve girdi iletim duzeltmeleri, SignalR WebSocket yetkilendirme optimizasyonu.",
+    "sha256": "C923AA783C7B28A8CE2C9C9B5FDC9D090E35C86679ECDEA52400867280262FFB",
+    "sizeBytes": 161247232
+  },
+  "technician": {
+    "version": "0.8.2",
+    "releaseNotes": "NexMote Teknisyen Konsolu v0.8.2: Canli masaustu akisi ve girdi stabilizasyonu.",
+    "sha256": "CF441D11286CBC1902D68D8C2C61F442FD188864BB199198A6098C902D30C687",
+    "sizeBytes": 63807488
+  },
+  "deployer": {
+    "version": "0.8.2",
+    "releaseNotes": "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
+    "sha256": "F7196E2ECBF3C381D1770ABF2252179B0019AD21C87BB7ECC63AB00915622979",
+    "sizeBytes": 63680512
+  }
 }

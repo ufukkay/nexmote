@@ -1,5 +1,5 @@
 import React from "react";
-import { Bell, LogOut, RefreshCw, Search } from "lucide-react";
+import { Bell, RefreshCw, Search } from "lucide-react";
 import { CurrentUser, DeviceSummary } from "../api";
 
 export interface ActivityItem {
@@ -95,13 +95,6 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           <div className="user-avatar-mini">{userInitial}</div>
           <span className="user-name">{userDisplayName}</span>
           <span className="user-role-badge">{roleLabel}</span>
-          <button
-            className="user-logout-mini-btn"
-            onClick={handleLogout}
-            title="Oturumu Kapat"
-          >
-            <LogOut size={13} />
-          </button>
         </div>
       </div>
 

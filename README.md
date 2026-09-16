@@ -99,11 +99,11 @@ NexMote istemci mimarisinde aşağıdaki 4 kuraldan **asla taviz verilmez**:
 - **Framework:** .NET 8 (C# 12) - ASP.NET Core Minimal API
 - **Gerçek Zamanlı İletişim:** SignalR WebSocket Hubs (`/hubs/signaling`)
 - **Veritabanı & ORM:** SQLite + Entity Framework Core 8
-- **Güvenlik & Auth:** Admin JWT Bearer Token Filtresi (`AdminAuthFilter`), Cihaza Özel 32-Bayt Kriptografik `AgentToken`, Sunucu `EnrollmentKey`
+- **Güvenlik & Auth:** Opaque session token + rol politikaları (Admin/Teknisyen), MFA/TOTP, cihaza özel 32-bayt kriptografik `AgentToken`, sunucu `EnrollmentKey`
 - **İşletim Sistemi Desteği:** Linux (Ubuntu 24.04 LTS / Systemd / Nginx) ve Windows Server
 
 ### 💻 Frontend & Web Teknisyen Konsolu
-- **Framework & Dil:** React 18 + TypeScript + Vite
+- **Framework & Dil:** React 19 + TypeScript + Vite
 - **Stil & Tasarım Sistemi:** Vanilla CSS (CSS Variables, Enterprise Dark/Light uyumlu, Glassmorphism)
 - **İkonografi:** Lucide React
 - **Performans:** Zero-dependency UI mimarisi, optimize edilmiş DOM renderlama
@@ -128,7 +128,7 @@ NexMote istemci mimarisinde aşağıdaki 4 kuraldan **asla taviz verilmez**:
 ## 🏗️ Sistem Mimarisi ve Veri Akışı
 
 ```
-                            [ Web Teknisyen Konsolu ] (React 18 + TS + Vite)
+                            [ Web Teknisyen Konsolu ] (React 19 + TS + Vite)
                                        │
                                        ▼  (REST API: /api/devices, /api/remote-sessions)
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -180,7 +180,7 @@ NexMote/
 ├── NexMote.sln               # Ana Visual Studio Çözüm Dosyası (.NET 8)
 ├── src/                      # .NET 8 Kaynak Kodları
 │   ├── NexMote.Api/          # ASP.NET Core 8 Web API & SignalR Sunucusu
-│   │   ├── Auth/             # Bearer Token AdminAuthFilter
+│   │   ├── Auth/             # Opaque session token authentication
 │   │   ├── Data/             # AppDbContext (Entity Framework Core SQLite)
 │   │   ├── Hubs/             # SignalingHub.cs (/hubs/signaling Canlı Akış Rölesi)
 │   │   ├── Services/         # DeviceRegistry, DownloadCatalog, RemoteSessionRegistry
@@ -193,7 +193,7 @@ NexMote/
 │       ├── Contracts/        # Auth, Agent, Session, Streaming Veri Modelleri
 │       ├── Network/          # NexMoteHttp (DNS gecikme korumalı soket yöneticisi)
 │       └── Telemetry/        # SystemTelemetry & SessionUserResolver
-├── web/                      # React 18 + TypeScript + Vite Web Teknisyen Konsolu
+├── web/                      # React 19 + TypeScript + Vite Web Teknisyen Konsolu
 │   └── src/
 │       ├── App.tsx           # Ana UI (Cihaz Listesi, Donanım Detayları, Terminal, Güncellemeler)
 │       ├── api.ts            # REST API Fetch Kontratları ve DTO Tipleri
@@ -227,14 +227,10 @@ powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -ServerUrl 
 ```
 *Bu betik `artifacts/package/` altına dosyaları derler ve WiX ile kurumsal `NexMote-Agent-Setup.msi` / `NexMote-Technician-Setup.msi` / `NexMote-Cleanup-Setup.msi` paketlerini üretir. `-Version`, `-AgentReleaseNotes` ve `-TechnicianReleaseNotes` zorunludur (bkz. AGENTS.md).*
 
-### 4. Canlı Sunucuya Yayınlama (Linux VPS)
+### 4. Canlı Sunucuya Yayınlama (Windows Server IIS)
 ```powershell
-# Linux binary publish ve SCP transfer
-.\.dotnet\dotnet.exe publish src/NexMote.Api/NexMote.Api.csproj -c Release -r linux-x64 --self-contained false -o ./publish-linux
-Copy-Item -Recurse -Force 'web\dist\*' 'publish-linux\wwwroot\'
-Compress-Archive -Path 'publish-linux\*' -DestinationPath 'publish-linux.zip' -Force
-scp -i "$env:USERPROFILE\.ssh\id_ed25519" publish-linux.zip root@186.241.21.133:/tmp/
-ssh -i "$env:USERPROFILE\.ssh\id_ed25519" root@186.241.21.133 'unzip -o /tmp/publish-linux.zip -d /var/www/nexmote/ && systemctl restart nexmote.service'
+# Tek tıkla otomatik derleme ve IIS sunucusuna dağıtım
+.\scripts\deploy-iis.ps1
 ```
 
 ---
@@ -242,7 +238,7 @@ ssh -i "$env:USERPROFILE\.ssh\id_ed25519" root@186.241.21.133 'unzip -o /tmp/pub
 ## 🔒 Güvenlik Mimarisi
 
 - **Uçtan Uca Şifreleme:** Tüm REST ve SignalR trafiği HTTPS / WSS (TLS 1.3) üzerinden akar.
-- **Admin İzolasyonu:** Cihaz yönetimi, oturum başlatma ve ayarlar `AdminAuthFilter` ile korunan Bearer token gerektirir.
+- **Yetkilendirme:** Opaque session token ile kimlik doğrulama yapılır; cihaz işlemleri Admin/Teknisyen rollerine, ayarlar ve kullanıcı yönetimi Admin rolüne bağlıdır.
 - **Ajan Doğrulaması:** Ajan sunucuya ilk kayıtta gizli `EnrollmentKey` kullanır; sonrasında sunucunun ürettiği benzersiz 32-baytlık `AgentToken` ile periyodik doğrulanır.
 - **Güvenli Sır Yönetimi:** API anahtarları ve kayıt şifreleri kaynak kodda saklanmaz; sunucuda ortam değişkenleri (`Environment=`) üzerinden yönetilir.
 

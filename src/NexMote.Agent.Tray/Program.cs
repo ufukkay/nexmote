@@ -65,6 +65,13 @@ internal static class Program
             return;
         }
 
+        // Doğrudan SAS ve kilit ekranı perde kaldırma komutu
+        if (args.Length > 0 && string.Equals(args[0], "--send-sas-once", StringComparison.OrdinalIgnoreCase))
+        {
+            SasHelper.SendSas();
+            return;
+        }
+
         var explicitShow = args.Any(a => string.Equals(a, "--show", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "--dashboard", StringComparison.OrdinalIgnoreCase));
         // AGENTS.md Madde 2: Ajan asla kendiliğinden Durum Panelini açmamalı; yalnızca kullanıcı bilerek
         // --show/--dashboard ile başlattığında (kısayol, "Durum Panelini Aç" menüsü) açılır.
@@ -86,7 +93,16 @@ internal static class Program
         }
         catch
         {
-            mutex = new Mutex(true, mutexName, out createdNew);
+            try
+            {
+                mutex = new Mutex(true, mutexName, out createdNew);
+            }
+            catch
+            {
+                // Standart kullanıcı oturumunda Global\ yetkisi kısıtlıysa yerel mutex ile devam et
+                var localMutexName = $@"NexMote_Agent_Tray_Session_{sessionId}";
+                mutex = new Mutex(true, localMutexName, out createdNew);
+            }
         }
 
         if (!createdNew)

@@ -25,6 +25,16 @@ public sealed class NetworkValidationTests
     }
 
     [Theory]
+    [InlineData("http://192.168.0.219", "http://192.168.0.219")]
+    [InlineData("http://10.0.5.10:5080", "http://10.0.5.10:5080")]
+    [InlineData("http://localhost:5080", "http://localhost:5080")]
+    [InlineData("https://nexmote.com", "https://nexmote.com")]
+    public void EnforceAgentServerUrl_PreservesConfiguredHosts(string input, string expected)
+    {
+        Assert.Equal(expected, NexMoteHttp.EnforceAgentServerUrl(input));
+    }
+
+    [Theory]
     [InlineData("192.168.0.219", "http://192.168.0.219")]
     [InlineData("http://192.168.0.219/", "http://192.168.0.219")]
     [InlineData("nexmote.com", "https://nexmote.com")]

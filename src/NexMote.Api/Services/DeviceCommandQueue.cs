@@ -7,6 +7,7 @@ namespace NexMote.Api.Services;
 public sealed class DeviceCommandQueue
 {
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
+    private static readonly TimeSpan DeliveryLease = TimeSpan.FromMinutes(2);
 
     public DeviceCommandQueue(IDbContextFactory<AppDbContext> dbFactory)
     {
@@ -49,6 +50,17 @@ public sealed class DeviceCommandQueue
     public AgentQueuedCommand? TakeNext(Guid deviceId)
     {
         using var db = _dbFactory.CreateDbContext();
+                var leaseCutoff = DateTimeOffset.UtcNow.Subtract(DeliveryLease);
+                db.Database.ExecuteSqlInterpolated($"""
+                        UPDATE DeviceCommands
+                        SET Status = {DeviceCommandStatuses.Queued}, DeliveredAt = NULL
+                        WHERE DeviceId = {deviceId}
+                            AND Status = {DeviceCommandStatuses.Delivered}
+                            AND CompletedAt IS NULL
+                            AND DeliveredAt IS NOT NULL
+                            AND DeliveredAt < {leaseCutoff};
+                        """);
+
         var entity = db.DeviceCommands
             .Where(c => c.DeviceId == deviceId && c.Status == DeviceCommandStatuses.Queued)
             .ToList()
@@ -60,20 +72,17 @@ public sealed class DeviceCommandQueue
             return null;
         }
 
-        entity.Status = DeviceCommandStatuses.Delivered;
-        entity.DeliveredAt = DateTimeOffset.UtcNow;
-        try
+        var deliveredAt = DateTimeOffset.UtcNow;
+        var claimedRows = db.Database.ExecuteSqlInterpolated($"""
+            UPDATE DeviceCommands
+            SET Status = {DeviceCommandStatuses.Delivered}, DeliveredAt = {deliveredAt}
+            WHERE Id = {entity.Id}
+              AND Status = {DeviceCommandStatuses.Queued}
+              AND CompletedAt IS NULL;
+            """);
+        if (claimedRows != 1)
         {
-            db.SaveChanges();
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            var idUpper = entity.Id.ToString().ToUpperInvariant();
-            var idLower = entity.Id.ToString().ToLowerInvariant();
-            var nowStr = DateTimeOffset.UtcNow.ToString("O");
-            db.Database.ExecuteSqlRaw(
-                "UPDATE DeviceCommands SET Status = 'Delivered', DeliveredAt = {0} WHERE Id = {1} OR Id = {2}",
-                nowStr, idUpper, idLower);
+            return null;
         }
 
         return new AgentQueuedCommand(
