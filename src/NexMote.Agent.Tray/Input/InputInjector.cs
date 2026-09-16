@@ -60,53 +60,58 @@ internal static class InputInjector
         var clampedX = Math.Clamp(globalX, virtualBounds.Left, virtualBounds.Right - 1);
         var clampedY = Math.Clamp(globalY, virtualBounds.Top, virtualBounds.Bottom - 1);
 
-        if (SetCursorPos(clampedX, clampedY))
+        // 1. Önce doğrudan SetCursorPos ile imleç koordinatlarını taşı
+        var setPosOk = SetCursorPos(clampedX, clampedY);
+        if (!setPosOk)
         {
-            // SetCursorPos doğrudan başarılı olduysa çakışan ve titremeye yol açan mükerrer SendInput çağrısı yapma!
-            return;
+            DesktopHelper.AttachToActiveDesktop(force: true);
+            setPosOk = SetCursorPos(clampedX, clampedY);
         }
 
-        // SetCursorPos başarısız olduysa (UAC veya masaüstü geçişi olabilir) masaüstünü zorla yenile ve tekrar dene
-        DesktopHelper.AttachToActiveDesktop(force: true);
-        if (SetCursorPos(clampedX, clampedY))
-        {
-            return;
-        }
+        // 2. Windows Kilit Ekranı (Winlogon / LogonUI) ve UAC pencereleri için:
+        // SetCursorPos imleç koordinatını güncellese bile Windows kilit perdesi (lock screen curtain)
+        // sadece donanımsal/sentetik MouseMove mesajlarıyla uyanır ve şifre kutusunu açar.
+        var desktopName = DesktopHelper.GetCurrentDesktopName();
+        var isSecureOrWinlogon = !string.IsNullOrEmpty(desktopName) && 
+            !string.Equals(desktopName, "Default", StringComparison.OrdinalIgnoreCase);
 
-        // SetCursorPos hala başarısızsa standart Win32 sanal masaüstü normalizasyon formülü ile SendInput'a düş
-        var vWidth = Math.Max(1, virtualBounds.Width);
-        var vHeight = Math.Max(1, virtualBounds.Height);
-        var normalizedX = Math.Clamp((int)Math.Round((double)(clampedX - virtualBounds.Left) * 65536.0 / vWidth), 0, 65535);
-        var normalizedY = Math.Clamp((int)Math.Round((double)(clampedY - virtualBounds.Top) * 65536.0 / vHeight), 0, 65535);
-
-        var input = new INPUT
+        if (!setPosOk || isSecureOrWinlogon)
         {
-            Type = InputMouse,
-            Data = new INPUTUNION
+            var vWidth = Math.Max(1, virtualBounds.Width);
+            var vHeight = Math.Max(1, virtualBounds.Height);
+            var normalizedX = Math.Clamp((int)Math.Round((double)(clampedX - virtualBounds.Left) * 65536.0 / vWidth), 0, 65535);
+            var normalizedY = Math.Clamp((int)Math.Round((double)(clampedY - virtualBounds.Top) * 65536.0 / vHeight), 0, 65535);
+
+            var input = new INPUT
             {
-                Mouse = new MOUSEINPUT
+                Type = InputMouse,
+                Data = new INPUTUNION
                 {
-                    Dx = normalizedX,
-                    Dy = normalizedY,
-                    Flags = MouseMove | MouseAbsolute | MouseVirtualDesk,
-                    MouseData = 0
+                    Mouse = new MOUSEINPUT
+                    {
+                        Dx = normalizedX,
+                        Dy = normalizedY,
+                        Flags = MouseMove | MouseAbsolute | MouseVirtualDesk,
+                        MouseData = 0
+                    }
                 }
-            }
-        };
+            };
 
-        if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
-        {
-            try
+            if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
             {
-                mouse_event(MouseMove | MouseAbsolute | MouseVirtualDesk, normalizedX, normalizedY, 0, UIntPtr.Zero);
+                try
+                {
+                    mouse_event(MouseMove | MouseAbsolute | MouseVirtualDesk, normalizedX, normalizedY, 0, UIntPtr.Zero);
+                }
+                catch { }
             }
-            catch { }
         }
     }
 
     public static void MouseButton(string? button, bool isDown)
     {
-        DesktopHelper.AttachToActiveDesktop(force: false);
+        // Tıklama olaylarında her zaman aktif masaüstünü doğrula (Kilit ekranı veya UAC geçişlerinde tıklamanın boşa düşmesini engelle)
+        DesktopHelper.AttachToActiveDesktop(force: true);
 
         var flags = (button?.ToLowerInvariant(), isDown) switch
         {
@@ -127,7 +132,7 @@ internal static class InputInjector
 
     public static void MouseWheel(int delta)
     {
-        DesktopHelper.AttachToActiveDesktop(force: false);
+        DesktopHelper.AttachToActiveDesktop(force: true);
 
         if (delta != 0)
         {
@@ -146,7 +151,8 @@ internal static class InputInjector
 
     public static void Keyboard(int keyCode, bool isDown)
     {
-        DesktopHelper.AttachToActiveDesktop(force: false);
+        // Tuş basımlarında her zaman aktif masaüstünü doğrula (Kilit ekranı şifre kutusu veya UAC pencereleri için)
+        DesktopHelper.AttachToActiveDesktop(force: true);
 
         if (keyCode is <= 0 or > ushort.MaxValue)
         {
@@ -176,14 +182,11 @@ internal static class InputInjector
         if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
         {
             DesktopHelper.AttachToActiveDesktop(force: true);
-            if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
+            try
             {
-                try
-                {
-                    keybd_event((byte)keyCode, (byte)scanCode, flags, UIntPtr.Zero);
-                }
-                catch { }
+                keybd_event((byte)keyCode, (byte)scanCode, flags, UIntPtr.Zero);
             }
+            catch { }
         }
     }
 
@@ -219,14 +222,11 @@ internal static class InputInjector
         if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
         {
             DesktopHelper.AttachToActiveDesktop(force: true);
-            if (SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 0)
+            try
             {
-                try
-                {
-                    mouse_event(flags, 0, 0, mouseData, UIntPtr.Zero);
-                }
-                catch { }
+                mouse_event(flags, 0, 0, mouseData, UIntPtr.Zero);
             }
+            catch { }
         }
     }
 

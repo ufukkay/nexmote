@@ -1,20 +1,20 @@
 ﻿{
-  "agent": {
-    "version": "0.8.2",
-    "releaseNotes": "NexMote Agent v0.8.2: Canli goruntu ve girdi iletim duzeltmeleri, SignalR WebSocket yetkilendirme optimizasyonu.",
-    "sha256": "C923AA783C7B28A8CE2C9C9B5FDC9D090E35C86679ECDEA52400867280262FFB",
-    "sizeBytes": 161247232
-  },
-  "technician": {
-    "version": "0.8.2",
-    "releaseNotes": "NexMote Teknisyen Konsolu v0.8.2: Canli masaustu akisi ve girdi stabilizasyonu.",
-    "sha256": "CF441D11286CBC1902D68D8C2C61F442FD188864BB199198A6098C902D30C687",
-    "sizeBytes": 63807488
-  },
-  "deployer": {
-    "version": "0.8.2",
-    "releaseNotes": "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
-    "sha256": "F7196E2ECBF3C381D1770ABF2252179B0019AD21C87BB7ECC63AB00915622979",
-    "sizeBytes": 63680512
-  }
+    "agent":  {
+                  "version":  "0.8.3",
+                  "releaseNotes":  "NexMote Agent v0.8.3: Kilit ekrani (Winlogon) fare ve klavye etkilesimi, UAC ve oturum girdi restorasyonu.",
+                  "sha256":  "2ECE0C00336240D9B522852C0DC512DA5EBED834590814B6401FF530B376F7FB",
+                  "sizeBytes":  161271808
+              },
+    "technician":  {
+                       "version":  "0.8.3",
+                       "releaseNotes":  "NexMote Teknisyen Konsolu v0.8.3: Kilit ekrani ve UAC girdi iletim optimizasyonu.",
+                       "sha256":  "1DB27282EAD2E855FDA2C83F9B6D5C21CE983A36273AE82600D6760355718571",
+                       "sizeBytes":  63827968
+                   },
+    "deployer":  {
+                     "version":  "0.8.3",
+                     "releaseNotes":  "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
+                     "sha256":  "FD9BBBEDE52CCB2AD81BD7E1AA49299473B38D3EEEF0D76D8FCD91DF955F2193",
+                     "sizeBytes":  63692800
+                 }
 }

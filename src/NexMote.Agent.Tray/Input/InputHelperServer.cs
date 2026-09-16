@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -13,6 +14,7 @@ namespace NexMote.Agent.Tray;
 /// <summary>
 /// SYSTEM yetkisinde çalışan ve Named Pipe ("NexMoteInputHelper_{SessionId}") üzerinden gelen girdi olaylarını dinleyerek
 /// UIPI kısıtlamasını aşan ve UAC onay pencerelerine tıklama yapılmasını sağlayan yerel sunucu.
+/// Kilit ekranı (Winlogon) ve UAC pencerelerinde de girdi enjeksiyonunu yürütür.
 /// </summary>
 internal static class InputHelperServer
 {
@@ -44,14 +46,16 @@ internal static class InputHelperServer
         var pipeName = $"NexMoteInputHelper_{sessionId}";
         var security = BuildPipeSecurity();
 
+        DesktopHelper.EnsureWindowStation();
+
         while (true)
         {
             try
             {
-                using var server = NamedPipeServerStreamAcl.Create(
+                var server = NamedPipeServerStreamAcl.Create(
                     pipeName,
                     PipeDirection.In,
-                    maxNumberOfServerInstances: 4,
+                    maxNumberOfServerInstances: 8,
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous,
                     inBufferSize: 4096,
@@ -60,11 +64,30 @@ internal static class InputHelperServer
 
                 server.WaitForConnection();
 
+                // Her bağlanan istemciyi (Tray canlı girdi veya Servis SAS sinyali) arka planda
+                // bağımsız bir iş parçacığında işle; böylece bir istemci boruyu açık tutarken diğerleri engellenmez.
+                _ = Task.Run(() => ProcessClient(server));
+            }
+            catch
+            {
+                Thread.Sleep(250);
+            }
+        }
+    }
+
+    private static void ProcessClient(NamedPipeServerStream server)
+    {
+        using (server)
+        {
+            try
+            {
                 if (!IsAllowedClient(server))
                 {
                     server.Disconnect();
-                    continue;
+                    return;
                 }
+
+                DesktopHelper.EnsureWindowStation();
 
                 using var reader = new StreamReader(server, Encoding.UTF8);
                 string? line;
@@ -75,7 +98,6 @@ internal static class InputHelperServer
             }
             catch
             {
-                Thread.Sleep(500);
             }
         }
     }
@@ -129,12 +151,13 @@ internal static class InputHelperServer
                 return false;
             }
 
-            // 1. İstemcinin aynı Windows Oturumunda (SessionId) çalıştığını doğrula (Madde 21)
+            // 1. İstemcinin aynı Windows Oturumunda (SessionId) veya Session 0 (Windows Servisi) çalıştığını doğrula
             var currentSessionId = Process.GetCurrentProcess().SessionId;
             try
             {
                 using var clientProc = Process.GetProcessById((int)pid);
-                if (clientProc.SessionId != currentSessionId)
+                // Aynı oturumdaki Tray uygulamasına VEYA Session 0'da çalışan Windows Servisine (Worker.cs SAS sinyali için) izin ver
+                if (clientProc.SessionId != currentSessionId && clientProc.SessionId != 0)
                 {
                     return false;
                 }
@@ -158,18 +181,18 @@ internal static class InputHelperServer
                 return false;
             }
 
-            // 2. İstemci dosya yolunun kendi yürütülebilir dosyamızla eşleştiğini doğrula
+            // 2. İstemci dosya yolunun kendi yürütülebilir dosyamızla veya Windows Servisiyle eşleştiğini doğrula
             var clientPath = sb.ToString();
-            var selfPath = Process.GetCurrentProcess().MainModule?.FileName;
-            if (string.IsNullOrEmpty(clientPath) || string.IsNullOrEmpty(selfPath) ||
-                !string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase))
+            var selfPath = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(clientPath) || string.IsNullOrEmpty(selfPath))
             {
                 return false;
             }
 
-            // 3. Kod imza (Authenticode) veya aynı güvenilir dosya yolu doğrulaması
-            // İstemci dosyası kendi yürütülebilir dosyamızla (selfPath) birebir aynıysa ve aynı interaktif oturumdaysa izin ver
-            if (string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase))
+            var clientFileName = Path.GetFileName(clientPath);
+            if (string.Equals(clientPath, selfPath, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(clientFileName, "NexMote.Agent.Tray.exe", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(clientFileName, "NexMote.Agent.Windows.exe", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

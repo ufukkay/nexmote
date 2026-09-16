@@ -47,11 +47,12 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        EnableDpiAwareness();
-        ApplicationConfiguration.Initialize();
-        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-
-        // SYSTEM yetkisinde çalışan Girdi Yardımcısı modu kontrolü (UAC tıklamaları için)
+        // SYSTEM yetkisinde çalışan Girdi Yardımcısı modu kontrolü (UAC tıklamaları ve kilit ekranı için)
+        // DİKKAT: ApplicationConfiguration.Initialize() veya WindowsFormsSynchronizationContext çağrısı
+        // iş parçacığı üzerinde gizli bir HWND (WinForms MarshalingControl) oluşturur.
+        // Windows çekirdeği (user32.dll), üzerinde pencere (HWND) bulunan bir iş parçacığında
+        // SetThreadDesktop çağrısını kesin olarak ERROR_BUSY (170) hatasıyla reddeder.
+        // Bu yüzden --input-helper, --system-session ve --send-sas-once modları en başta çalıştırılmalıdır.
         if (args.Length > 0 && string.Equals(args[0], "--input-helper", StringComparison.OrdinalIgnoreCase))
         {
             InputHelperServer.Run();
@@ -71,6 +72,10 @@ internal static class Program
             SasHelper.SendSas();
             return;
         }
+
+        EnableDpiAwareness();
+        ApplicationConfiguration.Initialize();
+        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
         var explicitShow = args.Any(a => string.Equals(a, "--show", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "--dashboard", StringComparison.OrdinalIgnoreCase));
         // AGENTS.md Madde 2: Ajan asla kendiliğinden Durum Panelini açmamalı; yalnızca kullanıcı bilerek

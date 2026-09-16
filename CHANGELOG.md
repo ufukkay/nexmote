@@ -24,7 +24,12 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
   - Sistemden bir teknisyeni kalıcı olarak silmeyi sağlayan `DELETE /api/admin/users/{id}` endpoint'i eklendi.
   - Yöneticinin kendi hesabını silememesi ve sistemdeki son aktif Admin'in silinememesi için güvenlik kısıtlamaları uygulandı.
   - Silinen kullanıcının oturumları (`UserSessions`) ve davetleri (`UserInvites`) güvenle temizlendi, denetim kaydı (`user.delete`) işlendi.
-  - Arayüzde kırmızı renkli `Trash2` butonu ve çift onaylı silme modalı sunuldu.
+- **Kilit Ekranı (Winlogon) Fare ve Klavye Giriş Restorasyonu (`DesktopHelper.cs`, `InputHelperServer.cs`, `InputInjector.cs`, `Program.cs`):**
+  - `Program.cs` üzerinde `--input-helper`, `--system-session` ve `--send-sas-once` modları `ApplicationConfiguration.Initialize()` ve `WindowsFormsSynchronizationContext` çağrılarının öncesine alındı; iş parçacığında oluşan gizli HWND penceresi nedeniyle Windows çekirdeğinin `SetThreadDesktop` çağrısını `ERROR_BUSY (170)` ile kalıcı reddetmesi sorunu giderildi.
+  - `DesktopHelper.AttachToActiveDesktop` üzerinde `Winlogon` ACL kurallarıyla uyumsuz olan `DESKTOP_ALL (0x020001FF)` maskesi yerine `MAXIMUM_ALLOWED (0x02000000)` kullanıldı; `Winlogon` masaüstü erişiminde `ERROR_ACCESS_DENIED (5)` hatası ve `Default` masaüstüne hatalı geri düşme önlendi.
+  - Masaüstü denetim aralığı 1 saniyeden 100ms seviyesine çekildi; fare tıklaması ve tuş basımlarında `force: true` ile aktif masaüstüne anında bağlanma garantilendi.
+  - `InputInjector.MoveMouse` içinde salt `SetCursorPos` koordinat taşımasının Windows 10/11 kilit perdesini uyandırmaması problemi, `SendInput` ve `mouse_event` ile sentetik `MouseMove` donanım olayları enjekte edilerek çözüldü.
+  - `InputHelperServer` üzerinde istemci bağlantıları arka planda asenkron işlenerek boru kilitlenmeleri önlendi; Windows Servisinin (Session 0) SAS ve kilit açma sinyalleri güvenlik doğrulamasından geçecek şekilde güncellendi.
 
 ---
 
