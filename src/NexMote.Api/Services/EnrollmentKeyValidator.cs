@@ -26,7 +26,7 @@ public sealed class EnrollmentKeyValidator
 
         var provided = enrollmentKey.Trim();
 
-        // 1. Sistem konfigürasyonu / ortam değişkeni kontrolü (systemd override.conf veya appsettings Enrollment:Key)
+        // 1. Sistem konfigürasyonu / ortam değişkeni kontrolü (Windows Ortam Değişkenleri veya appsettings Enrollment:Key)
         var configKey = _config["Enrollment:Key"];
         if (!string.IsNullOrWhiteSpace(configKey) && SecretEquals(configKey, provided))
         {

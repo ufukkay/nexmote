@@ -283,7 +283,7 @@ Playwright veya eşdeğer bir browser test paketi eklenmeli:
 
 - `README.md`, `AGENTS.md`, `RULES.md` ve gerçek authentication mimarisini hizala.
 - React 18/19, JWT/session token ve eski deployment bilgilerini güncelle.
-- IIS ve Linux deployment modellerini ayrı runbook'lar olarak tanımla.
+- IIS deployment modelini ve Windows Server runbook'unu tanımla.
 - Production release checklist ekle:
   - secret kontrolü,
   - TLS kontrolü,

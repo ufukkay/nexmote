@@ -61,7 +61,7 @@ if (builder.Environment.IsProduction())
             Console.ForegroundColor = ConsoleColor.Red;
             Console.Error.WriteLine("=== NEXMOTE BAŞLATMA HATASI: GÜVENLİ KONFİGÜRASYON EKSİK ===");
             foreach (var err in errors) Console.Error.WriteLine($"  ✗ {err}");
-            Console.Error.WriteLine("  Sırları /etc/systemd/system/nexmote.service.d/override.conf içinde Environment= satırları olarak tanımlayın.");
+            Console.Error.WriteLine("  Sırları appsettings.Production.json veya Windows Ortam Değişkenleri (Environment Variables) olarak tanımlayın.");
             Console.ResetColor();
             Environment.Exit(1);
         }

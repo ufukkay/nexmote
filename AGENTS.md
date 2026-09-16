@@ -190,7 +190,7 @@ NexMote/
    - SYSTEM yetkili `--input-helper` modülü, Windows `SoftwareSASGeneration` ve `PromptOnSecureDesktop=0` ile UAC pencerelerine teknisyenin güvenle tıklayabilmesini sağlar.
 4. **Denetim (Audit Logging):** Çalıştırılan tüm CMD ve PowerShell komutları, çıkış kodları, standart hata ve çıktı özetleriyle birlikte veritabanında `CommandAudits` tablosuna kaydedilir.
 
-SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
+SQLite veritabanı sunucuda `C:\inetpub\nexmote\nexmote.db` yolunda saklanır.
 
 ### 1. `Devices` Tablosu (Kayıtlı İstemci Cihazlar)
 | Kolon | Tip | Açıklama |
@@ -237,7 +237,7 @@ SQLite veritabanı sunucuda `/var/www/nexmote/nexmote.db` yolunda saklanır.
 - **Denetim logu (`ActivityLogs` tablosu, `GET /api/admin/audit-log`, Admin-only):** login başarı/başarısızlık, MFA challenge/başarısız, kullanıcı oluşturma/rol değişikliği/devre dışı bırakma, MFA aç/kapat gibi tüm insan-kullanıcı eylemlerini kaydeder — mevcut `CommandAudits` (cihazda çalıştırılan komutlar) tablosundan **ayrı** bir tablodur.
 - Agent'a özel route'lar (kendi token mekanizmalarını kullanır, insan kullanıcı auth'una hiç girmez): `POST /api/agents/enroll` (EnrollmentKey), `POST /api/agents/{id}/heartbeat` ve `POST /api/audit/commands` (cihaza özel AgentToken).
 - Herkese açık kalanlar: `GET /health`, `GET /api/downloads`, `GET /downloads/{file}`, `GET /api/updates/check` (agent/technician self-update akışı bunlara auth olmadan erişebilmeli).
-- **Sırlar asla repoya işlenmez.** `Enrollment:Key` ve bootstrap `Admin:Password`, sunucuda `/etc/systemd/system/nexmote.service.d/override.conf` içinde `Environment=` satırları olarak tutulur (bkz. `docs/server-credentials.md`). `Admin:ApiKey` **artık kullanılmıyor**, config'ten kaldırıldı.
+- **Sırlar asla repoya işlenmez.** `Enrollment:Key` ve bootstrap `Admin:Password`, sunucuda Windows Ortam Değişkenleri (`Environment Variables`) veya `appsettings.Production.json` içinde tutulur (bkz. `docs/server-credentials.md`). `Admin:ApiKey` **artık kullanılmıyor**, config'ten kaldırıldı.
 - **EF Core / SQLite tuzağı:** SQLite provider'ı `DateTimeOffset` kolonlarını ne `ORDER BY`'da ne de bazı bileşik `WHERE` ifadelerinde SQL'e çeviremiyor ("could not be translated" / "does not support expressions of type 'DateTimeOffset' in ORDER BY"). Bu yüzden oturum token doğrulaması önce `TokenHash` ile tek satır çekip geri kalan koşulları (`ExpiresAt`, `RevokedAt` vb.) C# tarafında kontrol ediyor; denetim logu sıralaması da `DeviceRegistry.List()` ile aynı desende önce `.ToList()` sonra client-side `OrderByDescending` yapıyor. Yeni bir DateTimeOffset alanına göre filtre/sıralama eklerken bu deseni takip edin, yoksa runtime'da 500 alırsınız.
 - **Kendi kendini kilitleme koruması:** `UserAuthService.SetActive`/`SetRole`, bir kullanıcının **kendi hesabını** devre dışı bırakmasını veya kendi rolünü Admin'den düşürmesini sunucu tarafında engeller (web UI'da da ilgili satırın kontrolleri devre dışı bırakılır). 2026-08-23'te canlıda gerçekten yaşanan bir kilitlenme olayından sonra eklendi — Kullanıcı Yönetimi tablosunda kendi satırı için ayırt edici bir koruma yoktu.
 
@@ -290,7 +290,7 @@ Yeni kullanıcı oluştururken artık iki seçenek var: eski "tek seferlik geçi
 | `POST` | `/api/agents/{id}/update` | **Bearer (AnyUser)** | Seçili (online) cihaza uzaktan sessiz Agent güncelleme sinyali gönderir |
 | `POST` | `/api/audit/commands` | AgentToken | Uzak komut çalıştırma denetim kaydı |
 
-> `POST /api/downloads/generate` kaldırıldı — sunucuda (Linux) PowerShell/WiX olmadığı için hiçbir zaman çalışmıyordu; MSI üretimi artık sadece yerel `scripts/package-windows.ps1` ile yapılıp sunucuya elle/scp ile yükleniyor.
+> `POST /api/downloads/generate` kaldırıldı — MSI üretimi yerel geliştirici ortamında `scripts/package-windows.ps1` ile WiX v5 üzerinden derlenip sunucuya `scripts/deploy-iis.ps1` ile dağıtılır.
 
 ---
 
@@ -334,7 +334,7 @@ Her üç client projesinin (`NexMote.Agent.Windows`, `NexMote.Agent.Tray`, `NexM
 2. **Teknisyen Self-Updater:** `🚀 Güncelleme Kontrol Et` butonu `/api/updates/check`'i sorgular, versiyonu gerçekten karşılaştırır (eskiden hep "güncelleme var" derdi), ve MSI'ı artık `Verb = "runas"` ile başlatır — kullanıcı zaten ekranın başında olduğu için çıkan UAC'ı hemen onaylayabilir.
 
 ### MSI dağıtım notu
-Sunucuda **iki** downloads klasörü var (`/var/www/nexmote/downloads` ve `/var/www/nexmote/wwwroot/downloads`) — `DownloadCatalog` hangisini kullanacağını dosya varlığına göre seçer, ama statik dosya sunumu (nginx/Kestrel `UseStaticFiles`) her zaman `wwwroot/downloads`'ı önceliklendirir. **MSI güncellemesi yaparken ikisine de kopyalamak gerekir**, yoksa `/api/downloads` metadata'sı ile gerçek indirilen dosya boyutu tutarsız olur.
+Sunucuda `C:\inetpub\nexmote\wwwroot\downloads` ve `downloads` klasörleri senkronize tutulur — `DownloadCatalog` dosya varlığını kontrol eder, IIS statik dosya sunumu (`UseStaticFiles`) `wwwroot/downloads` üzerinden paketleri istemcilere iletir. Dağıtım sırasında MSI paketleri her iki konuma da aktarılır.
 
 ### Sade Kurulum Akışı (Lisans Ekranı Atlanır, 2026-08-24)
 Üç MSI de (`Agent`, `Technician`, `Cleaner`) zaten `WixUI_Minimal` kullanıyordu (kurulum dizini/özellik seçim ekranları hiç yok) ama hâlâ **Welcome → Lisans Sözleşmesi (oku/kabul et + İleri) → İlerleme → Bitiş** olmak üzere 4 ekran ve 3 tıklama gerektiriyordu. `scripts/build-msi.ps1`'deki her üç `Generate-*Wxs` fonksiyonunun `<UI>` bloğuna şu satır eklendi:
@@ -470,8 +470,6 @@ powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 `
 Bu, `downloads/NexMote-Agent-Setup.msi`, `downloads/NexMote-Technician-Setup.msi` ve `downloads/versions.json` üretir.
 
 ### 5. Canlı Sunucuya Yayınlama (Deploy to Production)
-```powershell
-# 1. Linux x64 paketini derle
 ```powershell
 # 1. IIS sunucusuna tek tıkla otomatik dağıtım (React web ön yüz derleme + API publish + senkronizasyon):
 .\scripts\deploy-iis.ps1

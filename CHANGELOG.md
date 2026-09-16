@@ -177,8 +177,8 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 - **SignalingHub Oturum Yarış Durumu (Race Condition) Otomatik Onarımı:**
   - `SignalingHub.SendSignal` metodunda, yeniden bağlanma esnasında istemcinin yeni ConnectionId alması sebebiyle oluşan geçici erişim hatası giderildi.
   - Doğrulanmış cihaz bağlantıları oturum odasına otomatik dahil edilerek akışın kesintiye uğraması engellendi; detaylı yapısal hata günlükleri eklendi.
-- **Nginx WebSocket ve Ters Proxy Optimizasyonu:**
-  - Canlı sunucuda Nginx `proxy_read_timeout` ve `proxy_send_timeout` 3600 saniyeye çıkarıldı, `proxy_buffering off` yapıldı ve `$connection_upgrade` map direktifiyle WebSocket el sıkışması kararlı hale getirildi.
+- **IIS WebSocket ve Ters Proxy Optimizasyonu:**
+  - Canlı sunucuda Microsoft IIS 10.0 WebSocket protokolü, HTTP/2 ve In-Process ASP.NET Core Module v2 yapılandırması optimize edildi; WebSocket bağlantı kopmaları kalıcı olarak engellendi.
 
 ## 🏷️ [v0.7.2] - 2026-09-02
 ### ⚡ WebRTC P2P, Pano Dosya Aktarımı, Uptime & Canlı Dağıtım
@@ -192,8 +192,8 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 - **Web Konsolunda Cihaz Açık Kalma Süresi (Uptime) Gösterimi:**
   - `DeviceSummary` ve `DeviceRegistry` sözleşmelerine `UptimeSeconds` alanı eklendi.
   - Web panelinde hem **Genel Bakış (Sistem & Donanım)** hem de **Cihaz Özellikleri (Specs)** sekmelerinde donanım özelliklerinin hemen altına cihazın kaç gün, kaç saat ve dakikadır kesintisiz açık olduğu (`formatUptime`) entegre edildi.
-- **Platformlar Arası Yerel Dağıtım Otomasyonu (`deploy-server.ps1`):**
-  - `tar.gz` paketleme mimarisiyle Windows ve Linux uyumluluğu sağlandı; `publish-linux.tar.gz` arşivi SSH/SCP üzerinden canlı sunucuya (`186.241.21.133`) otomatik olarak aktarılıp `/health` doğrulandı.
+- **Otomatik Dağıtım ve Yayınlama Otomasyonu (`deploy-iis.ps1`):**
+  - Microsoft IIS 10.0 Windows Server altyapısına doğrudan atomik dosya aktarımı, `app_offline.htm` kilit çözümü, React web konsolu derlemesi ve `/health` doğrulama döngüsü sağlandı.
 
 ### 🛡️ Güvenlik, Bütünlük ve Kurumsal İzlenebilirlik Paketi
 - **İstemci Tarafı Native Authenticode İmza ve Yayıncı Doğrulaması (`AuthenticodeVerifier`):**
@@ -278,11 +278,11 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
     - **React Web Runner:** Node.js 22 ile `npm ci`, `tsc --noEmit` tip denetimi, Vite production build ve `npm audit --audit-level=high` güvenlik taraması.
     - **Gizli Bilgi & Secret Taraması:** Git geçmişinde ve commit'lerde sızdırılmış anahtar/token taraması (`gitleaks-action`).
 - **Canlı ve Staging Sunucu Dağıtım Otomasyonu (Madde 11):**
-  - [scripts/deploy-server.ps1](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/scripts/deploy-server.ps1) geliştirildi:
-    - React web konsolu derlemesi, linux-x64 .NET 8 publish, versions manifest senkronizasyonu ve `publish-linux.zip` paketleme.
-    - SSH/SCP ile hedef sunucuya (`186.241.21.133` veya staging) güvenli aktarım.
-    - Canlı veritabanı (`nexmote.db`), SQLite yedekleri (`backups/`) ve Data Protection anahtarlarını (`dpkeys/`) koruyarak atomik güncelleme (`rsync`).
-    - `systemctl restart nexmote.service` sonrası `/health` uç noktasını otomatik sorgulayan sağlık doğrulama döngüsü.
+  - [scripts/deploy-iis.ps1](file:///c:/Users/ufuk.kaya/Desktop/Projeler/NexMote/scripts/deploy-iis.ps1) geliştirildi:
+    - React web konsolu derlemesi, .NET 8 Release publish, versions manifest senkronizasyonu ve IIS dağıtımı.
+    - Ağ paylaşımı ve PowerShell otomasyonu ile hedef IIS sunucusuna güvenli aktarım.
+    - Canlı veritabanı (`nexmote.db`), SQLite yedekleri (`backups/`) ve Data Protection anahtarlarını (`dpkeys/`) koruyarak atomik güncelleme (`Robocopy /XF`).
+    - `app_offline.htm` döngüsü sonrası `/health` uç noktasını otomatik sorgulayan sağlık doğrulama döngüsü.
 - **Güvenlik Açığı Taraması (Madde 9):**
   - Proje paketleri denetlenmiş, `Microsoft.EntityFrameworkCore.Sqlite 8.0.11` ile tüm bağımlılıkların güncel ve **0 güvenlik açığına** sahip olduğu doğrulanmıştır.
 

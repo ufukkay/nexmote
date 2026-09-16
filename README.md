@@ -100,7 +100,7 @@ NexMote istemci mimarisinde aşağıdaki 4 kuraldan **asla taviz verilmez**:
 - **Gerçek Zamanlı İletişim:** SignalR WebSocket Hubs (`/hubs/signaling`)
 - **Veritabanı & ORM:** SQLite + Entity Framework Core 8
 - **Güvenlik & Auth:** Opaque session token + rol politikaları (Admin/Teknisyen), MFA/TOTP, cihaza özel 32-bayt kriptografik `AgentToken`, sunucu `EnrollmentKey`
-- **İşletim Sistemi Desteği:** Linux (Ubuntu 24.04 LTS / Systemd / Nginx) ve Windows Server
+- **İşletim Sistemi & Web Sunucusu:** Windows Server (Microsoft IIS 10.0)
 
 ### 💻 Frontend & Web Teknisyen Konsolu
 - **Framework & Dil:** React 19 + TypeScript + Vite
