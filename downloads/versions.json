@@ -1,20 +1,20 @@
 ﻿{
     "agent":  {
-                  "version":  "0.8.3",
-                  "releaseNotes":  "NexMote Agent v0.8.3: Kilit ekrani (Winlogon) fare ve klavye etkilesimi, UAC ve oturum girdi restorasyonu.",
-                  "sha256":  "3254C55637C19431D4911760D15095F6F40975ABED6CD6FE55DF60B98DAA73E2",
-                  "sizeBytes":  161255424
+                  "version":  "0.9.0",
+                  "releaseNotes":  "NexMote Agent v0.9.0: Kurumsal Profil Hiyerarsisi, Politika Mirasi, PBKDF2 Agent Koruma Sifresi, USB Denetimi ve Dinamik Gorsel Kimlik.",
+                  "sha256":  "8BE8B2472CEFE3B2F883FD0D73C6DB7E3F641552EC3646374140F9A42ED4CF8E",
+                  "sizeBytes":  161562624
               },
     "technician":  {
-                       "version":  "0.8.3",
-                       "releaseNotes":  "NexMote Teknisyen Konsolu v0.8.3: Kilit ekrani ve UAC girdi iletim optimizasyonu.",
-                       "sha256":  "ECF4B2F718902D9A0F9B2C63AFF52F401FCB48F5186A118121368660E28A9953",
-                       "sizeBytes":  63868928
+                       "version":  "0.9.0",
+                       "releaseNotes":  "NexMote Teknisyen Konsolu v0.9.0: Kurumsal Profil Hiyerarsisi ve USB/Baglanti Politikasi senkronizasyonu.",
+                       "sha256":  "BF9B631469857954102C470EB426C717E70A7043BC65F98FDCA24AB4BA7BA1A6",
+                       "sizeBytes":  63926272
                    },
     "deployer":  {
-                     "version":  "0.8.3",
+                     "version":  "0.9.0",
                      "releaseNotes":  "Yerel agdaki bilgisayarlara uzaktan yonetici bilgileriyle toplu ajan yukleme araci.",
-                     "sha256":  "E46DE1C5432F86F574BC63210B2FD317EC6D2E7FF43A493E40A8E7B4E18CC47F",
-                     "sizeBytes":  63696896
+                     "sha256":  "B8E593111672D1B3F30D0FC3EDBCE9E2A51C33F1184C1856767B5AF54A0F6A83",
+                     "sizeBytes":  63827968
                  }
 }

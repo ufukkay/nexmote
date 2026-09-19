@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  FolderTree,
   LogOut,
   Monitor,
   ScrollText,
@@ -109,14 +110,27 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
               <li>
                 <button
                   type="button"
+                  className={`sidebar-item ${view === "profiles" ? "active" : ""}`}
+                  onClick={() => setView("profiles")}
+                  title="Hiyerarşik Kurumsal Profiller ve Politika Yönetimi"
+                >
+                  <span className="sidebar-item-icon">
+                    <FolderTree size={16} />
+                  </span>
+                  <span className="sidebar-item-label">Profiller &amp; Politikalar</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
                   className={`sidebar-item ${view === "device-groups" ? "active" : ""}`}
                   onClick={() => setView("device-groups")}
-                  title="Şirketler, Departmanlar ve Güvenlik Politikaları"
+                  title="Şirketler, Departmanlar ve Gruplar"
                 >
                   <span className="sidebar-item-icon">
                     <Building2 size={16} />
                   </span>
-                  <span className="sidebar-item-label">Şirketler &amp; Güvenlik</span>
+                  <span className="sidebar-item-label">Şirket Grupları</span>
                   <span className="sidebar-item-badge">{rootCompanies.length}</span>
                 </button>
               </li>

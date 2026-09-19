@@ -15,7 +15,8 @@ import {
   XCircle,
   Copy,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  FolderTree
 } from "lucide-react";
 
 interface AuditLogViewProps {
@@ -92,6 +93,51 @@ const ACTION_METADATA: Record<string, { label: string; color: string; icon: Reac
     label: "Davet Gönderildi",
     color: "rgba(99, 102, 241, 0.15)",
     icon: <Mail size={14} className="text-indigo-500" />
+  },
+  "profile.create": {
+    label: "Profil Oluşturuldu",
+    color: "rgba(16, 185, 129, 0.15)",
+    icon: <FolderTree size={14} className="text-emerald-500" />
+  },
+  "profile.update": {
+    label: "Politika Güncellendi",
+    color: "rgba(59, 130, 246, 0.15)",
+    icon: <Settings size={14} className="text-blue-500" />
+  },
+  "profile.delete": {
+    label: "Profil Silindi",
+    color: "rgba(239, 68, 68, 0.15)",
+    icon: <Trash2 size={14} className="text-red-500" />
+  },
+  "profile.clone": {
+    label: "Profil Kopyalandı",
+    color: "rgba(168, 85, 247, 0.15)",
+    icon: <Copy size={14} className="text-purple-500" />
+  },
+  "profile.apply_now": {
+    label: "Politika Zorlandı",
+    color: "rgba(245, 158, 11, 0.15)",
+    icon: <FolderTree size={14} className="text-amber-500" />
+  },
+  "device.assign_profile": {
+    label: "Profile Atandı",
+    color: "rgba(14, 165, 233, 0.15)",
+    icon: <Monitor size={14} className="text-sky-500" />
+  },
+  "device.set_override": {
+    label: "Özel Politika",
+    color: "rgba(245, 158, 11, 0.15)",
+    icon: <ShieldAlert size={14} className="text-amber-500" />
+  },
+  "remote_access.consent_accepted": {
+    label: "Bağlantı Onaylandı",
+    color: "rgba(16, 185, 129, 0.15)",
+    icon: <CheckCircle2 size={14} className="text-emerald-500" />
+  },
+  "remote_access.consent_denied": {
+    label: "Bağlantı Reddedildi",
+    color: "rgba(239, 68, 68, 0.15)",
+    icon: <XCircle size={14} className="text-red-500" />
   }
 };
 

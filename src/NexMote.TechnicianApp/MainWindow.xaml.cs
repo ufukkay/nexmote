@@ -66,6 +66,7 @@ public partial class MainWindow : Window
     private double _smoothedLatencyMs;
     private readonly Queue<double> _latencySamples = new();
     private readonly Dictionary<int, int> _framesPerDisplay = new();
+    private readonly Dictionary<int, long> _lastRenderedSequencePerDisplay = new();
     private bool _isFullScreen;
     private WindowStyle _previousWindowStyle;
     private WindowState _previousWindowState;
@@ -274,6 +275,7 @@ public partial class MainWindow : Window
         _displayImages.Clear();
         _displayMeta.Clear();
         _lastRemotePointPerDisplay.Clear();
+        _lastRenderedSequencePerDisplay.Clear();
         IslandDisplaysContextMenu.Items.Clear();
         _selectedDisplayIndex = 0;
         PlaceholderPanel.Visibility = Visibility.Visible;
@@ -304,6 +306,35 @@ public partial class MainWindow : Window
             return false;
         }
 
+        return ProcessDeepLink(launchUri);
+    }
+
+    /// <summary>
+    /// Tek örnek (single-instance) yönlendirmesiyle çalışan mevcut pencereye ikinci bir "nexmote://" bağlantı
+    /// isteği iletildiğinde çağrılır (bkz. <see cref="App"/>'teki adlandırılmış boru sunucusu). Yeni bir
+    /// süreç/pencere AÇMAZ; mevcut oturumu (zaten kimlik doğrulanmış) kullanarak doğrudan yeni cihaza bağlanır.
+    /// Bu, teknisyenin web panelinden art arda "Bağlan"a bastığında hem mükerrer pencere açılmasını hem de
+    /// her seferinde tekrar şifre sorulmasını (her yeni sürecin kendi ayrı/az önce yazılmış DPAPI token
+    /// dosyasını okumaya çalışırken oluşan yarış durumunu) önler.
+    /// </summary>
+    public void HandleForwardedDeepLink(string launchUri)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+            Activate();
+            Topmost = true;
+            Topmost = false;
+
+            ProcessDeepLink(launchUri);
+        });
+    }
+
+    private bool ProcessDeepLink(string launchUri)
+    {
         try
         {
             if (!DeepLinkValidator.TryValidate(launchUri, _serverUrl, out var link, out var error, out var requiresConfirmation))
@@ -1485,6 +1516,22 @@ public partial class MainWindow : Window
 
     private void ApplyRenderedFrame(MultiScreenFrame frame, BitmapImage bitmap, int payloadByteCount)
     {
+        // Sırasız (out-of-order) kare koruması: kareler hem WebRTC P2P hem de SignalR röle yolundan
+        // gönderiliyor (her kare tek bir yoldan, ama yol yol farklı gecikmeye sahip olabiliyor). Bu yüzden
+        // daha YENİ bir kare (P2P, hızlı) daha ESKİ bir kareden (röle, yavaş) ÖNCE ekrana varabiliyor —
+        // sonra geç kalan eski kare çizilince ekran "geri sıçrıyor" (pencereyi aşağı indirip bırakınca
+        // yukarı zıplayıp tekrar aşağı inmesi). Aynı ekran için daha önce çizilmiş bir Sequence'tan eski/
+        // eşit bir kare asla ekrana basılmaz.
+        if (frame.Sequence > 0)
+        {
+            var lastRendered = _lastRenderedSequencePerDisplay.TryGetValue(frame.DisplayIndex, out var seq) ? seq : 0;
+            if (frame.Sequence <= lastRendered)
+            {
+                return;
+            }
+            _lastRenderedSequencePerDisplay[frame.DisplayIndex] = frame.Sequence;
+        }
+
         if (!_displayImages.TryGetValue(frame.DisplayIndex, out var image) || image is null)
         {
             if (_displayImages.Count == 1 && frame.DisplayIndex == 0)
@@ -2108,7 +2155,18 @@ public partial class MainWindow : Window
 
     private async Task SendRemoteInputAsync(RemoteInputEvent input)
     {
-        if (_sessionId is null || _connection?.State != HubConnectionState.Connected)
+        if (_sessionId is null)
+        {
+            return;
+        }
+
+        // Hub (SignalR) sadece sinyalleşme/röle kanalıdır. Hub kısa süreliğine "Reconnecting" durumundayken
+        // bile WebRTC P2P veri kanalı çoğu zaman hâlâ açıktır. Yalnızca Hub durumuna bakıp erken çıkmak,
+        // P2P üzerinden gayet iletilebilecek fare tıklamalarını/tuş basımlarını sessizce çöpe atıyor ve
+        // "mouse/klavye düzgün çalışmıyor" şikayetinin başlıca sebebiydi.
+        var hubConnected = _connection?.State == HubConnectionState.Connected;
+        var p2pAvailable = _webRtc?.IsConnected == true;
+        if (!hubConnected && !p2pAvailable)
         {
             return;
         }
@@ -2122,9 +2180,9 @@ public partial class MainWindow : Window
             };
             var payload = JsonSerializer.Serialize(input);
             var sentViaP2p = _webRtc?.SendData("input", payload) ?? false;
-            if (!sentViaP2p)
+            if (!sentViaP2p && hubConnected)
             {
-                await _connection.InvokeAsync("SendSignal", _sessionId.Value, "remote-input", payload);
+                await _connection!.InvokeAsync("SendSignal", _sessionId.Value, "remote-input", payload);
             }
             _remoteInputSentCount++;
             if (_remoteInputSentCount <= 3 || _remoteInputSentCount % 100 == 0)

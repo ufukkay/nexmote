@@ -145,6 +145,20 @@ public static class DatabaseInitializer
             );
             CREATE INDEX IF NOT EXISTS ""IX_DeviceGroups_ParentGroupId"" ON ""DeviceGroups"" (""ParentGroupId"");
 
+            -- 7b. Hiyerarşik Kurumsal Profiller ve Modüler Politikalar
+            CREATE TABLE IF NOT EXISTS ""Profiles"" (
+                ""Id"" TEXT NOT NULL CONSTRAINT ""PK_Profiles"" PRIMARY KEY,
+                ""Name"" TEXT NOT NULL,
+                ""ParentProfileId"" TEXT NULL,
+                ""Type"" TEXT NOT NULL DEFAULT 'Company',
+                ""PolicyVersion"" INTEGER NOT NULL DEFAULT 1,
+                ""PolicyConfigJson"" TEXT NOT NULL DEFAULT '',
+                ""EnrollmentKey"" TEXT NULL,
+                ""CreatedAt"" TEXT NOT NULL,
+                ""UpdatedAt"" TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ""IX_Profiles_ParentProfileId"" ON ""Profiles"" (""ParentProfileId"");
+
             -- 8. Cihaz Uyarıları
             CREATE TABLE IF NOT EXISTS ""DeviceAlerts"" (
                 ""Id"" TEXT NOT NULL CONSTRAINT ""PK_DeviceAlerts"" PRIMARY KEY,
@@ -233,7 +247,16 @@ public static class DatabaseInitializer
             @"ALTER TABLE ""RemoteSessions"" ADD COLUMN ""ActiveTokenHash"" TEXT;",
             @"ALTER TABLE ""RemoteSessions"" ADD COLUMN ""ActivatedAt"" TEXT;",
             @"ALTER TABLE ""Users"" ADD COLUMN ""MfaFailedAttempts"" INTEGER NOT NULL DEFAULT 0;",
-            @"ALTER TABLE ""Users"" ADD COLUMN ""MfaLockedUntil"" TEXT;"
+            @"ALTER TABLE ""Users"" ADD COLUMN ""MfaLockedUntil"" TEXT;",
+            @"ALTER TABLE ""Devices"" ADD COLUMN ""ProfileId"" TEXT;",
+            @"ALTER TABLE ""Devices"" ADD COLUMN ""HasCustomOverride"" INTEGER NOT NULL DEFAULT 0;",
+            @"ALTER TABLE ""Devices"" ADD COLUMN ""CustomOverrideJson"" TEXT;",
+            @"ALTER TABLE ""Devices"" ADD COLUMN ""AppliedPolicyVersion"" INTEGER NOT NULL DEFAULT 0;",
+            @"ALTER TABLE ""Devices"" ADD COLUMN ""LastPolicySyncedAt"" TEXT;",
+            @"ALTER TABLE ""ActivityLogs"" ADD COLUMN ""ProfileId"" TEXT;",
+            @"ALTER TABLE ""ActivityLogs"" ADD COLUMN ""DeviceId"" TEXT;",
+            @"ALTER TABLE ""ActivityLogs"" ADD COLUMN ""OldValueJson"" TEXT;",
+            @"ALTER TABLE ""ActivityLogs"" ADD COLUMN ""NewValueJson"" TEXT;"
         };
 
         foreach (var statement in alterStatements)

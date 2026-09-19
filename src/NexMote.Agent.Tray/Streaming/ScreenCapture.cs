@@ -210,7 +210,7 @@ internal static class ScreenCapture
 
     public static int GetDisplayCount() => Math.Max(1, Screen.AllScreens.Length);
 
-    private static int GetWindowsDisplayIndex(Screen screen, int fallback)
+    internal static int GetWindowsDisplayIndex(Screen screen, int fallback)
     {
         try
         {
@@ -251,6 +251,30 @@ internal static class ScreenCapture
 
     public static Rectangle GetDisplayBoundsPublic(int displayIndex) => GetDisplayBounds(displayIndex);
 
+    /// <summary>
+    /// Verilen displayIndex'e (GetInfo/GetDisplayBoundsPublic ile aynı numaralandırma) karşılık gelen
+    /// Win32 aygıt adını (ör. "\\.\DISPLAY1") döner. DXGI çıktı numaralandırması (adapter.EnumOutputs sırası)
+    /// WinForms Screen.AllScreens sırasıyla AYNI OLMAK ZORUNDA DEĞİL — çoklu monitörlü makinelerde ikisi
+    /// farklı fiziksel ekranlara denk gelebilir. DxgiScreenCapture bu adı DXGI OutputDescription.DeviceName
+    /// ile eşleştirerek doğru fiziksel monitörü yakaladığından emin olur (aksi halde fare imleci yanlış
+    /// monitöre / yanlış konuma denk gelir).
+    /// </summary>
+    internal static string? GetDeviceNameForDisplayIndex(int displayIndex)
+    {
+        var screens = Screen.AllScreens;
+        for (int i = 0; i < screens.Length; i++)
+        {
+            var s = screens[i];
+            if (GetWindowsDisplayIndex(s, i + 1) == displayIndex)
+            {
+                return s.DeviceName;
+            }
+        }
+
+        var idx = displayIndex - 1;
+        return idx >= 0 && idx < screens.Length ? screens[idx].DeviceName : null;
+    }
+
     private static Rectangle GetDisplayBounds(int activeDisplayIndex)
     {
         DesktopHelper.AttachToActiveDesktop();
@@ -286,20 +310,46 @@ internal static class ScreenCapture
         DesktopHelper.AttachToActiveDesktop();
 
         // 1. Önce DirectX 11 DXGI GPU Yakalama Motorunu Dene (Sıfır CPU, 60 FPS, Donanım VRAM)
-        try
+        // DİKKAT: Yalnızca "Default" masaüstündeyken. Kilit ekranı/Winlogon/UAC güvenli masaüstüne
+        // geçildiğinde bazı GPU sürücüleri (ör. Intel igd10um64xe.DLL) DXGI Desktop Duplication
+        // çağrısında NATIVE bir erişim ihlali (access violation) fırlatıyor — bu, .NET try/catch ile
+        // YAKALANAMAZ ve tüm Tray sürecini (dolayısıyla o anki uzak oturumun girdi/WebRTC hattını) anında
+        // çökertiyor. Üretimde gerçek bir cihazda tam olarak bu şekilde gözlemlendi (APPCRASH,
+        // igd10um64xe.DLL, 0xc0000005). Bu yüzden güvenli/kilit masaüstünde DXGI'ye hiç girmiyoruz,
+        // doğrudan daha az performanslı ama çökme riski taşımayan GDI+ yoluna düşüyoruz.
+        var desktopName = DesktopHelper.GetCurrentDesktopName();
+        var isDefaultDesktop = string.IsNullOrEmpty(desktopName) || string.Equals(desktopName, "Default", StringComparison.OrdinalIgnoreCase);
+
+        // Kalıcı devre kesici: bu makinede DXGI daha önce (bu veya önceki bir çalıştırmada) çökmeye
+        // sebep olduysa, masaüstü durumundan bağımsız olarak DXGI'ye HİÇ girilmez — doğrudan GDI+'ya düşülür.
+        if (isDefaultDesktop && DxgiScreenCapture.IsPermanentlyDisabled())
         {
-            var dxgiFrame = DxgiScreenCapture.Instance.CaptureJpegBase64(displayIndex, quality, forceSend, out var capturedWithDxgi);
-            if (capturedWithDxgi)
+            isDefaultDesktop = false;
+        }
+
+        if (isDefaultDesktop)
+        {
+            try
             {
-                if (dxgiFrame is not null || !forceSend)
+                var dxgiFrame = DxgiScreenCapture.Instance.CaptureJpegBase64(displayIndex, quality, forceSend, out var capturedWithDxgi);
+                if (capturedWithDxgi)
                 {
-                    return dxgiFrame;
+                    if (dxgiFrame is not null || !forceSend)
+                    {
+                        return dxgiFrame;
+                    }
                 }
             }
+            catch
+            {
+                // DXGI istisnası durumunda sessizce GDI+ motoruna düş
+            }
         }
-        catch
+        else
         {
-            // DXGI istisnası durumunda sessizce GDI+ motoruna düş
+            // Güvenli/kilit masaüstündeyken DXGI context'ini serbest bırak: bir sonraki Default masaüstü
+            // dönüşünde bayat (stale) bir duplication nesnesiyle karşılaşmayalım.
+            try { DxgiScreenCapture.Instance.Reset(); } catch { }
         }
 
         // 2. DXGI desteklenmiyorsa veya masaüstü geçişi (UAC/Winlogon) varsa GDI+ Fallback devreye girer

@@ -80,7 +80,7 @@ public sealed class RemoteSessionRegistry
             return null;
         }
 
-        return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt);
+        return new RemoteSessionRecord(session.Id, session.DeviceId, string.Empty, session.ExpiresAt, session.OwnerUserId);
     }
 
     public RemoteSessionRecord? Activate(Guid sessionId, string token, Guid? ownerUserId = null)
@@ -124,7 +124,7 @@ public sealed class RemoteSessionRegistry
         db.SaveChanges();
         transaction.Commit();
 
-        return new RemoteSessionRecord(session.Id, session.DeviceId, activeToken, session.ExpiresAt);
+        return new RemoteSessionRecord(session.Id, session.DeviceId, activeToken, session.ExpiresAt, session.OwnerUserId);
     }
 
     public void Expire(Guid sessionId)
@@ -158,4 +158,4 @@ public sealed class RemoteSessionRegistry
 /// <summary>
 /// Bellek içi ve oturum sorgularında kullanılan aktif oturum kaydı.
 /// </summary>
-public sealed record RemoteSessionRecord(Guid Id, Guid DeviceId, string Token, DateTimeOffset ExpiresAt);
+public sealed record RemoteSessionRecord(Guid Id, Guid DeviceId, string Token, DateTimeOffset ExpiresAt, Guid? OwnerUserId = null);

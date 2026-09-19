@@ -65,6 +65,11 @@ public sealed class AppDbContext : DbContext
     public DbSet<SecurityProfileEntity> SecurityProfiles => Set<SecurityProfileEntity>();
 
     /// <summary>
+    /// Hiyerarşik kurumsal profiller ve modüler politika ağacı (Şirket > Departman > Lokasyon) tablosu.
+    /// </summary>
+    public DbSet<ProfileEntity> Profiles => Set<ProfileEntity>();
+
+    /// <summary>
     /// Cihazları organize etmek için kullanılan iç içe (şirket/departman) gruplar tablosu.
     /// </summary>
     public DbSet<DeviceGroupEntity> DeviceGroups => Set<DeviceGroupEntity>();
@@ -154,6 +159,13 @@ public sealed class AppDbContext : DbContext
         modelBuilder.Entity<SecurityProfileEntity>(entity =>
         {
             entity.HasKey(p => p.Id);
+        });
+
+        // Hiyerarşik profil birincil anahtar ve üst profil indeksi
+        modelBuilder.Entity<ProfileEntity>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => p.ParentProfileId);
         });
 
         // Cihaz grubu birincil anahtar ve üst grup indeksi
@@ -265,6 +277,21 @@ public sealed class DeviceEntity
 
     /// <summary>Cihazın organizasyon grubu (şirket/departman) — null ise gruplanmamış.</summary>
     public Guid? GroupId { get; set; }
+
+    /// <summary>Cihazın bağlı olduğu hiyerarşik kurumsal profil düğümü.</summary>
+    public Guid? ProfileId { get; set; }
+
+    /// <summary>Cihaza özel override politikası etkin mi.</summary>
+    public bool HasCustomOverride { get; set; }
+
+    /// <summary>Cihaz bazlı özel override politikası (JSON dokümanı).</summary>
+    public string? CustomOverrideJson { get; set; }
+
+    /// <summary>Cihazda şu an fiilen çalışan ve uygulanan politika sürümü.</summary>
+    public int AppliedPolicyVersion { get; set; }
+
+    /// <summary>Son politika senkronizasyon zamanı.</summary>
+    public DateTimeOffset? LastPolicySyncedAt { get; set; }
 }
 
 /// <summary>
@@ -678,6 +705,18 @@ public sealed class ActivityLogEntity
     [MaxLength(128)]
     public string? TargetId { get; set; }
 
+    /// <summary>Eylemin ilişkili olduğu kurumsal profil (varsa).</summary>
+    public Guid? ProfileId { get; set; }
+
+    /// <summary>Eylemin ilişkili olduğu hedef cihaz (varsa).</summary>
+    public Guid? DeviceId { get; set; }
+
+    /// <summary>Değişiklik öncesi eski değer / konfigürasyon (JSON).</summary>
+    public string? OldValueJson { get; set; }
+
+    /// <summary>Değişiklik sonrası yeni değer / konfigürasyon (JSON).</summary>
+    public string? NewValueJson { get; set; }
+
     /// <summary>Eylemle ilgili ek bağlam (JSON).</summary>
     public string? DetailsJson { get; set; }
 
@@ -805,4 +844,40 @@ public sealed class DeviceGroupEntity
     public string? EnrollmentKey { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Hiyerarşik kurumsal profil (Şirket > Departman > Lokasyon) ve modüler politika varlığı.
+/// </summary>
+public sealed class ProfileEntity
+{
+    [Key]
+    public Guid Id { get; set; }
+
+    [Required]
+    [MaxLength(128)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Üst profil (şirket/departman hiyerarşisi) — null ise en üst seviye kök profil.</summary>
+    public Guid? ParentProfileId { get; set; }
+
+    /// <summary>"Company" | "Department" | "Location" | "Custom".</summary>
+    [Required]
+    [MaxLength(32)]
+    public string Type { get; set; } = ProfileTypes.Company;
+
+    /// <summary>Profilde veya politikasında yapılan her değişiklikte artırılan tekil versiyon numarası.</summary>
+    public int PolicyVersion { get; set; } = 1;
+
+    /// <summary>Bu profil seviyesinde açıkça ezilen/tanımlanan ayarların JSON dokümanı (<see cref="PolicyDocument"/>).</summary>
+    [Required]
+    public string PolicyConfigJson { get; set; } = "{}";
+
+    /// <summary>Bu profile doğrudan ajan kaydetmek için opsiyonel benzersiz kurulum anahtarı.</summary>
+    [MaxLength(128)]
+    public string? EnrollmentKey { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

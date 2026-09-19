@@ -35,6 +35,7 @@ try
     builder.Services.AddHttpClient<AgentClient>()
         .ConfigurePrimaryHttpMessageHandler(() => NexMote.Shared.Network.NexMoteHttp.CreateHandler());
     builder.Services.AddSingleton<DeviceIdentityStore>();
+    builder.Services.AddSingleton<NexMote.Agent.Windows.Security.PolicyManager>();
     builder.Services.AddHostedService<Worker>();
 
     using var host = builder.Build();

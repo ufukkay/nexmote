@@ -4,7 +4,39 @@ Bu doküman, **NexMote** projesinde yayınlanan her sürümdeki yeni özellikler
 
 ---
 
-## 🏷️ [v0.8.3] - 2026-09-15 (Güncel Sürüm)
+## 🏷️ [v0.9.0] - 2026-09-19
+### 🏢 Kurumsal Profil Hiyerarşisi, Politika Mirası, Agent Koruma Şifresi, USB Kontrolü & Dinamik Görsel Kimlik
+- **Hiyerarşik Profil Ağacı ve Politika Mirası (Policy Inheritance & Deterministic Override):**
+  - Çok katmanlı kurumsal organizasyon yapısı (`Şirket -> Departman -> Lokasyon -> Cihazlar`) geliştirildi (`ProfileEntity`, `ProfileService.cs`, `PolicyContracts.cs`).
+  - Üst şirketten alt departmanlara doğru miras alma (`MergeWithChild`), çocuk profillerde üst ayarları geçersiz kılabilme (override) ve cihaz bazlı özel politika tanımlayabilme yeteneği sağlandı.
+  - Hiyerarşi döngü engellemesi (`Cycle Detection`), profil klonlama, versiyonlama ve anlık politika yayma (`apply-now`) mimarisi kuruldu.
+- **Dinamik Agent Görsel Kimliği (Corporate Branding & White-label):**
+  - Her profil için özelleştirilebilir Agent Görüntüleme Adı (`agentName`), Şirket Adı (`companyName`), Kurumsal Logo/İkon URL'i, Destek İletişim Bilgileri ve Özel Tepsi Simgesi desteği eklendi.
+  - Agent açılışta veya politika güncellemesi aldığında tepsi arayüzünü, başlıkları ve yardım pencerelerini sunucudan veya yerel önbellekten aldığı marka kimliğiyle dinamik günceller.
+- **Agent Koruma Şifresi (Tamper Protection & Offline PBKDF2 Verification):**
+  - Profil bazında tanımlanabilen Agent Koruma Şifresi mimarisi oluşturuldu (`ProtectionPasswordHelper.cs`).
+  - Şifreler cihazlarda asla açık metin tutulmaz; ASP.NET Identity uyumlu PBKDF2 (HMAC-SHA256, 10.000 iterasyon) ile kriptografik olarak hashlenir.
+  - Kullanıcı Agent tepsisinden "Çıkış" yapmak veya servisi durdurmak istediğinde koruma şifresi sorulur. Cihaz çevrimiçiyse sunucu API'si üzerinden, internet kesintisi anında ise yerel disk önbelleğindeki hash üzerinden doğrulanır.
+- **3 Modlu Uzaktan Bağlantı Politikası (Remote Access Modes):**
+  - `unattended`: Sunucu, kiosk ve IT cihazları için kullanıcı onayı aramaksızın doğrudan bağlantı.
+  - `prompt`: Kullanıcı ekranına özel zaman aşımı ve varsayılan eylem (reddet/kabul) ile interaktif onay penceresi fırlatma.
+  - `auto_accept_idle`: Win32 `GetLastInputInfo` API'si ile oturum boşta kalma süresini (`5`, `10`, `15`, `30` dk) ölçerek kullanıcı masada yoksa otomatik kabul eden, masadaysa onay soran hibrit mod.
+- **Çekirdek Düzeyinde USB Cihaz Kontrolü (Registry-Level USB Policy Enforcer):**
+  - `allow_all`, `block_all`, `block_storage`, `read_only` (StorageDevicePolicies WriteProtect) ve `whitelist` (VID/PID ve seri numarası) modları eklendi (`UsbPolicyEnforcer.cs`).
+  - Politika değişiklikleri Agent veya bilgisayar yeniden başlatılmadan Windows Kayıt Defteri ve Plug and Play katmanına anında uygulanır.
+- **Merkezi Politika Senkronizasyonu & Çevrimdışı Dayanıklılık (Offline Resilience):**
+  - Agent yerel politikayı `%ProgramData%\NexMote\Agent\policy-cache.json` konumunda saklar. Ağ veya sunucu kopsa bile en son geçerli güvenlik ve USB kuralları fail-closed mantığıyla kesintisiz korunur.
+  - Agent periyodik olarak ve canlı sinyalle (`policy-updated.signal`) politikayı sunucuyla senkronize eder; uygulanan sürümü API'ye onaylar (`policy-ack`).
+- **Web Yönetim Konsolu "Profiller" Modülü & Toplu Cihaz Atama:**
+  - Modern SaaS temalı `ProfilesView.tsx` ekranı geliştirildi: Hiyerarşik ağaç görünümü, politika editörü sekmeleri (Marka, Koruma Şifresi, Uzaktan Bağlantı, USB Kontrolü, Efektif Politika Matrisi, Bağlı Cihazlar).
+  - Cihazlar listesinde çoklu seçim ile 50+ cihazı tek seferde bir profile atayabilen Toplu Atama Modalı eklendi.
+  - Cihaz detaylarında ve listesinde profil adı, özel override rozeti ve "Policy Outdated" uyarı rozetleri sağlandı.
+- **Genişletilmiş Güvenlik Denetim İzi (Audit Log):**
+  - Profil oluşturma, güncelleme, silme, klonlama, USB politika değişiklikleri, cihaz atamaları ve uzaktan onay hareketleri `ActivityLogs` tablosunda denetlenebilir kılındı.
+
+---
+
+## 🏷️ [v0.8.3] - 2026-09-15
 ### 📧 SMTP Dayanıklılığı ve Gelişmiş Teknisyen Yönetimi (Şifre Değiştirme, MFA Kaldırma, Teknisyen Silme)
 - **SMTP Bağlantı ve Sertifika İyileştirmeleri (`EmailService.cs`, `SettingsEndpoints.cs`):**
   - Hostinger, cPanel, dahili posta sunucuları ve self-signed sertifikalarda yaşanan `RemoteCertificateNameMismatch` ve SSL handshake kesintilerini önlemek amacıyla toleranslı sertifika denetimi (`ServerCertificateValidationCallback`) sağlandı.

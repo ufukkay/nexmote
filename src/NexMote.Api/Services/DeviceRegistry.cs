@@ -234,11 +234,12 @@ public sealed class DeviceRegistry
     public IReadOnlyCollection<DeviceSummary> List()
     {
         using var db = _dbFactory.CreateDbContext();
+        var profileNames = db.Profiles.AsNoTracking().ToDictionary(p => p.Id, p => p.Name);
         return db.Devices
             .AsNoTracking()
             .ToList()
             .OrderByDescending(device => device.LastSeenAt)
-            .Select(device => ToSummary(device))
+            .Select(device => ToSummary(device, profileNames))
             .ToArray();
     }
 
@@ -307,10 +308,11 @@ public sealed class DeviceRegistry
         var filteredCount = allMatching.Count;
         var totalPages = Math.Max(1, (int)Math.Ceiling(filteredCount / (double)pageSize));
 
+        var profileNames = db.Profiles.AsNoTracking().ToDictionary(p => p.Id, p => p.Name);
         var pagedItems = sorted
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .Select(d => ToSummary(d))
+            .Select(d => ToSummary(d, profileNames))
             .ToList();
 
         return new PagedResult<DeviceSummary>(
@@ -331,7 +333,13 @@ public sealed class DeviceRegistry
     {
         using var db = _dbFactory.CreateDbContext();
         var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == deviceId);
-        return device is null ? null : ToSummary(device);
+        if (device is null) return null;
+        string? profileName = null;
+        if (device.ProfileId.HasValue)
+        {
+            profileName = db.Profiles.AsNoTracking().Where(p => p.Id == device.ProfileId.Value).Select(p => p.Name).FirstOrDefault();
+        }
+        return ToSummary(device, null, profileName);
     }
 
     /// <summary>
@@ -339,9 +347,7 @@ public sealed class DeviceRegistry
     /// </summary>
     public DeviceSummary? GetById(Guid id)
     {
-        using var db = _dbFactory.CreateDbContext();
-        var device = db.Devices.AsNoTracking().FirstOrDefault(d => d.Id == id);
-        return device is null ? null : ToSummary(device);
+        return Get(id);
     }
 
     /// <summary>
@@ -453,7 +459,10 @@ public sealed class DeviceRegistry
     /// <summary>
     /// Veritabanı DeviceEntity nesnesini DTO olan DeviceSummary nesnesine dönüştürür.
     /// </summary>
-    private static DeviceSummary ToSummary(DeviceEntity device)
+    private static DeviceSummary ToSummary(
+        DeviceEntity device,
+        Dictionary<Guid, string>? profileNames = null,
+        string? singleProfileName = null)
     {
         List<NetworkAdapterInfo>? adapters = null;
         if (!string.IsNullOrWhiteSpace(device.NetworkAdaptersJson))
@@ -495,6 +504,12 @@ public sealed class DeviceRegistry
             catch { }
         }
 
+        string? pName = singleProfileName;
+        if (pName == null && device.ProfileId.HasValue && profileNames != null)
+        {
+            profileNames.TryGetValue(device.ProfileId.Value, out pName);
+        }
+
         return new DeviceSummary(
             device.Id,
             device.DeviceName,
@@ -517,7 +532,12 @@ public sealed class DeviceRegistry
             device.SerialNumber,
             hardware,
             device.SecurityProfileId,
-            device.GroupId);
+            device.GroupId,
+            device.ProfileId,
+            pName,
+            device.HasCustomOverride,
+            device.AppliedPolicyVersion,
+            device.LastPolicySyncedAt);
     }
 
     private static string? CleanUserName(string? rawUser)

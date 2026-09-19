@@ -34,6 +34,65 @@ internal sealed class DxgiScreenCapture : IDisposable
     private readonly Dictionary<int, DisplayDuplicationContext> _contexts = new();
     private bool _isDisposed;
 
+    // DİKKAT: Bazı GPU sürücülerinde (üretimde kanıtlandı: Intel Iris Xe igd10um64xe.DLL 32.0.101.7088)
+    // DXGI Desktop Duplication, sadece kilit ekranı geçişlerinde değil GENEL kullanımda da native bir
+    // erişim ihlaliyle (AccessViolation, C# try/catch ile YAKALANAMAZ) tüm Tray sürecini çökertebiliyor.
+    // Süreç zaten öldüğü için ÇÖKME SONRASI kendi içinde bunu tespit edip devre dışı bırakamaz — bu yüzden
+    // diske yazılan basit bir "art arda çökme sayacı" ile kalıcı devre kesici (circuit breaker) uyguluyoruz:
+    // bu süreç DXGI'yi denemeden HEMEN ÖNCE sayaç diske yazılıyor; eğer süreç anormal şekilde ölürse bir
+    // sonraki başlatmada sayaç hâlâ yüksek görülür ve DXGI o andan itibaren KALICI olarak (GDI+'ya
+    // düşülerek) devre dışı bırakılır. Süreç DXGI ile 3 dakika sorunsuz çalışırsa sayaç sıfırlanır.
+    private const int MaxCrashStrikesBeforeDisable = 1;
+    private static readonly string HealthFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent", "dxgi-health.txt");
+    private static bool? _permanentlyDisabled;
+    private static System.Threading.Timer? _stabilityTimer;
+
+    /// <summary>
+    /// DXGI'nin bu makinede kalıcı olarak devre dışı bırakılıp bırakılmadığını döner (bkz. yukarıdaki açıklama).
+    /// İlk çağrıda henüz devre dışı değilse "bu oturumda deneniyor" sayacını diske yazar ve bir kararlılık
+    /// zamanlayıcısı kurar; sonucu süreç ömrü boyunca önbelleğe alır (tek seferlik I/O).
+    /// </summary>
+    public static bool IsPermanentlyDisabled()
+    {
+        if (_permanentlyDisabled.HasValue)
+        {
+            return _permanentlyDisabled.Value;
+        }
+
+        try
+        {
+            var dir = Path.GetDirectoryName(HealthFilePath)!;
+            Directory.CreateDirectory(dir);
+
+            var strikes = 0;
+            if (File.Exists(HealthFilePath) && int.TryParse(File.ReadAllText(HealthFilePath).Trim(), out var parsed))
+            {
+                strikes = parsed;
+            }
+
+            if (strikes >= MaxCrashStrikesBeforeDisable)
+            {
+                _permanentlyDisabled = true;
+                return true;
+            }
+
+            File.WriteAllText(HealthFilePath, (strikes + 1).ToString());
+            _permanentlyDisabled = false;
+
+            _stabilityTimer = new System.Threading.Timer(_ =>
+            {
+                try { File.WriteAllText(HealthFilePath, "0"); } catch { }
+            }, null, TimeSpan.FromMinutes(3), System.Threading.Timeout.InfiniteTimeSpan);
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
     {
@@ -159,18 +218,71 @@ internal sealed class DxgiScreenCapture : IDisposable
                 using var dxgiDevice = device.QueryInterface<IDXGIDevice>();
                 using var adapter = dxgiDevice.GetAdapter();
 
-                // Windows Display Index to 0-based adapter output index
+                // DİKKAT: DXGI'nin çıktı numaralandırma sırası (adapter.EnumOutputs) ile WinForms'un
+                // Screen.AllScreens sırası AYNI FİZİKSEL MONİTÖRE denk gelmek ZORUNDA DEĞİL. Çoklu
+                // monitörlü makinelerde ham index eşleştirmesi (displayIndex - 1) yanlış monitörü
+                // yakalayabiliyordu — bu da teknisyenin gönderdiği fare koordinatının (doğru monitörün
+                // JPEG kareler üzerinden hesaplanan) InputInjector tarafında YANLIŞ monitörün/offsetin
+                // sınırlarına göre yorumlanmasına, yani "burada tıklıyorum, imleç orada beliriyor"
+                // şikayetine yol açıyordu. Bunun yerine Win32 aygıt adını (ör. "\\.\DISPLAY1") eşleştirip
+                // doğru çıktıyı seçiyoruz; eşleşme bulunamazsa eski davranışa (index) düşüyoruz.
                 var targetOutputIdx = Math.Max(0, displayIndex - 1);
-                var enumRes = adapter.EnumOutputs(targetOutputIdx, out var output);
-                if (!enumRes.Success || output is null)
+
+                // Tek monitörlü makinelerde (Screen.AllScreens.Length <= 1) belirsizlik zaten yok —
+                // index 0 her zaman TEK çıktıya denk gelir. Bu durumda aşağıdaki aygıt adı eşleştirme
+                // döngüsüne HİÇ girmiyoruz: üretimde bu döngü (COM/DXGI enumOutputs çağrılarını normalden
+                // daha sık ve farklı bir örüntüyle tetikleyerek) bazı Intel iGPU sürücülerinde
+                // NexMote.Agent.Tray.exe sürecinin kendisinde erişim ihlaline (AccessViolation) yol açtı —
+                // özellikle kilit ekranı açılış/kapanış geçişlerinde art arda tetiklendiğinde. Çoklu
+                // monitörde gerçek fayda sağladığı için döngü tamamen kaldırılmadı, ama tek monitörde
+                // (en yaygın durum) sıfır fayda + kanıtlanmış çökme riski taşıdığından atlanıyor.
+                IDXGIOutput? output = null;
+                var expectedDeviceName = Screen.AllScreens.Length > 1
+                    ? NexMote.Agent.Tray.ScreenCapture.GetDeviceNameForDisplayIndex(displayIndex)
+                    : null;
+
+                if (!string.IsNullOrEmpty(expectedDeviceName))
                 {
-                    // Fallback to output 0
-                    enumRes = adapter.EnumOutputs(0, out output);
+                    try
+                    {
+                        for (int i = 0; i < 16; i++)
+                        {
+                            var res = adapter.EnumOutputs(i, out var candidate);
+                            if (!res.Success || candidate is null)
+                            {
+                                break;
+                            }
+
+                            if (string.Equals(candidate.Description.DeviceName, expectedDeviceName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                output = candidate;
+                                break;
+                            }
+
+                            candidate.Dispose();
+                        }
+                    }
+                    catch
+                    {
+                        // Aygıt adı eşleştirmesi herhangi bir nedenle patlarsa aşağıdaki kanıtlanmış
+                        // index tabanlı yola sessizce düş.
+                        output = null;
+                    }
+                }
+
+                if (output is null)
+                {
+                    // Aygıt adı eşleşmesi bulunamadı (tek monitör, sürücü kısıtlaması vb.): eski index tabanlı yola düş
+                    var enumRes = adapter.EnumOutputs(targetOutputIdx, out output);
                     if (!enumRes.Success || output is null)
                     {
-                        context.Dispose();
-                        device.Dispose();
-                        return null;
+                        enumRes = adapter.EnumOutputs(0, out output);
+                        if (!enumRes.Success || output is null)
+                        {
+                            context.Dispose();
+                            device.Dispose();
+                            return null;
+                        }
                     }
                 }
 
@@ -197,9 +309,15 @@ internal sealed class DxgiScreenCapture : IDisposable
                     var height = desc.ModeDescription.Height;
                     var bounds = new Rectangle(0, 0, width, height);
 
-                    // Multi-monitor coordinate detection from Screen.AllScreens
+                    // Multi-monitor koordinat tespiti: gerçekte yakalanan DXGI çıktısının aygıt adına göre
+                    // eşleşen Screen'i bul (index tabanlı değil — bkz. yukarıdaki açıklama).
                     var screens = Screen.AllScreens;
-                    if (targetOutputIdx < screens.Length)
+                    var matchedScreen = Array.Find(screens, s => string.Equals(s.DeviceName, output.Description.DeviceName, StringComparison.OrdinalIgnoreCase));
+                    if (matchedScreen is not null)
+                    {
+                        bounds = matchedScreen.Bounds;
+                    }
+                    else if (targetOutputIdx < screens.Length)
                     {
                         bounds = screens[targetOutputIdx].Bounds;
                     }

@@ -105,7 +105,8 @@ public sealed record ConnectionConsentRequest(
     Guid SessionId,
     string TechnicianName,
     int TimeoutSeconds,
-    string DefaultAction);
+    string DefaultAction,
+    int? IdleTimeoutMinutes = null);
 
 /// <summary>Hedef bilgisayardaki kullanıcının bağlantı onayına verdiği yanıt sinyali.</summary>
 public sealed record ConnectionConsentResponse(

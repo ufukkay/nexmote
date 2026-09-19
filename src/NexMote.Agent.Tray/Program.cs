@@ -47,6 +47,17 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // DİKKAT: DPI farkındalığı (Per-Monitor V2) tüm modlarda (özellikle --input-helper) en başta
+        // ayarlanmalı. Bu çağrı pencere/HWND oluşturmaz, bu yüzden aşağıdaki SetThreadDesktop/HWND
+        // kısıtlamasıyla çakışmaz. Eskiden yalnızca normal Tray (GUI) modunda çağrılıyordu; bu yüzden
+        // --input-helper süreci (fare/klavye enjeksiyonunu fiilen yapan SYSTEM yetkili yardımcı) DPI
+        // farkındalığı OLMADAN çalışıyor, GetSystemMetrics/Screen.Bounds gibi çağrılar ölçeklenmiş
+        // (ör. %125 DPI'da fiziksel 1920x1080 yerine mantıksal ~1536x864) koordinatlar döndürüyordu.
+        // DXGI ise her zaman GERÇEK fiziksel piksel çözünürlüğünü kullandığından, teknisyenin gönderdiği
+        // (fiziksel piksel bazlı) fare koordinatı bu farklı ölçekte yanlış yorumlanıp imleç yanlış
+        // noktaya gidiyordu.
+        EnableDpiAwareness();
+
         // SYSTEM yetkisinde çalışan Girdi Yardımcısı modu kontrolü (UAC tıklamaları ve kilit ekranı için)
         // DİKKAT: ApplicationConfiguration.Initialize() veya WindowsFormsSynchronizationContext çağrısı
         // iş parçacığı üzerinde gizli bir HWND (WinForms MarshalingControl) oluşturur.
@@ -56,6 +67,14 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "--input-helper", StringComparison.OrdinalIgnoreCase))
         {
             InputHelperServer.Run();
+            return;
+        }
+
+        // Ekran yakalamayı (DXGI/GDI+) ana Tray sürecinden izole eden alt süreç modu.
+        // --input-helper ile aynı gerekçeyle en başta ve WinForms başlatılmadan çalıştırılır.
+        if (args.Length > 0 && string.Equals(args[0], "--capture-helper", StringComparison.OrdinalIgnoreCase))
+        {
+            CaptureHelperServer.Run(args);
             return;
         }
 
@@ -73,7 +92,6 @@ internal static class Program
             return;
         }
 
-        EnableDpiAwareness();
         ApplicationConfiguration.Initialize();
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
@@ -230,6 +248,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private string _serverUrl;
     private readonly string _versionStr;
     private AgentSecurityProfileResponse? _securityProfile;
+    private PolicyDocument? _policyDocument;
     private readonly System.Windows.Forms.Timer _securityProfileTimer;
     private Icon? _customTrayIcon;
 
@@ -367,26 +386,68 @@ internal sealed class TrayApplicationContext : ApplicationContext
         return menu;
     }
 
-    /// <summary>Sunucudan bu cihaza atanmış güvenlik profilini çeker, branding/menüyü UI thread'inde günceller.</summary>
+    /// <summary>Sunucudan veya yerel disk önbelleğinden güvenlik ve kurumsal kimlik politikasını çeker, UI'ı günceller.</summary>
     private async Task RefreshSecurityProfileAsync()
     {
         try
         {
+            // 1. Önce yerel disk önbelleğini (%ProgramData%\NexMote\Agent\policy-cache.json) oku (offline resilience)
+            var commonDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexMote", "Agent");
+            var cacheFile = Path.Combine(commonDir, "policy-cache.json");
+            if (File.Exists(cacheFile))
+            {
+                try
+                {
+                    var json = File.ReadAllText(cacheFile);
+                    var doc = System.Text.Json.JsonSerializer.Deserialize<PolicyDocument>(json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (doc != null)
+                    {
+                        _policyDocument = doc;
+                    }
+                }
+                catch { }
+            }
+
             var identity = DeviceIdentityFile.Load();
             if (identity is null) return;
 
             using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
-            var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security-profile?agentToken={Uri.EscapeDataString(identity.AgentToken)}";
-            var response = await http.GetAsync(url);
-            if (!response.IsSuccessStatusCode) return;
 
-            var profile = await response.Content.ReadFromJsonAsync<AgentSecurityProfileResponse>();
-            if (profile is null) return;
+            // 2. Merkezi hiyerarşik politika endpoint'ini sorgula
+            try
+            {
+                var policyUrl = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/policy?agentToken={Uri.EscapeDataString(identity.AgentToken)}";
+                var policyResponse = await http.GetAsync(policyUrl);
+                if (policyResponse.IsSuccessStatusCode)
+                {
+                    var doc = await policyResponse.Content.ReadFromJsonAsync<PolicyDocument>();
+                    if (doc != null)
+                    {
+                        _policyDocument = doc;
+                    }
+                }
+            }
+            catch { }
+
+            // 3. Geriye dönük güvenlik profili sorgusu
+            try
+            {
+                var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security-profile?agentToken={Uri.EscapeDataString(identity.AgentToken)}";
+                var response = await http.GetAsync(url);
+                if (response.IsSuccessStatusCode)
+                {
+                    var profile = await response.Content.ReadFromJsonAsync<AgentSecurityProfileResponse>();
+                    if (profile != null)
+                    {
+                        _securityProfile = profile;
+                        _streamer.SetSecurityProfile(profile);
+                    }
+                }
+            }
+            catch { }
 
             _uiContext?.Post(_ =>
             {
-                _securityProfile = profile;
-                _streamer.SetSecurityProfile(profile);
                 ApplyBranding();
                 if (_notifyIcon != null)
                 {
@@ -396,7 +457,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         catch
         {
-            // Sessizce geç — profil bilgisi al(a)mazsak varsayılan (kısıtlamasız) davranışla devam edilir.
+            // Sessizce geç
         }
     }
 
@@ -405,16 +466,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (_notifyIcon is null) return;
 
-        var displayName = string.IsNullOrWhiteSpace(_securityProfile?.AgentDisplayName)
-            ? "NexMote Agent"
-            : _securityProfile!.AgentDisplayName!;
-        var text = $"{displayName} v{_versionStr}";
+        var displayName = !string.IsNullOrWhiteSpace(_policyDocument?.Branding?.AgentDisplayName)
+            ? _policyDocument.Branding.AgentDisplayName
+            : (!string.IsNullOrWhiteSpace(_securityProfile?.AgentDisplayName)
+                ? _securityProfile!.AgentDisplayName!
+                : "NexMote Agent");
+
+        var company = _policyDocument?.Branding?.CompanyName;
+        var text = !string.IsNullOrWhiteSpace(company)
+            ? $"{displayName} ({company}) v{_versionStr}"
+            : $"{displayName} v{_versionStr}";
+
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
 
+        var iconBase64 = _policyDocument?.Branding?.TrayIconBase64 ??
+                         _policyDocument?.Branding?.LogoBase64 ??
+                         _securityProfile?.IconBase64;
+
         var previousCustomIcon = _customTrayIcon;
-        if (!string.IsNullOrWhiteSpace(_securityProfile?.IconBase64))
+        if (!string.IsNullOrWhiteSpace(iconBase64))
         {
-            var decoded = DecodeIconFromBase64(_securityProfile!.IconBase64!);
+            var decoded = DecodeIconFromBase64(iconBase64);
             if (decoded is not null)
             {
                 _customTrayIcon = decoded;
@@ -452,12 +524,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    /// <summary>Durum Paneli, profil şifre istiyorsa önce sunucuda doğrulanmadan açılmaz.</summary>
+    private bool IsProtectionActive()
+    {
+        if (_policyDocument?.Protection?.AgentProtection == true) return true;
+        if (_policyDocument?.Protection?.AllowAgentExit == false) return true;
+        if (_securityProfile?.RequirePassword == true) return true;
+        return false;
+    }
+
+    /// <summary>Durum Paneli, profil şifre istiyorsa önce doğrulanmadan açılmaz.</summary>
     private async void ShowDashboardGated()
     {
-        if (_securityProfile?.RequirePassword == true)
+        if (IsProtectionActive())
         {
-            if (!await VerifyActionPasswordAsync("dashboard", "Durum Paneli", "Durum Panelini açmak için şifre girin:"))
+            if (!await VerifyActionPasswordAsync("dashboard", "Durum Paneli", "Durum Panelini açmak için koruma şifresini girin:"))
             {
                 return;
             }
@@ -466,12 +546,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ShowDashboard();
     }
 
-    /// <summary>Ajanı kapatma (tray'den çıkış), profil şifre istiyorsa önce sunucuda doğrulanmadan yapılmaz.</summary>
+    /// <summary>Ajanı kapatma (tray'den çıkış), profil şifre istiyorsa önce doğrulanmadan yapılmaz.</summary>
     private async void RequestExit()
     {
-        if (_securityProfile?.RequirePassword == true)
+        if (IsProtectionActive())
         {
-            if (!await VerifyActionPasswordAsync("exit", "Ajanı Kapat", "Ajanı kapatmak için şifre girin:"))
+            if (!await VerifyActionPasswordAsync("exit", "Ajanı Kapat", "Ajanı kapatmak için koruma şifresini girin:"))
             {
                 return;
             }
@@ -481,8 +561,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Kullanıcıdan şifre ister, sunucuda doğrular (<c>/api/agents/{id}/security/verify</c>). Yanlış şifrede
-    /// tekrar sorar; ağ/sunucu hatasında veya kullanıcı iptal ederse false döner (fail-closed).
+    /// Kullanıcıdan şifre ister, sunucuda ve gerekirse önbellekteki PBKDF2 hash ile offline doğrular.
     /// </summary>
     private async Task<bool> VerifyActionPasswordAsync(string action, string title, string message)
     {
@@ -501,11 +580,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             try
             {
                 using var http = NexMoteHttp.CreateClient(TimeSpan.FromSeconds(10));
-                var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/security/verify";
-                var response = await http.PostAsJsonAsync(url, new SecurityVerifyRequest(identity.AgentToken, action, password));
+                var url = $"{_serverUrl.TrimEnd('/')}/api/agents/{identity.DeviceId}/verify-protection";
+                var response = await http.PostAsJsonAsync(url, new VerifyProtectionRequest(identity.AgentToken, action, password));
                 if (response.IsSuccessStatusCode)
                 {
-                    var result = await response.Content.ReadFromJsonAsync<SecurityVerifyResponse>();
+                    var result = await response.Content.ReadFromJsonAsync<VerifyProtectionResponse>();
                     if (result?.Ok == true)
                     {
                         return true;
@@ -514,7 +593,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             catch
             {
-                MessageBox.Show("Sunucuya bağlanılamadı, işlem yapılamıyor.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // Ağ veya sunucu hatasında: Önbellekteki PBKDF2 hash ile offline doğrula
+                if (!string.IsNullOrWhiteSpace(_policyDocument?.Protection?.ProtectionPasswordHash))
+                {
+                    if (NexMote.Shared.Security.ProtectionPasswordHelper.Verify(_policyDocument.Protection.ProtectionPasswordHash, password))
+                    {
+                        return true;
+                    }
+                    MessageBox.Show("Şifre hatalı.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+
+                MessageBox.Show("Sunucuya bağlanılamadı ve geçerli çevrimdışı parola bulunamadı.", "NexMote", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
 

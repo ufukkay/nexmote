@@ -129,15 +129,12 @@ internal static class DesktopHelper
             {
                 var newDesktopName = GetDesktopName(hDesktop);
 
-                // Zaten aynı ada sahip masaüstüne bağlıysak mükerrer SetThreadDesktop çağrısı yapma
-                if (!string.IsNullOrEmpty(newDesktopName) &&
-                    string.Equals(newDesktopName, _currentDesktopName, StringComparison.OrdinalIgnoreCase) &&
-                    _currentThreadDesktop != IntPtr.Zero)
-                {
-                    CloseDesktop(hDesktop);
-                    return;
-                }
-
+                // DİKKAT: Burada isim eşleşmesine bakıp SetThreadDesktop çağrısını ATLAMIYORUZ.
+                // Winlogon güvenli masaüstü (SAS / kimlik bilgisi istemi) her tetiklendiğinde AYNI isimle
+                // ("Winlogon") YENİ bir masaüstü nesnesi olarak yeniden oluşturulur. İsme göre atlama yapılırsa
+                // iş parçacığı önceki (artık yok edilmiş) nesneye takılı kalır ve SendInput/SetCursorPos
+                // sessizce hiçbir yere gitmez — kilit ekranında "bir kere çalışıp sonra tepkisiz kalma" bu
+                // yüzden oluşuyordu. SetThreadDesktop çağrısı ucuzdur; her seferinde tazelemek güvenlidir.
                 if (SetThreadDesktop(hDesktop))
                 {
                     if (_currentThreadDesktop != IntPtr.Zero)

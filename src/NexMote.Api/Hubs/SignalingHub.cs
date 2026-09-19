@@ -18,6 +18,8 @@ public sealed class SignalingHub : Hub
     private readonly DeviceCommandManager _commandManager;
     private readonly DeviceCommandQueue _commandQueue;
     private readonly SecurityProfileService _securityProfiles;
+    private readonly ProfileService _profileService;
+    private readonly UserAuthService _activity;
     private readonly ILogger<SignalingHub> _logger;
 
     /// <summary>
@@ -56,6 +58,8 @@ public sealed class SignalingHub : Hub
         DeviceCommandManager commandManager,
         DeviceCommandQueue commandQueue,
         SecurityProfileService securityProfiles,
+        ProfileService profileService,
+        UserAuthService activity,
         ILogger<SignalingHub> logger)
     {
         _sessions = sessions;
@@ -64,6 +68,8 @@ public sealed class SignalingHub : Hub
         _commandManager = commandManager;
         _commandQueue = commandQueue;
         _securityProfiles = securityProfiles;
+        _profileService = profileService;
+        _activity = activity;
         _logger = logger;
     }
 
@@ -93,37 +99,43 @@ public sealed class SignalingHub : Hub
         _access.Add(Context.ConnectionId, sessionId, SignalSessionRole.Technician);
         _logger.LogInformation("[Signaling] Teknisyen katildi: SessionId={SessionId}, Hedef Cihaz={DeviceId}, ConnectionId={ConnectionId}", sessionId, session.DeviceId, Context.ConnectionId);
 
-        // Cihazın etkin güvenlik profilini kontrol et
-        var profile = _securityProfiles.GetEffectiveProfile(session.DeviceId);
+        // Cihazın hiyerarşik etkin güvenlik politikasını kontrol et
+        var policy = _profileService.GetEffectivePolicyForDevice(session.DeviceId);
         var consentRequired = false;
 
-        if (profile is not null)
+        var mode = policy.RemoteAccess?.Mode ?? RemoteAccessModes.Unattended;
+        if (string.Equals(mode, RemoteAccessModes.Prompt, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(mode, SecurityProfileConstants.ConsentAlwaysPrompt, StringComparison.OrdinalIgnoreCase))
         {
-            if (string.Equals(profile.ConsentMode, SecurityProfileConstants.ConsentAlwaysPrompt, StringComparison.OrdinalIgnoreCase))
+            consentRequired = true;
+        }
+        else if (string.Equals(mode, RemoteAccessModes.AutoAcceptIfIdle, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(mode, SecurityProfileConstants.ConsentPromptIfActive, StringComparison.OrdinalIgnoreCase))
+        {
+            var device = _devices.Get(session.DeviceId);
+            if (!string.IsNullOrWhiteSpace(device?.ActiveUser) && !device.ActiveUser.EndsWith("$", StringComparison.OrdinalIgnoreCase))
             {
                 consentRequired = true;
             }
-            else if (string.Equals(profile.ConsentMode, SecurityProfileConstants.ConsentPromptIfActive, StringComparison.OrdinalIgnoreCase))
-            {
-                var device = _devices.Get(session.DeviceId);
-                if (!string.IsNullOrWhiteSpace(device?.ActiveUser) && !device.ActiveUser.EndsWith("$", StringComparison.OrdinalIgnoreCase))
-                {
-                    consentRequired = true;
-                }
-            }
         }
 
-        if (consentRequired && profile is not null)
+        if (consentRequired)
         {
-            _logger.LogInformation("[Signaling] Baglanti onayi gerekiyor: SessionId={SessionId}, TargetDeviceId={DeviceId}", sessionId, session.DeviceId);
+            _logger.LogInformation("[Signaling] Baglanti onayi gerekiyor: SessionId={SessionId}, TargetDeviceId={DeviceId}, Mode={Mode}", sessionId, session.DeviceId, mode);
             // Teknisyene onay beklendiğini bildir
             await Clients.Group($"session:{sessionId}").SendAsync("SessionStatusChanged", "waiting_consent");
             // Hedef cihaza onay diyaloğunu açma sinyali ilet
+            var timeoutSeconds = (policy.RemoteAccess?.PromptTimeoutSeconds > 0 ? policy.RemoteAccess.PromptTimeoutSeconds.Value : 30);
+            var defaultAction = policy.RemoteAccess?.DefaultAction ?? SecurityProfileConstants.ActionDeny;
+            var idleThreshold = string.Equals(mode, RemoteAccessModes.AutoAcceptIfIdle, StringComparison.OrdinalIgnoreCase)
+                ? (policy.RemoteAccess?.IdleTimeoutMinutes ?? 5)
+                : (int?)null;
             var consentRequest = new ConnectionConsentRequest(
                 sessionId,
-                "NexMote Teknisyeni",
-                profile.ConsentTimeoutSeconds,
-                profile.ConsentDefaultAction);
+                "IT Destek Birimi",
+                timeoutSeconds,
+                defaultAction,
+                idleThreshold);
             await Clients.Group($"device:{session.DeviceId}").SendAsync("PromptConsentRequested", consentRequest);
         }
         else
@@ -152,6 +164,15 @@ public sealed class SignalingHub : Hub
         if (session is null || session.DeviceId != deviceId)
         {
             return;
+        }
+
+        if (session.OwnerUserId.HasValue)
+        {
+            _activity.LogActivity(session.OwnerUserId.Value,
+                accepted ? "remote_access.consent_accepted" : "remote_access.consent_denied",
+                "Device", deviceId.ToString(),
+                $"Uzak bağlantı onayı {(accepted ? "kabul edildi" : "reddedildi: " + reason)}",
+                null, success: accepted);
         }
 
         if (accepted)

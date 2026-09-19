@@ -6,7 +6,8 @@ export type View =
   | "users"
   | "audit-log"
   | "security-profiles"
-  | "device-groups";
+  | "device-groups"
+  | "profiles";
 
 export type StatusFilter = "all" | "online" | "offline" | "warning";
 

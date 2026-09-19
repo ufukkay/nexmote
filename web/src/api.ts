@@ -108,6 +108,11 @@ export type DeviceSummary = {
   hardwareDetails?: HardwareInventoryInfo;
   securityProfileId?: string | null;
   groupId?: string | null;
+  profileId?: string | null;
+  profileName?: string | null;
+  hasCustomOverride?: boolean;
+  appliedPolicyVersion?: number;
+  lastPolicySyncedAt?: string | null;
 };
 
 /**
@@ -1005,4 +1010,220 @@ export async function sendDevicePowerAction(deviceId: string, action: PowerActio
     throw new Error(data.message || "Güç eylemi iletilemedi.");
   }
   return data;
+}
+
+// =========================================================================
+// HİYERARŞİK PROFİL & POLİTİKA YÖNETİMİ API
+// =========================================================================
+
+export interface PolicyBranding {
+  companyName?: string | null;
+  agentDisplayName?: string | null;
+  logoBase64?: string | null;
+  trayIconBase64?: string | null;
+  aboutText?: string | null;
+  supportContact?: string | null;
+}
+
+export interface PolicyProtection {
+  agentProtection?: boolean | null;
+  protectionPasswordHash?: string | null;
+  allowAgentExit?: boolean | null;
+  allowServiceStop?: boolean | null;
+  allowAgentUninstall?: boolean | null;
+}
+
+export interface PolicyRemoteAccess {
+  mode?: string | null; // "unattended" | "prompt" | "auto_accept_idle"
+  promptTimeoutSeconds?: number | null;
+  defaultAction?: string | null; // "deny" | "allow"
+  idleTimeoutMinutes?: number | null;
+  showConnectionBanner?: boolean | null;
+  viewOnlyMode?: boolean | null;
+  allowRemoteTerminal?: boolean | null;
+  allowClipboard?: boolean | null;
+  allowFileTransfer?: boolean | null;
+}
+
+export interface UsbDeviceItem {
+  id: string;
+  name: string;
+  hardwareId?: string | null;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+}
+
+export interface PolicyUsb {
+  mode?: string | null; // "allow_all" | "block_all" | "block_storage" | "read_only" | "whitelist"
+  whitelist?: UsbDeviceItem[] | null;
+}
+
+export interface PolicyDocument {
+  version: number;
+  profileId?: string | null;
+  profileName?: string | null;
+  parentProfileId?: string | null;
+  branding?: PolicyBranding;
+  protection?: PolicyProtection;
+  remoteAccess?: PolicyRemoteAccess;
+  usb?: PolicyUsb;
+  customModules?: Record<string, string>;
+}
+
+export interface ProfileTreeNode {
+  id: string;
+  name: string;
+  parentProfileId?: string | null;
+  type: string; // "Company" | "Department" | "Location" | "Custom"
+  policyVersion: number;
+  deviceCount: number;
+  subProfileCount: number;
+  companyName?: string | null;
+  updatedAt: string;
+  children: ProfileTreeNode[];
+}
+
+export interface ProfileDetailResponse {
+  id: string;
+  name: string;
+  parentProfileId?: string | null;
+  type: string;
+  policyVersion: number;
+  enrollmentKey?: string | null;
+  ownPolicy: PolicyDocument;
+  effectivePolicy: PolicyDocument;
+  deviceCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProfileUpsertRequest {
+  name: string;
+  parentProfileId?: string | null;
+  type: string;
+  policy: PolicyDocument;
+  newProtectionPassword?: string | null;
+}
+
+export interface DevicePolicyOverrideRequest {
+  hasCustomOverride: boolean;
+  customPolicy?: PolicyDocument | null;
+}
+
+export interface BulkAssignProfileRequest {
+  deviceIds: string[];
+  targetProfileId?: string | null;
+}
+
+/** Hiyerarşik profil ağacını döner (Şirket > Departman > Lokasyon). */
+export async function getProfileTree(): Promise<ProfileTreeNode[]> {
+  const response = await fetch("/api/profiles/tree", { headers: authHeaders() });
+  if (!response.ok) throw new Error("Profil ağacı yüklenemedi.");
+  return response.json();
+}
+
+/** Belirli bir profilin detayını ve efektif politikasını döner. */
+export async function getProfile(id: string): Promise<ProfileDetailResponse> {
+  const response = await fetch(`/api/profiles/${id}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error("Profil detayı yüklenemedi.");
+  return response.json();
+}
+
+/** Yeni bir kurumsal profil oluşturur. */
+export async function createProfile(req: ProfileUpsertRequest): Promise<ProfileDetailResponse> {
+  const response = await fetch("/api/admin/profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(req)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Profil oluşturulamadı.");
+  return data;
+}
+
+/** Mevcut bir profili ve politikasını günceller. */
+export async function updateProfile(id: string, req: ProfileUpsertRequest): Promise<ProfileDetailResponse> {
+  const response = await fetch(`/api/admin/profiles/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(req)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Profil güncellenemedi.");
+  return data;
+}
+
+/** Bir profili siler (alt profili veya bağlı cihazı varsa uyarı verir). */
+export async function deleteProfile(id: string): Promise<void> {
+  const response = await fetch(`/api/admin/profiles/${id}`, {
+    method: "DELETE",
+    headers: authHeaders()
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.message || "Profil silinemedi.");
+  }
+}
+
+/** Bir profili alt politikalarıyla birlikte kopyalar/klonlar. */
+export async function cloneProfile(id: string, newName?: string): Promise<ProfileDetailResponse> {
+  const url = newName ? `/api/admin/profiles/${id}/clone?newName=${encodeURIComponent(newName)}` : `/api/admin/profiles/${id}/clone`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: authHeaders()
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Profil kopyalanamadı.");
+  return data;
+}
+
+/** "Politikayı Şimdi Uygula": Bu profile bağlı tüm cihazlara anlık SignalR zorlama sinyali gönderir. */
+export async function applyProfilePolicyNow(id: string): Promise<{ message: string }> {
+  const response = await fetch(`/api/admin/profiles/${id}/apply-now`, {
+    method: "POST",
+    headers: authHeaders()
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Politika anlık uygulama sinyali gönderilemedi.");
+  return data;
+}
+
+/** Çoklu cihazı seçilen bir profile toplu atar. */
+export async function bulkAssignProfile(req: BulkAssignProfileRequest): Promise<{ count: number }> {
+  const response = await fetch("/api/admin/devices/bulk-assign-profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(req)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Toplu profil atama başarısız.");
+  return data;
+}
+
+/** Tekil bir cihazı profile atar veya profilden çıkarır. */
+export async function assignDeviceProfile(deviceId: string, profileId: string | null): Promise<void> {
+  const response = await fetch(`/api/devices/${deviceId}/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(profileId)
+  });
+  if (!response.ok) throw new Error("Cihaz profili güncellenemedi.");
+}
+
+/** Cihaza özel override politikası belirler veya kaldırır. */
+export async function setDevicePolicyOverride(deviceId: string, req: DevicePolicyOverrideRequest): Promise<void> {
+  const response = await fetch(`/api/devices/${deviceId}/override-policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(req)
+  });
+  if (!response.ok) throw new Error("Cihaz özel politikası güncellenemedi.");
+}
+
+/** Cihazın hiyerarşik veya özel etkin (effective) politikasını döner. */
+export async function getDeviceEffectivePolicy(deviceId: string): Promise<PolicyDocument> {
+  const response = await fetch(`/api/devices/${deviceId}/effective-policy`, { headers: authHeaders() });
+  if (!response.ok) throw new Error("Cihaz etkin politikası alınamadı.");
+  return response.json();
 }

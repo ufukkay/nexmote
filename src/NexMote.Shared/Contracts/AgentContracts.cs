@@ -157,7 +157,12 @@ public sealed record DeviceSummary(
     string? SerialNumber = null,
     HardwareInventoryInfo? HardwareDetails = null,
     Guid? SecurityProfileId = null,
-    Guid? GroupId = null);
+    Guid? GroupId = null,
+    Guid? ProfileId = null,
+    string? ProfileName = null,
+    bool HasCustomOverride = false,
+    int AppliedPolicyVersion = 0,
+    DateTimeOffset? LastPolicySyncedAt = null);
 
 /// <summary>
 /// İstemci üzerinde çalıştırılan uzak komutların (CMD/PowerShell) denetim (audit) kaydı kontratı.

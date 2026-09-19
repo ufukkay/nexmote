@@ -85,11 +85,13 @@ builder.Services.AddAuthorizationBuilder()
 
 builder.Services.AddSingleton<IPasswordHasher<UserEntity>, PasswordHasher<UserEntity>>();
 builder.Services.AddSingleton<IPasswordHasher<SecurityProfileEntity>, PasswordHasher<SecurityProfileEntity>>();
+builder.Services.AddSingleton<IPasswordHasher<ProfileEntity>, PasswordHasher<ProfileEntity>>();
 builder.Services.AddSingleton<TotpService>();
 builder.Services.AddSingleton<UserAuthService>();
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddSingleton<SecurityProfileService>();
 builder.Services.AddSingleton<DeviceGroupService>();
+builder.Services.AddSingleton<ProfileService>();
 builder.Services.AddSingleton<EnrollmentKeyValidator>();
 builder.Services.AddSingleton<AlertService>();
 builder.Services.AddHostedService<AlertMonitorService>();
@@ -306,6 +308,7 @@ app.MapAuthEndpoints(authed, admin);
 app.MapDeviceEndpoints(authed, admin);
 admin.MapOrganizationEndpoints();
 app.MapSecurityProfileEndpoints(authed, admin);
+app.MapProfileEndpoints(authed, admin);
 app.MapSettingsEndpoints(authed, admin);
 
 // SignalR Canlı Hub rotası

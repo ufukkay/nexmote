@@ -34,6 +34,7 @@ public sealed class Worker : BackgroundService
     private readonly DeviceIdentityStore _identityStore;
     private readonly ILogger<Worker> _logger;
     private readonly IOptionsMonitor<AgentOptions> _optionsMonitor;
+    private readonly NexMote.Agent.Windows.Security.PolicyManager _policyManager;
     private HubConnection? _hubConnection;
     private DateTimeOffset _lastUpdateCheckUtc = DateTimeOffset.MinValue;
     private int _updateDownloadInProgress;
@@ -46,12 +47,14 @@ public sealed class Worker : BackgroundService
         AgentClient client,
         DeviceIdentityStore identityStore,
         IOptionsMonitor<AgentOptions> optionsMonitor,
+        NexMote.Agent.Windows.Security.PolicyManager policyManager,
         ILogger<Worker> logger)
     {
         _client = client;
         _identityStore = identityStore;
-        _logger = logger;
         _optionsMonitor = optionsMonitor;
+        _policyManager = policyManager;
+        _logger = logger;
         _lastServerUrl = NormalizeServerUrl(_optionsMonitor.CurrentValue.ServerUrl);
 
         // ServerUrl gerçekten değiştiğinde kimliği sıfırlayıp yeni sunucuya yeniden kaydol.
@@ -81,6 +84,9 @@ public sealed class Worker : BackgroundService
 
         // 1. UAC ve SAS politikalarını uzaktan desteğe uygun hale getir
         EnsureUacVisibleToRemoteSupport();
+
+        // 1b. Ağ bağlantısını beklemeden diskteki son geçerli politikayı (USB, koruma) anında zorla
+        _policyManager.EnforceStartupPolicy();
 
         // 2. Açılışta hiç beklemeden Tray ve InputHelper süreçlerini aktif konsol oturumuna (Winlogon / Default) enjekte et
         EnsureTrayRunning();
@@ -115,6 +121,9 @@ public sealed class Worker : BackgroundService
                 _logger.LogInformation("Heartbeat iletildi. DeviceId: {DeviceId}", identity.DeviceId);
                 isFirstSuccess = true;
                 consecutiveNotFoundCount = 0;
+
+                // Kurumsal güvenlik ve USB politikasını sunucuyla senkronize et
+                await _policyManager.SyncAndEnforcePolicyAsync(_lastServerUrl, identity, stoppingToken);
 
                 // SignalR üzerinden doğrudan web terminal komutlarını dinle (SYSTEM yetkisiyle)
                 await EnsureHubConnectedAsync(identity, stoppingToken);
@@ -272,6 +281,12 @@ public sealed class Worker : BackgroundService
                 _logger.LogInformation("SYSTEM yetkili SAS (Ctrl+Alt+Del / Kilit Aç) sinyali alındı. Session 0 çekirdeğinde yürütülüyor...");
                 SasServiceHelper.SendSas();
                 TrySendSasToActiveSession();
+            });
+
+            _hubConnection.On("PolicySyncRequired", () =>
+            {
+                _logger.LogInformation("Sunucudan anlık politika güncelleme sinyali (PolicySyncRequired) alındı. Senkronizasyon başlatılıyor...");
+                _ = _policyManager.SyncAndEnforcePolicyAsync(_lastServerUrl, identity, CancellationToken.None);
             });
 
             _hubConnection.On<Guid, string, string, bool>("ExecuteWebCommand", async (requestId, shell, command, runAsAdmin) =>

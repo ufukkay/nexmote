@@ -57,6 +57,7 @@ import {
   Layers,
   Folder,
   FolderPlus,
+  FolderTree,
   Plus,
   CheckSquare,
   Square
@@ -124,7 +125,13 @@ import {
   updateSecurityProfile,
   UserSummary,
   verifyMfa,
-  WindowsUpdateInfo
+  WindowsUpdateInfo,
+  assignDeviceProfile,
+  bulkAssignProfile,
+  getProfileTree,
+  PolicyDocument,
+  ProfileTreeNode,
+  setDevicePolicyOverride
 } from "./api";
 import { DetailTab, SortDirection, SortField, StatusFilter, View } from "./types";
 import {
@@ -144,6 +151,7 @@ import { AppHeader } from "./components/AppHeader";
 import { DownloadsView } from "./components/DownloadsView";
 import { AuditLogView } from "./components/AuditLogView";
 import { UsersView } from "./components/UsersView";
+import { ProfilesView } from "./components/ProfilesView";
 
 export function App() {
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
@@ -238,6 +246,14 @@ export function App() {
   const [accountCurrentPassword, setAccountCurrentPassword] = useState("");
   const [accountNewPassword, setAccountNewPassword] = useState("");
   const [accountConfirmNewPassword, setAccountConfirmNewPassword] = useState("");
+
+  // Hiyerarşik Profil ve Politika Yönetimi State
+  const [profileTreeList, setProfileTreeList] = useState<ProfileTreeNode[]>([]);
+  const [bulkProfileModalOpen, setBulkProfileModalOpen] = useState(false);
+  const [bulkTargetProfileId, setBulkTargetProfileId] = useState("");
+  const [overrideUsbMode, setOverrideUsbMode] = useState<string>("allow_all");
+  const [overrideRemoteMode, setOverrideRemoteMode] = useState<string>("unattended");
+  const [savingOverride, setSavingOverride] = useState(false);
   const [accountBusy, setAccountBusy] = useState(false);
   const [mfaSetupQr, setMfaSetupQr] = useState<string | null>(null);
   const [mfaSetupSecret, setMfaSetupSecret] = useState<string | null>(null);
@@ -1323,6 +1339,56 @@ export function App() {
     showToast(`"${profile.name}" şablon olarak alındı. Düzenleyip kaydedin.`);
   }
 
+  function renderProfileOptions(nodes: ProfileTreeNode[], prefix: string = ""): React.ReactNode[] {
+    let result: React.ReactNode[] = [];
+    for (const n of nodes) {
+      result.push(
+        <option key={n.id} value={n.id}>
+          {prefix ? `${prefix} > ` : ""}{n.name} ({n.type})
+        </option>
+      );
+      if (n.children && n.children.length > 0) {
+        result = result.concat(renderProfileOptions(n.children, prefix ? `${prefix} > ${n.name}` : n.name));
+      }
+    }
+    return result;
+  }
+
+  async function handleAssignDeviceProfile(deviceId: string, profileIdStr: string) {
+    try {
+      const profileId = profileIdStr.trim() ? profileIdStr.trim() : null;
+      await assignDeviceProfile(deviceId, profileId);
+      showToast("Cihaz profili güncellendi.");
+      refresh(false);
+    } catch (err: any) {
+      showToast(err.message || "Cihaz profili güncellenemedi.");
+    }
+  }
+
+  async function handleSaveDeviceOverride(deviceId: string, hasOverride: boolean) {
+    try {
+      setSavingOverride(true);
+      const customPolicy: PolicyDocument | null = hasOverride
+        ? {
+            version: 1,
+            usb: { mode: overrideUsbMode },
+            remoteAccess: { mode: overrideRemoteMode },
+          }
+        : null;
+
+      await setDevicePolicyOverride(deviceId, {
+        hasCustomOverride: hasOverride,
+        customPolicy,
+      });
+      showToast(hasOverride ? "Cihaza özel politika uygulandı." : "Özel politika kaldırıldı, profil mirasına dönüldü.");
+      refresh(false);
+    } catch (err: any) {
+      showToast(err.message || "Özel politika kaydedilemedi.");
+    } finally {
+      setSavingOverride(false);
+    }
+  }
+
   async function refresh(isManual: boolean = false) {
     setLoading(true);
     if (isManual) showToast("Cihazlar güncelleniyor...");
@@ -2120,6 +2186,21 @@ export function App() {
                                 <span className={`mono-text version-cell ${hasUpdate ? "warn" : ""}`}>
                                   v{d.agentVersion}
                                 </span>
+                                {d.profileName && (
+                                  <span className="badge badge-subtle" style={{ fontSize: "10.5px", marginLeft: 6 }} title="Bağlı Olduğu Kurumsal Profil">
+                                    {d.profileName}
+                                  </span>
+                                )}
+                                {d.hasCustomOverride && (
+                                  <span className="badge badge-warning" style={{ fontSize: "10px", marginLeft: 4 }} title="Cihaza Özel Politika Override'ı Etkin">
+                                    Özel
+                                  </span>
+                                )}
+                                {d.appliedPolicyVersion === 0 && d.profileId && (
+                                  <span className="badge badge-danger" style={{ fontSize: "10px", marginLeft: 4 }} title="Politika Henüz Senkronize Edilmedi">
+                                    Policy Outdated
+                                  </span>
+                                )}
                               </td>
 
                               <td className="table-time-col">
@@ -2150,6 +2231,22 @@ export function App() {
                 {selectedDeviceIds.size > 0 && (
                   <div className="bulk-bar">
                     <span className="bulk-count">{selectedDeviceIds.size} cihaz seçildi</span>
+                    {currentUser?.role === "Admin" && (
+                      <button
+                        className="bulk-btn bulk-btn-secondary"
+                        onClick={async () => {
+                          try {
+                            const pTree = await getProfileTree();
+                            setProfileTreeList(pTree);
+                            setBulkProfileModalOpen(true);
+                          } catch (err: any) {
+                            showToast(err.message || "Profil listesi alınamadı.");
+                          }
+                        }}
+                      >
+                        <FolderTree size={13} /> Profile Ata...
+                      </button>
+                    )}
                     <button className="bulk-btn bulk-btn-primary" onClick={handleBulkUpdateAgents}>
                       Toplu ajan güncelle
                     </button>
@@ -2599,6 +2696,113 @@ export function App() {
                               </div>
                             );
                           })()}
+                        </div>
+                      )}
+
+                      {currentUser?.role === "Admin" && (
+                        <div className="bento-spec-item" style={{ gridColumn: "1 / -1", background: "var(--bg-hover)", padding: "12px 14px", borderRadius: "8px", border: "1px solid var(--border-subtle)", marginTop: "10px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                            <span className="bento-spec-label" style={{ fontWeight: 600, color: "var(--text-main)" }}>
+                              <FolderTree size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />
+                              Hiyerarşik Kurumsal Profil &amp; Politika
+                            </span>
+                            <div style={{ display: "flex", gap: "6px" }}>
+                              {selectedDevice.hasCustomOverride ? (
+                                <span className="badge badge-warning">Özel Politika Aktif</span>
+                              ) : (
+                                <span className="badge badge-subtle">Profil Mirası</span>
+                              )}
+                              <span className="badge badge-subtle">v{selectedDevice.appliedPolicyVersion || 0}</span>
+                              {selectedDevice.appliedPolicyVersion === 0 && selectedDevice.profileId && (
+                                <span className="badge badge-danger">Policy Outdated</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="form-group" style={{ marginBottom: "10px" }}>
+                            <label style={{ fontSize: "11.5px", color: "var(--text-dim)", display: "block", marginBottom: "4px" }}>
+                              Bağlı Profil (Şirket &gt; Departman &gt; Lokasyon):
+                            </label>
+                            <select
+                              className="form-input"
+                              style={{ height: 32, fontSize: "12.5px" }}
+                              value={selectedDevice.profileId ?? ""}
+                              onChange={(e) => handleAssignDeviceProfile(selectedDevice.id, e.target.value)}
+                            >
+                              <option value="">— Profil Atanmamış (Varsayılan Politika)</option>
+                              {renderProfileOptions(profileTreeList)}
+                            </select>
+                          </div>
+
+                          {/* Override Toggles */}
+                          <div style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: "10px", marginTop: "10px" }}>
+                            <div style={{ display: "flex", gap: "16px", marginBottom: "8px", alignItems: "center" }}>
+                              <label style={{ fontSize: "12px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <input
+                                  type="radio"
+                                  name="policyOverrideChoice"
+                                  checked={!selectedDevice.hasCustomOverride}
+                                  onChange={() => handleSaveDeviceOverride(selectedDevice.id, false)}
+                                />
+                                <strong>Profil Politikasını Kullan (Miras)</strong>
+                              </label>
+                              <label style={{ fontSize: "12px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <input
+                                  type="radio"
+                                  name="policyOverrideChoice"
+                                  checked={selectedDevice.hasCustomOverride}
+                                  onChange={() => handleSaveDeviceOverride(selectedDevice.id, true)}
+                                />
+                                <strong>Özel Politika Kullan (Override)</strong>
+                              </label>
+                            </div>
+
+                            {selectedDevice.hasCustomOverride && (
+                              <div style={{ background: "var(--bg-surface)", padding: "10px", borderRadius: "6px", border: "1px solid var(--border-color)", marginTop: "8px" }}>
+                                <div style={{ fontSize: "11.5px", fontWeight: 600, marginBottom: "8px", color: "var(--text-main)" }}>
+                                  Bu Cihaza Özel Ayarlar (Departman Politikasını Ezer):
+                                </div>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                                  <div>
+                                    <label style={{ fontSize: "11px", color: "var(--text-dim)", display: "block" }}>USB Politikası:</label>
+                                    <select
+                                      className="form-input"
+                                      style={{ height: 28, fontSize: "11.5px" }}
+                                      value={overrideUsbMode}
+                                      onChange={(e) => setOverrideUsbMode(e.target.value)}
+                                    >
+                                      <option value="allow_all">USB Serbest</option>
+                                      <option value="block_storage">Depolama Yasak</option>
+                                      <option value="read_only">Salt Okunur (Read Only)</option>
+                                      <option value="block_all">Tamamen Yasak</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: "11px", color: "var(--text-dim)", display: "block" }}>Bağlantı Onayı:</label>
+                                    <select
+                                      className="form-input"
+                                      style={{ height: 28, fontSize: "11.5px" }}
+                                      value={overrideRemoteMode}
+                                      onChange={(e) => setOverrideRemoteMode(e.target.value)}
+                                    >
+                                      <option value="unattended">Doğrudan Bağlan (İzinsiz)</option>
+                                      <option value="prompt">Kullanıcıdan Onay İste</option>
+                                      <option value="auto_accept_idle">Boştaysa Otomatik Kabul</option>
+                                    </select>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-primary"
+                                  style={{ marginTop: "10px", height: "28px", fontSize: "11.5px" }}
+                                  disabled={savingOverride}
+                                  onClick={() => handleSaveDeviceOverride(selectedDevice.id, true)}
+                                >
+                                  {savingOverride ? "Kaydediliyor..." : "Özel Politikayı Kaydet ve Cihaza İlet"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -4289,6 +4493,20 @@ export function App() {
           />
         )}
 
+        {/* View: Hiyerarşik Profiller & Politikalar (Admin) */}
+        {view === "profiles" && currentUser?.role === "Admin" && (
+          <ProfilesView
+            devices={devices}
+            onSelectDevice={(devId) => {
+              const dev = devices.find((d) => d.id === devId);
+              if (dev) {
+                setSelectedDeviceId(dev.id);
+                setView("device-detail");
+              }
+            }}
+          />
+        )}
+
         {/* View: Şirketler, Departmanlar & Güvenlik Yönetimi (Admin) */}
         {view === "device-groups" && currentUser?.role === "Admin" && (
           <div className="content-pane">
@@ -5588,6 +5806,66 @@ export function App() {
                   onClick={handleSaveDeviceAssignments}
                 >
                   {assigningDevices ? "Kaydediliyor..." : `Kaydet ve Ata (${assignSelectedDeviceIds.size} Cihaz)`}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Toplu Profile Atama */}
+        {bulkProfileModalOpen && (
+          <div className="modal-backdrop" onClick={() => setBulkProfileModalOpen(false)}>
+            <div className="modal-dialog" style={{ maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title-with-icon">
+                  <FolderTree size={18} style={{ color: "var(--primary)" }} />
+                  <div>
+                    <h3 className="modal-title">Seçili {selectedDeviceIds.size} Cihazı Profile Ata</h3>
+                    <p className="modal-subtitle">Cihazların bağlanacağı kurumsal profil ağacını belirleyin.</p>
+                  </div>
+                </div>
+                <button type="button" className="modal-close-btn" onClick={() => setBulkProfileModalOpen(false)}>×</button>
+              </div>
+              <div className="modal-body">
+                <p style={{ fontSize: "12.5px", color: "var(--text-muted)", marginBottom: 14 }}>
+                  Seçilen {selectedDeviceIds.size} adet cihaza bu profil atanacak ve tüm cihazlara anında SignalR ile yeni politika zorlama sinyali gönderilecektir.
+                </p>
+                <div className="form-group">
+                  <label style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-main)" }}>Hedef Kurumsal Profil</label>
+                  <select
+                    className="form-input"
+                    style={{ height: 34, fontSize: "12.5px", marginTop: 4 }}
+                    value={bulkTargetProfileId}
+                    onChange={(e) => setBulkTargetProfileId(e.target.value)}
+                  >
+                    <option value="">— Profilden Çıkar (Varsayılan Politika)</option>
+                    {renderProfileOptions(profileTreeList)}
+                  </select>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn-secondary" onClick={() => setBulkProfileModalOpen(false)}>
+                  İptal
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={async () => {
+                    try {
+                      const res = await bulkAssignProfile({
+                        deviceIds: Array.from(selectedDeviceIds),
+                        targetProfileId: bulkTargetProfileId ? bulkTargetProfileId : null,
+                      });
+                      showToast(`${res.count} adet cihaz başarıyla profile atandı ve politika sinyali iletildi.`);
+                      setBulkProfileModalOpen(false);
+                      setSelectedDeviceIds(new Set());
+                      refresh(true);
+                    } catch (err: any) {
+                      showToast(err.message || "Toplu atama yapılamadı.");
+                    }
+                  }}
+                >
+                  Ata ve Politikayı Uygula ({selectedDeviceIds.size} Cihaz)
                 </button>
               </div>
             </div>

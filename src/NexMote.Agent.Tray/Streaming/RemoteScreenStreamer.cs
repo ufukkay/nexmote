@@ -37,7 +37,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     private readonly object _qualityLock = new();
     private readonly ConcurrentDictionary<int, long> _lastAckedSequencePerDisplay = new();
     private readonly ConcurrentDictionary<long, long> _inFlightFrameSentTicks = new();
+    private readonly ConcurrentDictionary<int, bool> _pendingResetPerDisplay = new();
+    private readonly CaptureHelperClient _captureHelper = new();
     private long _lastRemoteInputTicks;
+    private Guid _dedupSessionId;
+    private long _lastProcessedInputSequence;
     private readonly Dictionary<Guid, ActiveFileTransfer> _activeTransfers = new();
     private NamedPipeClientStream? _inputHelperPipe;
     private StreamWriter? _inputHelperWriter;
@@ -279,9 +283,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             }
             else if (string.Equals(type, "refresh-screen", StringComparison.OrdinalIgnoreCase))
             {
+                // Hash/DXGI durumu artık izole capture-helper alt sürecinde yaşıyor; buradan doğrudan
+                // sıfırlanamaz. Bir sonraki yakalama isteğine "resetHash" bayrağı olarak taşınır.
                 for (var i = 1; i <= ScreenCapture.GetDisplayCount(); i++)
                 {
-                    ScreenCapture.ResetHash(i);
+                    _pendingResetPerDisplay[i] = true;
                 }
                 if (_activeSessionId.HasValue)
                 {
@@ -299,9 +305,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 // Kilit açma sonrası ekran görüntüsünü anında tazeleyip teknisyene zorunlu olarak gönder
                 for (var i = 1; i <= ScreenCapture.GetDisplayCount(); i++)
                 {
-                    ScreenCapture.ResetHash(i);
+                    _pendingResetPerDisplay[i] = true;
                 }
-                DxgiScreenCapture.Instance.Reset();
                 if (_activeSessionId.HasValue)
                 {
                     _ = SendScreenInfoAsync(_activeSessionId.Value);
@@ -401,7 +406,17 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 try
                 {
                     await _connection.InvokeAsync("JoinDeviceSession", _activeSessionId.Value, _identity.DeviceId, _identity.AgentToken);
-                    StartStreaming(_activeSessionId.Value);
+
+                    // SignalR Hub'ının kısa süreli kopup yeniden bağlanması (Wi-Fi dalgalanması, IIS/proxy
+                    // takılması vb.) çoğunlukla P2P WebRTC veri kanalını hiç etkilemez. Yayın döngüleri hâlâ
+                    // çalışıyorsa StartStreaming'i tekrar çağırmıyoruz: aksi halde her ufak Hub kesintisinde
+                    // sağlıklı WebRTC bağlantısı sıfırdan ICE müzakeresine zorlanır ve görüntü/girdi akışı
+                    // saniyelik olarak donar — asıl "saniyelik kesinti" şikayetinin kaynağı buydu.
+                    var streamingAlreadyActive = _streamCancellation is { IsCancellationRequested: false };
+                    if (!streamingAlreadyActive)
+                    {
+                        StartStreaming(_activeSessionId.Value);
+                    }
                 }
                 catch { }
             }
@@ -450,30 +465,40 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
     {
         if (_connection is null || _identity is null) return;
         bool accepted = false;
-        try
-        {
-            var tcs = new TaskCompletionSource<bool>();
-            var thread = new Thread(() =>
-            {
-                try
-                {
-                    using var dlg = new ConsentDialogForm(req.TechnicianName, req.TimeoutSeconds, req.DefaultAction);
-                    dlg.ShowDialog();
-                    tcs.SetResult(dlg.Accepted);
-                }
-                catch (Exception ex)
-                {
-                    tcs.SetException(ex);
-                }
-            });
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
 
-            accepted = await tcs.Task;
-        }
-        catch
+        // Mod 3 (Kullanıcı Yoksa Otomatik Bağlan): Eğer boşta kalma eşiği aşılmışsa kullanıcı bilgisayar başında değildir, otomatik kabul et
+        if (req.IdleTimeoutMinutes.HasValue && req.IdleTimeoutMinutes.Value > 0 &&
+            NexMote.Agent.Tray.Platform.UserActivityHelper.IsUserIdle(req.IdleTimeoutMinutes.Value))
         {
-            accepted = string.Equals(req.DefaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase);
+            accepted = true;
+        }
+        else
+        {
+            try
+            {
+                var tcs = new TaskCompletionSource<bool>();
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        using var dlg = new ConsentDialogForm(req.TechnicianName, req.TimeoutSeconds, req.DefaultAction);
+                        dlg.ShowDialog();
+                        tcs.SetResult(dlg.Accepted);
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.SetException(ex);
+                    }
+                });
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+
+                accepted = await tcs.Task;
+            }
+            catch
+            {
+                accepted = string.Equals(req.DefaultAction, SecurityProfileConstants.ActionAllow, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         try
@@ -682,6 +707,28 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
             if (input is null || _activeSessionId != input.SessionId)
             {
                 return;
+            }
+
+            // Mükerrer teslimat koruması: aynı girdi olayı hem WebRTC P2P (SCTP yeniden-iletim) hem de
+            // SignalR röle yolundan ya da bir aktarım katmanı hatası nedeniyle iki kez gelebiliyor —
+            // örn. bir tuşa tek basıldığında karşı tarafta "dd" gibi mükerrer karakter görülmesi bu
+            // yüzdendi. Teknisyen her olaya artan bir Sequence numarası veriyor; aynı oturum içinde daha
+            // önce işlenmiş veya daha eski bir Sequence tekrar gelirse sessizce yok sayılır.
+            if (input.Sequence > 0)
+            {
+                if (_dedupSessionId != input.SessionId)
+                {
+                    _dedupSessionId = input.SessionId;
+                    _lastProcessedInputSequence = 0;
+                }
+
+                if (input.Sequence <= _lastProcessedInputSequence)
+                {
+                    SendInputAck(input, true);
+                    return;
+                }
+
+                _lastProcessedInputSequence = input.Sequence;
             }
 
             var applied = TrySendToInputHelper(payload);
@@ -1032,17 +1079,20 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (_connection is null || _connection.State != HubConnectionState.Connected)
+            // Hub (SignalR) yalnızca kontrol kanalıdır; WebRTC P2P veri kanalı canlıysa kare göndermeye devam
+            // edebiliriz. Yalnızca Hub'a bakıp beklemek, kısa süreli Hub dalgalanmalarında P2P hâlâ çalışırken
+            // bile akışı saniyelerce durdurup "saniyelik kesinti" hissi yaratıyordu.
+            if ((_connection is null || _connection.State != HubConnectionState.Connected) && _webRtc?.IsConnected != true)
             {
                 var reconnected = false;
                 for (int i = 0; i < 20; i++)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
                     await Task.Delay(500, cancellationToken);
-                    if (_connection?.State == HubConnectionState.Connected)
+                    if (_connection?.State == HubConnectionState.Connected || _webRtc?.IsConnected == true)
                     {
                         reconnected = true;
-                        ScreenCapture.ResetHash(displayIndex);
+                        _pendingResetPerDisplay[displayIndex] = true;
                         break;
                     }
                 }
@@ -1089,11 +1139,11 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                 if (initialBurst > 0)
                 {
                     initialBurst--;
-                    ScreenCapture.ResetHash(displayIndex);
+                    _pendingResetPerDisplay[displayIndex] = true;
                 }
                 else if (forceSend)
                 {
-                    ScreenCapture.ResetHash(displayIndex);
+                    _pendingResetPerDisplay[displayIndex] = true;
                     refinementSent = false;
                 }
 
@@ -1118,9 +1168,12 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                     quality = Math.Clamp(GetCurrentQuality(), 54, 90);
                 }
 
-                var frame = ScreenCapture.CaptureJpegBase64(displayIndex, quality, forceSend);
+                var resetHash = _pendingResetPerDisplay.TryRemove(displayIndex, out var pending) && pending;
+                var frame = await _captureHelper.CaptureJpegBase64Async(displayIndex, quality, forceSend, resetHash, cancellationToken);
+                var hubConnected = _connection?.State == HubConnectionState.Connected;
+                var p2pConnected = _webRtc?.IsConnected == true;
 
-                if (frame is not null && _connection?.State == HubConnectionState.Connected)
+                if (frame is not null && (hubConnected || p2pConnected))
                 {
                     var bounds = ScreenCapture.GetDisplayBoundsPublic(displayIndex);
                     sequence++;
@@ -1151,9 +1204,9 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
                         sentViaP2p = false;
                     }
 
-                    if (!sentViaP2p)
+                    if (!sentViaP2p && hubConnected)
                     {
-                        await _connection.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
+                        await _connection!.InvokeAsync("SendSignal", sessionId, "screen-frame-multi", payload, cancellationToken);
                     }
 
                     if (!isRefinement)
@@ -1396,6 +1449,8 @@ internal sealed class RemoteScreenStreamer : IAsyncDisposable
         {
             await _connection.DisposeAsync();
         }
+
+        await _captureHelper.DisposeAsync();
 
         lock (_pipeLock)
         {
